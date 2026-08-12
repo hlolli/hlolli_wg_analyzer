@@ -1,0 +1,368 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-unix:
+    name: ${{ matrix.name }} ${{ matrix.build_type }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC x86-64
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            arch: x86_64
+            build_type: Debug
+          - name: Linux GCC x86-64
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            arch: x86_64
+            build_type: Release
+          - name: Linux Clang x86-64
+            os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+            arch: x86_64
+            build_type: Debug
+          - name: Linux Clang x86-64
+            os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+            arch: x86_64
+            build_type: Release
+          - name: macOS AppleClang Arm64
+            os: macos-15
+            cc: clang
+            cxx: clang++
+            arch: arm64
+            build_type: Debug
+          - name: macOS AppleClang Arm64
+            os: macos-15
+            cc: clang
+            cxx: clang++
+            arch: arm64
+            build_type: Release
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check host architecture
+        shell: bash
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_REGRESSION_TESTS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install
+        run: cmake --install build --prefix install
+      - name: Installed C and C++ clients
+        shell: bash
+        run: |
+          "$CC" -std=c11 -Wall -Wextra -Wpedantic -Werror \
+            -Wconversion -Wformat=2 -Wshadow -Wstrict-prototypes \
+            -Iinstall/include tests/public_client_tests.c \
+            install/lib/libhlolli_wg_analyzer_core.a -lm \
+            -o "$RUNNER_TEMP/hwa-client-c"
+          "$RUNNER_TEMP/hwa-client-c"
+          "$CXX" -x c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+            -Wconversion -Wformat=2 -Wshadow \
+            -Iinstall/include -c tests/public_client_tests.c \
+            -o "$RUNNER_TEMP/hwa-client-cxx.o"
+          "$CXX" "$RUNNER_TEMP/hwa-client-cxx.o" \
+            install/lib/libhlolli_wg_analyzer_core.a -lm \
+            -o "$RUNNER_TEMP/hwa-client-cxx"
+          "$RUNNER_TEMP/hwa-client-cxx"
+
+  native-windows:
+    name: Windows MSVC x86-64 ${{ matrix.build_type }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure
+        run: >-
+          cmake -S . -B build -A x64
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_REGRESSION_TESTS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel 2
+      - name: Test
+        run: >-
+          ctest --test-dir build -C ${{ matrix.build_type }}
+          --output-on-failure
+      - name: Install
+        run: >-
+          cmake --install build --config ${{ matrix.build_type }}
+          --prefix install
+      - name: Installed C and C++ clients
+        shell: pwsh
+        run: |
+          $runtime = if ("${{ matrix.build_type }}" -eq "Debug") { "/MDd" } else { "/MD" }
+          cl /nologo /TC $runtime /W4 /WX /permissive- /I install\include `
+            tests\public_client_tests.c `
+            install\lib\hlolli_wg_analyzer_core.lib `
+            /Fe:"$env:RUNNER_TEMP\hwa-client-c.exe"
+          & "$env:RUNNER_TEMP\hwa-client-c.exe"
+          cl /nologo /TP /std:c++17 /EHsc $runtime /W4 /WX /permissive- /I install\include `
+            tests\public_client_tests.c `
+            install\lib\hlolli_wg_analyzer_core.lib `
+            /Fe:"$env:RUNNER_TEMP\hwa-client-cxx.exe"
+          & "$env:RUNNER_TEMP\hwa-client-cxx.exe"
+
+  linux-i686:
+    name: Linux GCC i686 subset
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
+      - name: Configure
+        run: >-
+          cmake -S . -B build-i686
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_FLAGS=-m32
+          -DCMAKE_EXE_LINKER_FLAGS=-m32
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_REGRESSION_TESTS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build-i686 --parallel 2
+      - name: Run 32-bit subset
+        run: >-
+          ctest --test-dir build-i686 --output-on-failure
+          -R '^(unit\.(sha256|dsp|features|wav-reader-stage1|portability|stage9-persistence)|regression\.wav-malformed)$'
+      - name: Check binary width
+        run: file build-i686/hlolli-wg-analyzer | grep -q '32-bit'
+
+  linux-ppc64:
+    name: Linux GCC ppc64 big-endian subset
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross compiler and emulator
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          gcc-powerpc64-linux-gnu g++-powerpc64-linux-gnu
+          libc6-dev-ppc64-cross qemu-user
+      - name: Configure
+        run: >-
+          cmake -S . -B build-ppc64
+          -DCMAKE_SYSTEM_NAME=Linux
+          -DCMAKE_SYSTEM_PROCESSOR=ppc64
+          -DCMAKE_C_COMPILER=powerpc64-linux-gnu-gcc
+          '-DCMAKE_CROSSCOMPILING_EMULATOR=qemu-ppc64;-L;/usr/powerpc64-linux-gnu'
+          -DCMAKE_BUILD_TYPE=Release
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_REGRESSION_TESTS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build-ppc64 --parallel 2
+      - name: Run big-endian subset
+        run: >-
+          ctest --test-dir build-ppc64 --output-on-failure
+          -R '^(unit\.(sha256|dsp|features|wav-reader-stage1|portability|stage9-persistence)|regression\.wav-malformed)$'
+      - name: Check binary byte order
+        run: file build-ppc64/hlolli-wg-analyzer | grep -q 'MSB'
+
+  wasm-wasi:
+    name: WASI portable module
+    runs-on: ubuntu-24.04
+    env:
+      WASI_SDK_VERSION: '24'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+      - uses: bytecodealliance/actions/wasm-tools/setup@v1
+      - name: Install WASI SDK
+        shell: bash
+        run: |
+          curl -fsSL \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            -o "$RUNNER_TEMP/wasi-sdk.tar.gz"
+          mkdir "$RUNNER_TEMP/wasi-sdk"
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" \
+            -C "$RUNNER_TEMP/wasi-sdk" --strip-components=1
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S portable -B build-wasm
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchains/wasm32-wasi.cmake"
+          -DHWA_WASI_CLANG="$RUNNER_TEMP/wasi-sdk/bin/clang"
+          -DHWA_WASI_SYSROOT="$RUNNER_TEMP/wasi-sdk/share/wasi-sysroot"
+          -DHWA_WASM_LD="$RUNNER_TEMP/wasi-sdk/bin/wasm-ld"
+          -DHWA_WASMTIME="$(command -v wasmtime)"
+          -DHWA_WASM_TOOLS="$(command -v wasm-tools)"
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build-wasm --parallel 2
+      - name: Test
+        run: >-
+          ctest --test-dir build-wasm --output-on-failure
+          -R '^wasm\.'
+
+  sanitizer-regression:
+    name: Clang ASan UBSan malformed WAVE regression
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-sanitize
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+          '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_BENCHMARKS=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_REGRESSION_TESTS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build-sanitize --parallel 2
+      - name: Malformed WAVE regression
+        run: >-
+          ctest --test-dir build-sanitize --output-on-failure
+          -R '^(unit\.(portability|public-client|stage9-persistence)|benchmark\.smoke|regression\.wav-malformed)$'
+
+  benchmark-smoke:
+    name: Benchmark contract smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-bench
+          -DCMAKE_BUILD_TYPE=Release
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_BENCHMARKS=ON
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build-bench --parallel 2 --target hwa_benchmark
+      - name: Benchmark and comparator smoke
+        run: >-
+          ctest --test-dir build-bench --output-on-failure
+          -R '^benchmark\.'
+
+  fuzz-linux-clang:
+    name: Linux Clang libFuzzer
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-fuzz
+          -DCMAKE_BUILD_TYPE=Release
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_FUZZERS=ON
+          -DBUILD_TESTING=ON
+      - name: Build fuzzers
+        run: >-
+          cmake --build build-fuzz --parallel 2
+          --target hwa_fuzz_wav hwa_fuzz_manifests
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+      - name: Run corpus fuzz smoke
+        run: >-
+          ctest --test-dir build-fuzz --output-on-failure
+          -R '^fuzz\.'
+
+  fuzz-macos-llvm:
+    name: macOS LLVM libFuzzer Arm64
+    runs-on: macos-15
+    env:
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check host architecture
+        shell: bash
+        run: test "$(uname -m)" = "arm64"
+      - name: Configure
+        shell: bash
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
+          test -x "$LLVM_PREFIX/bin/clang"
+          "$LLVM_PREFIX/bin/clang" -fsanitize=fuzzer,address \
+            -x c -o "$RUNNER_TEMP/fuzzer-probe" - <<'EOF'
+          int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+          { return (int)(size != 0 && data[0] == 0); }
+          EOF
+          cmake -S . -B build-fuzz \
+            -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHLOLLI_WG_ANALYZER_STRICT=ON \
+            -DHLOLLI_WG_ANALYZER_BUILD_FUZZERS=ON \
+            -DBUILD_TESTING=ON
+      - name: Build fuzzers
+        run: >-
+          cmake --build build-fuzz --parallel 2
+          --target hwa_fuzz_wav hwa_fuzz_manifests
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+      - name: Run corpus fuzz smoke
+        run: >-
+          ctest --test-dir build-fuzz --output-on-failure
+          -R '^fuzz\.'
+
+  fuzz-windows-msvc:
+    name: Windows MSVC libFuzzer x86-64
+    runs-on: windows-2022
+    env:
+      ASAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure
+        run: >-
+          cmake -S . -B build-fuzz -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DHLOLLI_WG_ANALYZER_STRICT=ON
+          -DHLOLLI_WG_ANALYZER_BUILD_FUZZERS=ON
+          -DBUILD_TESTING=ON
+      - name: Build fuzzers
+        run: >-
+          cmake --build build-fuzz --config Release --parallel 2
+          --target hwa_fuzz_wav hwa_fuzz_manifests
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+      - name: Run corpus fuzz smoke
+        run: >-
+          ctest --test-dir build-fuzz -C Release --output-on-failure
+          -R '^fuzz\.'

@@ -1,0 +1,5 @@
+event_id,kind,start_beats,duration_beats,midi_note,velocity,voice,tie,dynamic,mark,score_position,tempo_bpm
+tempo-1,tempo,0,0,,,,,,,m1,120
+n1,note,0,1,60,78,lead,start,mp,legato,m1b1,
+n2,note,1,1,60,82,lead,stop,mf,,m1b2,
+r1,rest,2,1,,,lead,none,,,m1b3,

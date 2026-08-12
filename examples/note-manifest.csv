@@ -1,0 +1,10 @@
+event_id,kind,start_beats,duration_beats,midi_note,velocity,voice,tie,dynamic,mark,score_position,tempo_bpm
+tempo-1,tempo,0,0,,,,,,,m1,120
+n1,note,0,1,60,78,lead,start,mp,legato,m1b1,
+n2,note,1,1,60,82,lead,stop,mf,,m1b2,
+n3a,note,2,1,64,88,lead,none,mf,chord,m1b3,
+n3b,note,2,1,67,84,lead,none,mf,chord,m1b3,
+r1,rest,3,1,,,lead,none,,,m1b4,
+o1,ornament,4,1,69,92,lead,none,f,trill,m2b1,
+tempo-2,tempo,5,0,,,,,,,m2,96
+c1,cadenza,5,2,,,lead,none,p,free,m2b2,
