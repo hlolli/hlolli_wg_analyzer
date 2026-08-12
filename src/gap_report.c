@@ -4572,7 +4572,9 @@ int hwa_gap_report_candidate_catalog_fits(
         case HWA_GAP_REPORT_SOURCE_EXPERIMENT:
             if (count == 0U ||
                 count > options->experiment.max_responses ||
+#if SIZE_MAX > UINT64_MAX
                 count > UINT64_MAX / UINT64_C(2) ||
+#endif
                 options->experiment.max_cases < 2U ||
                 options->experiment.max_jobs < 2U ||
                 count > SIZE_MAX / 2U ||
@@ -5260,7 +5262,9 @@ int hwa_gap_report_manifest_validate_bytes(
     else copied = *options;
     if (error != NULL && error_size != 0U) error[0] = '\0';
     if (data == NULL || size > copied.max_manifest_bytes ||
-        (uint64_t)size == UINT64_MAX ||
+#if SIZE_MAX >= UINT64_MAX
+        size >= (size_t)UINT64_MAX ||
+#endif
         hwa_gap_report_options_validate(&copied, error, error_size) != 0 ||
         hwa_gap_work_add(&live_work,
                          (uint64_t)size + UINT64_C(1),

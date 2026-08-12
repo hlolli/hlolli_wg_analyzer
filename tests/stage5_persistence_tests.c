@@ -555,8 +555,14 @@ static void test_mode_stress_and_retained_work(void)
 static int test_path(char *path, size_t path_size, const char *name)
 {
     static unsigned serial;
+#if defined(_WIN32)
+    const char *temporary = getenv("TEMP");
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+#else
+    const char *temporary = "/tmp";
+#endif
     int written = snprintf(path, path_size,
-                           "/tmp/hwa-stage5-%ld-%u-%s",
+                           "%s/hwa-stage5-%ld-%u-%s", temporary,
                            (long)HWA_TEST_PID(), serial++, name);
     return written > 0 && (size_t)written < path_size;
 }

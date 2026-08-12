@@ -105,9 +105,35 @@ static int mkdir_new(const char *path)
 static int remove_tree(const char *path)
 {
 #if defined(_WIN32)
-    char command[PATH_MAX + 32U];
-    int length = snprintf(command, sizeof(command), "rmdir /s /q \"%s\"", path);
-    return length > 0 && (size_t)length < sizeof(command) ? system(command) : -1;
+    WIN32_FIND_DATAA entry;
+    char pattern[PATH_MAX];
+    HANDLE search;
+    DWORD attributes = GetFileAttributesA(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) return 0;
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U)
+        return DeleteFileA(path) != 0 ? 0 : -1;
+    {
+        int length = snprintf(pattern, sizeof(pattern), "%s/*", path);
+        if (length < 0 || (size_t)length >= sizeof(pattern)) return -1;
+    }
+    search = FindFirstFileA(pattern, &entry);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            char child[PATH_MAX];
+            int length;
+            if (strcmp(entry.cFileName, ".") == 0 ||
+                strcmp(entry.cFileName, "..") == 0) continue;
+            length = snprintf(child, sizeof(child), "%s/%s", path,
+                              entry.cFileName);
+            if (length < 0 || (size_t)length >= sizeof(child) ||
+                remove_tree(child) != 0) {
+                (void)FindClose(search);
+                return -1;
+            }
+        } while (FindNextFileA(search, &entry) != 0);
+        (void)FindClose(search);
+    }
+    return RemoveDirectoryA(path) != 0 ? 0 : -1;
 #else
     struct stat facts;
     DIR *directory;

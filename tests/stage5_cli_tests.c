@@ -20,6 +20,7 @@
 #include <io.h>
 #include <process.h>
 #include <windows.h>
+#include "windows_test_process.h"
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -376,6 +377,7 @@ static int test_write_text(const char *path, const char *text)
 }
 #endif
 
+#if !defined(_WIN32)
 static int test_append(char *command,
                        size_t capacity,
                        size_t *length,
@@ -420,11 +422,17 @@ static int test_argument(char *command,
     return test_append(command, capacity, length, "'");
 #endif
 }
+#endif
 
 static int test_run(const TestFiles *files,
                     const char *const *arguments,
                     size_t argument_count)
 {
+#if defined(_WIN32)
+    return hwa_test_spawn_redirected(
+        analyzer_path, arguments, argument_count, NULL,
+        files->stdout_path, files->stderr_path);
+#else
     char command[PATH_MAX * 14U];
     size_t length = 0U;
     size_t index;
@@ -446,9 +454,6 @@ static int test_run(const TestFiles *files,
                        files->stderr_path)) return -1;
     status = system(command);
     if (status == -1) return -1;
-#if defined(_WIN32)
-    return status;
-#else
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 #endif
 }

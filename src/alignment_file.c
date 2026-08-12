@@ -20,6 +20,7 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <sys/stat.h>
+#include "windows_file_identity.h"
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -1164,8 +1165,7 @@ static int hwa_alignment_read_regular(const char *path,
     FILE *stream;
     unsigned char *buffer;
 #if defined(_WIN32)
-    _dev_t expected_device;
-    _ino_t expected_inode;
+    HWAWindowsFileIdentity expected_identity;
 #else
     dev_t expected_device;
     ino_t expected_inode;
@@ -1180,21 +1180,12 @@ static int hwa_alignment_read_regular(const char *path,
     }
 #if defined(_WIN32)
     {
-        struct _stat64 status;
-        if (_stat64(path, &status) != 0) {
+        if (hwa_windows_identity_from_path(path, &expected_identity) != 0) {
             hwa_set_error(error, error_size,
-                          "cannot inspect prior alignment '%s': %s",
-                          path, strerror(errno));
+                          "cannot inspect prior alignment '%s'", path);
             return -1;
         }
-        if ((status.st_mode & _S_IFMT) != _S_IFREG || status.st_size < 0) {
-            hwa_set_error(error, error_size,
-                          "prior alignment is not a regular file");
-            return -1;
-        }
-        size_u64 = (uint64_t)status.st_size;
-        expected_device = status.st_dev;
-        expected_inode = status.st_ino;
+        size_u64 = expected_identity.size;
     }
 #else
     {
@@ -1229,12 +1220,10 @@ static int hwa_alignment_read_regular(const char *path,
     }
 #if defined(_WIN32)
     {
-        struct _stat64 opened;
-        int descriptor = _fileno(stream);
-        if (descriptor < 0 || _fstat64(descriptor, &opened) != 0 ||
-            (opened.st_mode & _S_IFMT) != _S_IFREG || opened.st_size < 0 ||
-            opened.st_dev != expected_device || opened.st_ino != expected_inode ||
-            (uint64_t)opened.st_size != size_u64) {
+        HWAWindowsFileIdentity opened_identity;
+        if (hwa_windows_identity_from_stream(stream, &opened_identity) != 0 ||
+            !hwa_windows_identity_equal(&expected_identity,
+                                        &opened_identity)) {
             hwa_set_error(error, error_size,
                           "prior alignment changed before it was opened");
             (void)fclose(stream);

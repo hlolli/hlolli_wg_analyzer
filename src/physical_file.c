@@ -1450,10 +1450,12 @@ int hwa_physical_check_set_retained_bytes(
     uint64_t total = 0U;
     size_t index;
     if (set == NULL || bytes == NULL ||
+#if SIZE_MAX >= UINT64_MAX
         set->source_count > UINT64_MAX / sizeof(HWAPhysicalSource) ||
         set->check_count > UINT64_MAX / sizeof(HWAPhysicalCheck) ||
         set->finding_count > UINT64_MAX / sizeof(HWAPhysicalFinding) ||
         set->warning_count > UINT64_MAX / sizeof(HWAPhysicalWarning) ||
+#endif
         hwa_physical_add_bytes(
             &total, (uint64_t)set->source_count *
                         (uint64_t)sizeof(HWAPhysicalSource)) != 0 ||

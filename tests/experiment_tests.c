@@ -144,10 +144,16 @@ static int test_remove_tree(const char *path)
 static int test_files_open(TestFiles *files)
 {
     unsigned attempt;
+#if defined(_WIN32)
+    const char *temporary = getenv("TEMP");
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+#else
+    const char *temporary = "/tmp";
+#endif
     memset(files, 0, sizeof(*files));
     for (attempt = 0U; attempt < 100U; ++attempt) {
         int length = snprintf(files->root, sizeof(files->root),
-                              "/tmp/hwa-experiment-%ld-%u",
+                              "%s/hwa-experiment-%ld-%u", temporary,
                               test_pid(), attempt);
         if (length < 0 || (size_t)length >= sizeof(files->root)) return 0;
         if (test_mkdir(files->root) == 0) break;

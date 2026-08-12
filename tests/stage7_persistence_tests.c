@@ -1203,11 +1203,29 @@ int main(void)
     char bad[256];
     char locale_path[256];
     int pid = (int)HWA_TEST_PID();
-    (void)snprintf(first, sizeof(first), "/tmp/hwa-run-%d-a.hwa", pid);
-    (void)snprintf(second, sizeof(second), "/tmp/hwa-run-%d-b.hwa", pid);
-    (void)snprintf(bad, sizeof(bad), "/tmp/hwa-run-%d-bad.hwa", pid);
-    (void)snprintf(locale_path, sizeof(locale_path),
-                   "/tmp/hwa-run-%d-locale.hwa", pid);
+    int first_length;
+    int second_length;
+    int bad_length;
+    int locale_length;
+#if defined(_WIN32)
+    const char *temporary = getenv("TEMP");
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+#else
+    const char *temporary = "/tmp";
+#endif
+    first_length = snprintf(first, sizeof(first), "%s/hwa-run-%d-a.hwa",
+                            temporary, pid);
+    second_length = snprintf(second, sizeof(second), "%s/hwa-run-%d-b.hwa",
+                             temporary, pid);
+    bad_length = snprintf(bad, sizeof(bad), "%s/hwa-run-%d-bad.hwa",
+                          temporary, pid);
+    locale_length = snprintf(locale_path, sizeof(locale_path),
+                             "%s/hwa-run-%d-locale.hwa", temporary, pid);
+    if (first_length < 0 || (size_t)first_length >= sizeof(first) ||
+        second_length < 0 || (size_t)second_length >= sizeof(second) ||
+        bad_length < 0 || (size_t)bad_length >= sizeof(bad) ||
+        locale_length < 0 ||
+        (size_t)locale_length >= sizeof(locale_path)) return 1;
     test_round_trip(first, second);
     test_caps_and_hostile(first, bad);
     test_one_sided_feature(bad);

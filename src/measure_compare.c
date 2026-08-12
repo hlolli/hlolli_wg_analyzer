@@ -902,9 +902,14 @@ int hwa_measure_build_profile(HWAMeasurementSet *set,
                                                 &candidates[index])) {
             size_t key_size = hwa_measure_group_key_size(&candidates[index]);
             uint64_t string_bytes;
-            if (key_size == SIZE_MAX ||
-                strlen(candidates[index].item_role) > UINT64_MAX - 1U ||
-                strlen(candidates[index].value) > UINT64_MAX - 1U) {
+            if (key_size == SIZE_MAX
+#if SIZE_MAX >= UINT64_MAX
+                || strlen(candidates[index].item_role) >
+                    (size_t)(UINT64_MAX - 1U)
+                || strlen(candidates[index].value) >
+                    (size_t)(UINT64_MAX - 1U)
+#endif
+            ) {
                 hwa_set_error(error, error_size,
                               "measurement group string size overflows");
                 goto cleanup;
@@ -1690,6 +1695,7 @@ static int hwa_profile_build_comparison(
                       "profile comparison row limit exceeded");
         return -1;
     }
+#if SIZE_MAX >= UINT64_MAX
     if ((uint64_t)group_count >
             UINT64_MAX / (uint64_t)sizeof(*result->groups) ||
         (uint64_t)distribution_count >
@@ -1700,6 +1706,7 @@ static int hwa_profile_build_comparison(
                       "profile comparison storage overflows");
         return -1;
     }
+#endif
     array_bytes = (uint64_t)group_count * sizeof(*result->groups) +
                   (uint64_t)distribution_count *
                       (sizeof(*result->distributions) + sizeof(*result->gaps));

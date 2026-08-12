@@ -375,10 +375,11 @@ int hwa_dsp_covariance_correlation(const HwaDspRunningCovariance *stats,
     if (!isfinite(result)) {
         return HWA_DSP_NUMERIC_ERROR;
     }
-    if (result > 1.0L && result < 1.0L + 16.0L * LDBL_EPSILON) {
+    if (result > 1.0L &&
+        result < 1.0L + 16.0L * (long double)DBL_EPSILON) {
         result = 1.0L;
     } else if (result < -1.0L &&
-               result > -1.0L - 16.0L * LDBL_EPSILON) {
+               result > -1.0L - 16.0L * (long double)DBL_EPSILON) {
         result = -1.0L;
     }
     if (result < -1.0L || result > 1.0L) {

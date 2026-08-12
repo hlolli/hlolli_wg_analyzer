@@ -18,6 +18,7 @@
 #include <io.h>
 #include <process.h>
 #include <sys/stat.h>
+#include "windows_test_process.h"
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -292,6 +293,7 @@ static int setup_fixture(TestWorkspace *workspace)
     return failures == 0;
 }
 
+#if !defined(_WIN32)
 static int append_text(char *command,
                        size_t command_size,
                        size_t *length,
@@ -338,11 +340,17 @@ static int append_shell_argument(char *command,
     return append_text(command, command_size, length, "'");
 #endif
 }
+#endif
 
 static int run_analyzer(const TestWorkspace *workspace,
                         const char *const *arguments,
                         size_t argument_count)
 {
+#if defined(_WIN32)
+    return hwa_test_spawn_redirected(
+        analyzer_path, arguments, argument_count, NULL,
+        workspace->standard_output, workspace->standard_error);
+#else
     char command[PATH_MAX * 10U];
     size_t length = 0U;
     size_t index;
@@ -370,9 +378,6 @@ static int run_analyzer(const TestWorkspace *workspace,
     }
     status = system(command);
     if (status == -1) return -1;
-#if defined(_WIN32)
-    return status;
-#else
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 #endif
 }

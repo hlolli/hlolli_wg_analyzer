@@ -6879,19 +6879,20 @@ static int hwa_experiment_execute_work_preflight(
         HWA_EXEC_WORK_ARRAY(cells, size_t);
     }
     /* Absolute live paths include the full output root for each job/artifact. */
-    if ((uint64_t)output_root_length > UINT64_MAX - UINT64_C(384) ||
-        hwa_experiment_u64_multiply(
+#if SIZE_MAX >= UINT64_MAX
+    if (output_root_length >
+        (size_t)(UINT64_MAX - UINT64_C(384))) goto failed;
+#endif
+    if (hwa_experiment_u64_multiply(
             jobs, (uint64_t)output_root_length + UINT64_C(384),
             &bytes) != 0 ||
         hwa_experiment_work_add(&work, bytes, options->max_work_bytes,
                                 error, error_size) != 0 ||
-        (uint64_t)output_root_length > UINT64_MAX - UINT64_C(384) ||
         hwa_experiment_u64_multiply(
             artifacts, (uint64_t)output_root_length + UINT64_C(384),
             &bytes) != 0 ||
         hwa_experiment_work_add(&work, bytes, options->max_work_bytes,
                                 error, error_size) != 0 ||
-        (uint64_t)output_root_length > UINT64_MAX - UINT64_C(192) ||
         max_outputs_per_job > UINT64_MAX - UINT64_C(8) ||
         hwa_experiment_u64_multiply(
             max_outputs_per_job + UINT64_C(8),
@@ -6907,8 +6908,11 @@ static int hwa_experiment_execute_work_preflight(
         /* The read-only saved result coexists with the new raw result. */
         uint64_t duplicate = work - parsed_work -
             options->run.max_work_bytes;
-        if ((uint64_t)resume_root_length > UINT64_MAX - UINT64_C(192) ||
-            hwa_experiment_u64_multiply(
+#if SIZE_MAX >= UINT64_MAX
+        if (resume_root_length >
+            (size_t)(UINT64_MAX - UINT64_C(192))) goto failed;
+#endif
+        if (hwa_experiment_u64_multiply(
                 max_outputs_per_job + UINT64_C(8),
                 (uint64_t)resume_root_length + UINT64_C(192),
                 &bytes) != 0 ||
@@ -7972,7 +7976,10 @@ int hwa_experiment_manifest_validate_bytes(const unsigned char *data,
     else copied = *options;
     if (error != NULL && error_size != 0U) error[0] = '\0';
     if (data == NULL || size > copied.max_manifest_bytes ||
-        (uint64_t)size == UINT64_MAX || !hwa_experiment_options_valid(&copied) ||
+#if SIZE_MAX >= UINT64_MAX
+        size >= (size_t)UINT64_MAX ||
+#endif
+        !hwa_experiment_options_valid(&copied) ||
         hwa_experiment_work_add(&live_work,
                                 (uint64_t)size + UINT64_C(1),
                                 copied.max_work_bytes,

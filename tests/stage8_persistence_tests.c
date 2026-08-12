@@ -15,8 +15,10 @@
 #include <string.h>
 
 #if defined(_WIN32)
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#include <sys/stat.h>
 #else
 #include <unistd.h>
 #endif
@@ -29,9 +31,24 @@
 static int make_path(char path[256])
 {
 #if defined(_WIN32)
-    (void)snprintf(path, 256U, "hwa-stage8-persistence-%lu.tmp",
-                   (unsigned long)_getpid());
-    return 0;
+    static unsigned serial;
+    const char *temporary = getenv("TEMP");
+    unsigned attempt;
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+    for (attempt = 0U; attempt < 100U; ++attempt) {
+        int descriptor;
+        int written = snprintf(
+            path, 256U, "%s/hwa-stage8-persistence-%lu-%u.tmp", temporary,
+            (unsigned long)_getpid(), serial++);
+        if (written < 0 || written >= 256) return -1;
+        descriptor = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                           _S_IREAD | _S_IWRITE);
+        if (descriptor >= 0) {
+            if (_close(descriptor) != 0 || _unlink(path) != 0) return -1;
+            return 0;
+        }
+    }
+    return -1;
 #else
     int descriptor;
     (void)snprintf(path, 256U, "/tmp/hwa-stage8-persistence-XXXXXX");

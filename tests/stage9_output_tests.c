@@ -18,6 +18,7 @@
 #include <direct.h>
 #include <io.h>
 #include <process.h>
+#include <windows.h>
 #define HWA_TEST_MKDIR(path) _mkdir(path)
 #else
 #include <sys/stat.h>
@@ -97,10 +98,19 @@ static int exists(const char *path)
 static int make_directory(char path[256])
 {
 #if defined(_WIN32)
-    int written = snprintf(path, 256U, "hwa-stage9-output-%lu",
-                           (unsigned long)_getpid());
-    return written < 0 || written >= 256 || HWA_TEST_MKDIR(path) != 0
-        ? -1 : 0;
+    static unsigned serial;
+    char temporary[256];
+    DWORD temporary_size = GetTempPathA((DWORD)sizeof(temporary), temporary);
+    unsigned attempt;
+    if (temporary_size == 0U || temporary_size >= sizeof(temporary)) return -1;
+    for (attempt = 0U; attempt < 100U; ++attempt) {
+        int written = snprintf(path, 256U,
+                               "%s/hwa-stage9-output-%lu-%u", temporary,
+                               (unsigned long)_getpid(), serial++);
+        if (written < 0 || written >= 256) return -1;
+        if (HWA_TEST_MKDIR(path) == 0) return 0;
+    }
+    return -1;
 #else
     (void)snprintf(path, 256U, "/tmp/hwa-stage9-output-XXXXXX");
     return mkdtemp(path) == NULL ? -1 : 0;

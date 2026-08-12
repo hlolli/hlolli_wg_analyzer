@@ -15,6 +15,7 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <sys/stat.h>
+#include "windows_file_identity.h"
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -232,8 +233,8 @@ void hwa_sha256_hex(const unsigned char digest[32], char hex[65])
 typedef struct HWASha256FileIdentity {
     uint64_t size;
 #if defined(_WIN32)
-    _dev_t device;
-    _ino_t inode;
+    uint64_t device;
+    uint64_t inode;
 #else
     dev_t device;
     ino_t inode;
@@ -247,22 +248,20 @@ static int hwa_sha256_preflight_file(const char *path,
                                      size_t error_size)
 {
 #if defined(_WIN32)
-    struct _stat64 status;
-    if (_stat64(path, &status) != 0) {
+    HWAWindowsFileIdentity status;
+    if (hwa_windows_identity_from_path(path, &status) != 0) {
+        hwa_set_error(error, error_size, "cannot inspect hash input '%s'", path);
 #else
     struct stat status;
     if (stat(path, &status) != 0) {
-#endif
         hwa_set_error(error, error_size, "cannot inspect hash input '%s': %s",
                       path,
                       strerror(errno));
+#endif
         return -1;
     }
-#if defined(_WIN32)
-    if ((status.st_mode & _S_IFMT) != _S_IFREG) {
-#else
+#if !defined(_WIN32)
     if (!S_ISREG(status.st_mode)) {
-#endif
         hwa_set_error(error, error_size, "hash input is not a regular file");
         return -1;
     }
@@ -273,6 +272,11 @@ static int hwa_sha256_preflight_file(const char *path,
     identity->size = (uint64_t)status.st_size;
     identity->device = status.st_dev;
     identity->inode = status.st_ino;
+#else
+    identity->size = status.size;
+    identity->device = status.device;
+    identity->inode = status.file;
+#endif
     if (identity->size > max_bytes ||
         identity->size > UINT64_MAX / UINT64_C(8)) {
         hwa_set_error(error, error_size,
@@ -288,32 +292,40 @@ static int hwa_sha256_verify_open_file(FILE *stream,
                                        size_t error_size)
 {
 #if defined(_WIN32)
-    struct _stat64 status;
-    int descriptor = _fileno(stream);
-    if (descriptor < 0 || _fstat64(descriptor, &status) != 0) {
+    HWAWindowsFileIdentity status;
+    if (hwa_windows_identity_from_stream(stream, &status) != 0) {
+        hwa_set_error(error, error_size, "cannot inspect open hash input");
 #else
     struct stat status;
     int descriptor = fileno(stream);
     if (descriptor < 0 || fstat(descriptor, &status) != 0) {
-#endif
         hwa_set_error(error, error_size, "cannot inspect open hash input: %s",
                       strerror(errno));
+#endif
         return -1;
     }
-#if defined(_WIN32)
-    if ((status.st_mode & _S_IFMT) != _S_IFREG || status.st_size < 0) {
-#else
+#if !defined(_WIN32)
     if (!S_ISREG(status.st_mode) || status.st_size < 0) {
-#endif
         hwa_set_error(error, error_size, "hash input is not a regular file");
         return -1;
     }
     if (status.st_dev != identity->device || status.st_ino != identity->inode ||
         (uint64_t)status.st_size != identity->size) {
+#else
+    {
+        HWAWindowsFileIdentity expected;
+        expected.device = identity->device;
+        expected.file = identity->inode;
+        expected.size = identity->size;
+        if (!hwa_windows_identity_equal(&status, &expected)) {
+#endif
         hwa_set_error(error, error_size,
                       "hash input changed before it was opened");
         return -1;
     }
+#if defined(_WIN32)
+    }
+#endif
     return 0;
 }
 

@@ -173,7 +173,9 @@ static int hwa_grf_meta_size(FILE *stream,
                              size_t value,
                              const char *unit)
 {
+#if SIZE_MAX > UINT64_MAX
     if (value > UINT64_MAX) return -1;
+#endif
     return hwa_grf_meta_u64(stream, key, (uint64_t)value, unit);
 }
 
@@ -810,8 +812,6 @@ static int hwa_grf_bound_text(uint64_t *total, const char *text)
 {
     size_t length = text == NULL ? 0U : strlen(text);
     if (length > HWA_GR_FILE_MAX_FIELD_BYTES) return -1;
-    if ((uint64_t)length > (UINT64_MAX - UINT64_C(2)) / UINT64_C(2))
-        return -1;
     return hwa_grf_bound_add(
         total, (uint64_t)length * UINT64_C(2) + UINT64_C(2));
 }

@@ -21,6 +21,7 @@
 #if defined(_WIN32)
 #include <io.h>
 #include <sys/stat.h>
+#include "windows_file_identity.h"
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -951,8 +952,8 @@ static int hwa_item_read_regular(const char *path,
     FILE *stream;
     unsigned char *buffer;
 #if defined(_WIN32)
-    struct _stat64 before;
-    struct _stat64 opened;
+    HWAWindowsFileIdentity before;
+    HWAWindowsFileIdentity opened;
 #else
     struct stat before;
     struct stat opened;
@@ -966,8 +967,7 @@ static int hwa_item_read_regular(const char *path,
         return -1;
     }
 #if defined(_WIN32)
-    if (_stat64(path, &before) != 0 ||
-        (before.st_mode & _S_IFMT) != _S_IFREG || before.st_size < 0) {
+    if (hwa_windows_identity_from_path(path, &before) != 0) {
 #else
     if (stat(path, &before) != 0 || !S_ISREG(before.st_mode) ||
         before.st_size < 0) {
@@ -976,7 +976,11 @@ static int hwa_item_read_regular(const char *path,
                       "cannot inspect item amendment '%s'", path);
         return -1;
     }
+#if defined(_WIN32)
+    source_size = before.size;
+#else
     source_size = (uint64_t)before.st_size;
+#endif
     if (source_size > max_bytes ||
         source_size > (uint64_t)(SIZE_MAX - 1U)) {
         hwa_set_error(error, error_size,
@@ -991,9 +995,8 @@ static int hwa_item_read_regular(const char *path,
         return -1;
     }
 #if defined(_WIN32)
-    if (_fstat64(_fileno(stream), &opened) != 0 ||
-        opened.st_dev != before.st_dev || opened.st_ino != before.st_ino ||
-        opened.st_size != before.st_size) {
+    if (hwa_windows_identity_from_stream(stream, &opened) != 0 ||
+        !hwa_windows_identity_equal(&before, &opened)) {
 #else
     if (fstat(fileno(stream), &opened) != 0 ||
         opened.st_dev != before.st_dev || opened.st_ino != before.st_ino ||
@@ -1607,8 +1610,10 @@ static int hwa_item_read_reserve_edit(HWAItemReadState *state,
         return -1;
     }
     added = next - state->edit_capacity;
-    if ((uint64_t)added >
-            UINT64_MAX / (uint64_t)sizeof(*state->result.edits) ||
+    if (
+#if SIZE_MAX > UINT64_MAX
+        added > UINT64_MAX / (uint64_t)sizeof(*state->result.edits) ||
+#endif
         hwa_item_read_charge(
             state,
             (uint64_t)added * (uint64_t)sizeof(*state->result.edits),
@@ -2802,8 +2807,11 @@ static int hwa_item_full_validate_unique(HWAItemFullReadState *state,
     size_t index;
 
     if (maximum < 2U) return 0;
-    if (maximum > SIZE_MAX / sizeof(*order) ||
-        (uint64_t)maximum > UINT64_MAX / (uint64_t)sizeof(*order)) {
+    if (maximum > SIZE_MAX / sizeof(*order)
+#if SIZE_MAX > UINT64_MAX
+        || maximum > UINT64_MAX / (uint64_t)sizeof(*order)
+#endif
+    ) {
         hwa_set_error(error, error_size,
                       "item identity index storage overflows");
         return -1;

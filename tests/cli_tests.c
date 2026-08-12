@@ -14,6 +14,7 @@
 #include <direct.h>
 #include <io.h>
 #include <process.h>
+#include "windows_test_process.h"
 #else
 #include <fcntl.h>
 #include <signal.h>
@@ -382,6 +383,7 @@ static int write_corrupt_file(const char *path) {
   return ok;
 }
 
+#if !defined(_WIN32)
 static int append_text(char *buffer,
                        size_t capacity,
                        size_t *length,
@@ -435,11 +437,16 @@ static int append_shell_argument(char *buffer,
   return append_text(buffer, capacity, length, "'");
 #endif
 }
+#endif
 
 static int run_analyzer_to(const char *stdout_path,
                            const char *stderr_path,
                            const char *const *arguments,
                            size_t argument_count) {
+#if defined(_WIN32)
+  return hwa_test_spawn_redirected(g_analyzer, arguments, argument_count,
+                                   NULL, stdout_path, stderr_path);
+#else
   char command[PATH_MAX * 4u];
   size_t length = 0u;
   size_t index;
@@ -473,9 +480,6 @@ static int run_analyzer_to(const char *stdout_path,
   if (status == -1) {
     return -1;
   }
-#if defined(_WIN32)
-  return status;
-#else
   if (!WIFEXITED(status)) {
     return 128;
   }

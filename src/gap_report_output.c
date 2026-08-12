@@ -81,8 +81,11 @@ static int hwa_gro_bound_rows(uint64_t *total,
 static int hwa_gro_bound_text(uint64_t *total, const char *text)
 {
     size_t length = text == NULL ? 0U : strlen(text);
-    if ((uint64_t)length > (UINT64_MAX - UINT64_C(6)) / UINT64_C(6))
+#if SIZE_MAX > (UINT64_MAX - UINT64_C(6)) / UINT64_C(6)
+    if (length >
+        (size_t)((UINT64_MAX - UINT64_C(6)) / UINT64_C(6)))
         return -1;
+#endif
     return hwa_gro_bound_add(
         total, (uint64_t)length * UINT64_C(6) + UINT64_C(6));
 }
@@ -270,7 +273,9 @@ static int hwa_gro_projected_path_extra(
         size_t length = r->name == NULL ? 0U : strlen(r->name);
         uint64_t path_bytes;
         uint64_t roles = r->make_x ? UINT64_C(3) : UINT64_C(2);
-        if ((uint64_t)length > UINT64_MAX - UINT64_C(12)) return -1;
+#if SIZE_MAX >= UINT64_MAX
+        if (length > (size_t)(UINT64_MAX - UINT64_C(12))) return -1;
+#endif
         path_bytes = (uint64_t)length + UINT64_C(12);
         if (path_bytes > UINT64_MAX / UINT64_C(6) ||
             path_bytes * UINT64_C(6) > UINT64_MAX / roles ||

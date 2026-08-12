@@ -129,10 +129,16 @@ static void remove_path(const char *path)
 static int files_open(TestFiles *files)
 {
     unsigned attempt;
+#if defined(_WIN32)
+    const char *temporary = getenv("TEMP");
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+#else
+    const char *temporary = "/tmp";
+#endif
     memset(files, 0, sizeof(*files));
     for (attempt = 0U; attempt < 100U; ++attempt) {
         int written = snprintf(files->directory, sizeof(files->directory),
-                               "/tmp/hwa-run-test-%ld-%u",
+                               "%s/hwa-run-test-%ld-%u", temporary,
                                (long)TEST_PID(), attempt);
         if (written < 0 || (size_t)written >= sizeof(files->directory))
             return 0;

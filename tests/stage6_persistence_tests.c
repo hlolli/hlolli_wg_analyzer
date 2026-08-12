@@ -1148,11 +1148,17 @@ int main(void)
 {
     char first[256];
     char second[256];
+#if defined(_WIN32)
+    const char *temporary = getenv("TEMP");
+    if (temporary == NULL || temporary[0] == '\0') temporary = ".";
+#else
+    const char *temporary = "/tmp";
+#endif
     int a = snprintf(first, sizeof(first),
-                     "/tmp/hwa-stage6-persistence-%ld-a.hwa",
+                     "%s/hwa-stage6-persistence-%ld-a.hwa", temporary,
                      (long)HWA_TEST_PID());
     int b = snprintf(second, sizeof(second),
-                     "/tmp/hwa-stage6-persistence-%ld-b.hwa",
+                     "%s/hwa-stage6-persistence-%ld-b.hwa", temporary,
                      (long)HWA_TEST_PID());
     if (a < 0 || b < 0 || (size_t)a >= sizeof(first) ||
         (size_t)b >= sizeof(second)) return 1;

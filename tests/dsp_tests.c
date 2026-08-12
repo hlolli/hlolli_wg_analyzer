@@ -150,6 +150,28 @@ static void test_running_stats(void)
     CHECK(close_enough(result, 1.0, 1.0e-15));
 }
 
+static void test_long_perfect_correlation(void)
+{
+    HwaDspRunningCovariance covariance;
+    uint32_t state = UINT32_C(0x91e10da5);
+    double result = 0.0;
+    size_t index;
+
+    hwa_dsp_covariance_reset(&covariance);
+    for (index = 0U; index < 7993U; ++index) {
+        double sample;
+
+        state ^= state << 13U;
+        state ^= state >> 17U;
+        state ^= state << 5U;
+        sample = ((double)(state & UINT32_C(0xffff)) / 32768.0 - 1.0) * 0.2;
+        CHECK(hwa_dsp_covariance_push(&covariance, sample, sample) ==
+              HWA_DSP_OK);
+    }
+    CHECK(hwa_dsp_covariance_correlation(&covariance, &result) == HWA_DSP_OK);
+    CHECK(close_enough(result, 1.0, 0.0));
+}
+
 static double biquad_magnitude(const HwaDspBiquad *filter, double omega)
 {
     double c1 = cos(omega);
@@ -366,6 +388,7 @@ int main(void)
     test_fft_tone();
     test_fft_general_round_trip();
     test_running_stats();
+    test_long_perfect_correlation();
     test_biquads();
     test_linear_resampling();
     test_true_peak();
