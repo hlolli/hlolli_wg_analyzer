@@ -988,7 +988,8 @@ static void test_mode_and_bad_edit_rejection(void)
           "duplicate alignment event ID was not rejected: %s", error);
     matches[1].event_id = (char *)"n2";
 
-    if (SIZE_MAX > (size_t)UINT32_MAX) {
+#if SIZE_MAX > UINT32_MAX
+    {
         alignment.match_count = (size_t)UINT32_MAX + 1U;
         options.max_events = SIZE_MAX;
         CHECK(hwa_segmentation_build(&alignment, &analysis, NULL, &options,
@@ -997,6 +998,7 @@ static void test_mode_and_bad_edit_rejection(void)
               "event member-order overflow was accepted");
         alignment.match_count = 7U;
     }
+#endif
     hwa_segmentation_options_default(&options);
     memset(&huge_labels, 0, sizeof(huge_labels));
     memset(&huge_row, 0, sizeof(huge_row));

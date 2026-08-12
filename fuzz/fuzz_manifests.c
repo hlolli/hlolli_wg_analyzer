@@ -9,6 +9,11 @@
 #include <stdint.h>
 #include <string.h>
 
+static const char hwa_run_schema_prefix[] = "{\"schema\":\"hwa-run\"";
+static const char hwa_experiment_schema_prefix[] =
+    "{\"schema\":\"hwa-experiment\"";
+static const char hwa_gap_schema_prefix[] = "{\"schema\":\"hwa-gap-report\"";
+
 static void fuzz_score(const unsigned char *data, size_t size)
 {
     HWAFuzzTempFile temporary;
@@ -71,17 +76,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         fuzz_score(data, size);
         return 0;
     }
-    if (size >= 21U && memcmp(data, "{\"schema\":\"hwa-run\"", 20U) == 0) {
+    if (size >= sizeof(hwa_run_schema_prefix) - 1U &&
+        memcmp(data, hwa_run_schema_prefix,
+               sizeof(hwa_run_schema_prefix) - 1U) == 0) {
         fuzz_run(data, size);
         return 0;
     }
-    if (size >= 28U &&
-        memcmp(data, "{\"schema\":\"hwa-experiment\"", 27U) == 0) {
+    if (size >= sizeof(hwa_experiment_schema_prefix) - 1U &&
+        memcmp(data, hwa_experiment_schema_prefix,
+               sizeof(hwa_experiment_schema_prefix) - 1U) == 0) {
         fuzz_experiment(data, size);
         return 0;
     }
-    if (size >= 29U &&
-        memcmp(data, "{\"schema\":\"hwa-gap-report\"", 28U) == 0) {
+    if (size >= sizeof(hwa_gap_schema_prefix) - 1U &&
+        memcmp(data, hwa_gap_schema_prefix,
+               sizeof(hwa_gap_schema_prefix) - 1U) == 0) {
         fuzz_gap(data, size);
         return 0;
     }

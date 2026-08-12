@@ -2778,6 +2778,18 @@ static void hwa_physical_hash_input_byte(
     }
 }
 
+static int hwa_physical_record_capacity(size_t field_count,
+                                        size_t field_bytes,
+                                        size_t *capacity)
+{
+    size_t escaped_field_bytes;
+    if (capacity == NULL || field_bytes > (SIZE_MAX - 3U) / 2U) return -1;
+    escaped_field_bytes = field_bytes * 2U + 3U;
+    if (field_count > (SIZE_MAX - 2U) / escaped_field_bytes) return -1;
+    *capacity = field_count * escaped_field_bytes + 2U;
+    return 0;
+}
+
 static int hwa_physical_stream_rows(const char *path,
                                     const HWAPhysicalOptions *limits,
                                     const HWAPhysicalFileIdentity *expected,
@@ -2804,14 +2816,13 @@ static int hwa_physical_stream_rows(const char *path,
     HWAPhysicalFileIdentity before;
     HWAPhysicalFileIdentity opened;
     stream_sha256[0] = '\0';
-    if (HWA_PHYSICAL_FILE_MAX_FIELD_BYTES >
-        (SIZE_MAX - 4U) / 2U / HWA_PHYSICAL_FILE_MAX_FIELDS) {
+    if (hwa_physical_record_capacity(HWA_PHYSICAL_FILE_MAX_FIELDS,
+                                     HWA_PHYSICAL_FILE_MAX_FIELD_BYTES,
+                                     &maximum_record) != 0) {
         hwa_physical_error(error, error_size,
                            "physical result record limit overflows");
         return -1;
     }
-    maximum_record = HWA_PHYSICAL_FILE_MAX_FIELDS *
-                     (HWA_PHYSICAL_FILE_MAX_FIELD_BYTES * 2U + 3U) + 2U;
     parser_bytes = (uint64_t)maximum_record;
     if (hwa_physical_read_charge(state, parser_bytes) != 0) {
         hwa_physical_error(error, error_size,

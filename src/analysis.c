@@ -1,6 +1,6 @@
 #include "internal.h"
 
-#include "features.h"
+#include "hwa_features.h"
 
 #include <math.h>
 #include <stdlib.h>

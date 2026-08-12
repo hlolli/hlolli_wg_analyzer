@@ -12,7 +12,7 @@
 
 #include "gap_report_clip.h"
 
-#include "features.h"
+#include "hwa_features.h"
 #include "gap_report_output.h"
 #include "internal.h"
 #include "production.h"

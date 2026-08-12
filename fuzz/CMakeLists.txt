@@ -39,6 +39,7 @@ if(MSVC)
   target_compile_options(hlolli_wg_analyzer_core PRIVATE
     /fsanitize=address
     /fsanitize=fuzzer
+    /Zi
   )
 else()
   target_compile_options(hlolli_wg_analyzer_core PRIVATE
@@ -65,10 +66,12 @@ function(hwa_fuzzer target_name source_file corpus_name)
     target_compile_options(${target_name} PRIVATE
       /fsanitize=address
       /fsanitize=fuzzer
+      /Zi
     )
     target_link_options(${target_name} PRIVATE
       /fsanitize=address
       /fsanitize=fuzzer
+      /DEBUG
     )
   else()
     target_compile_options(${target_name} PRIVATE

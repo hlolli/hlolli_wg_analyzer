@@ -1,4 +1,7 @@
 #if !defined(_WIN32)
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #ifndef _FILE_OFFSET_BITS
 #define _FILE_OFFSET_BITS 64
 #endif
@@ -11,7 +14,7 @@
 
 #include "dsp.h"
 #include "experiment_file.h"
-#include "features.h"
+#include "hwa_features.h"
 #include "gap_report_clip.h"
 #include "gap_report_output.h"
 #include "internal.h"
@@ -4511,7 +4514,7 @@ int hwa_gap_report_candidate_catalog_fits(
         int saw_final_role = 0;
         unsigned experiment_roles = 0U;
         int have_measurement_group = 0;
-        HWAGapMeasureGroupKey previous_measurement_group;
+        HWAGapMeasureGroupKey previous_measurement_group = {0};
         HWAGapMeasureMetricState measurement_metric_state;
         size_t measurement_group_end = 0U;
         if (count > result->candidate_count - candidate_index) return 0;

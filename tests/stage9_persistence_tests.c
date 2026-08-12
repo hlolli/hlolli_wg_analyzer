@@ -13,6 +13,7 @@
 
 #if defined(_WIN32)
 #include <io.h>
+#include <process.h>
 #else
 #include <sys/types.h>
 #include <unistd.h>

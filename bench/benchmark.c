@@ -5,7 +5,7 @@
 #include "alignment.h"
 #include "alignment_file.h"
 #include "dsp.h"
-#include "features.h"
+#include "hwa_features.h"
 #include "internal.h"
 #include "output.h"
 #include "report.h"

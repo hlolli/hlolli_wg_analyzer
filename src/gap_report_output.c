@@ -2194,7 +2194,7 @@ static int hwa_gro_create_file(const char *path,
                                size_t error_size)
 {
     FILE *scratch = NULL;
-    HWAGROutIdentity owned;
+    HWAGROutIdentity owned = {0};
     HWAGROutIdentity current;
     int committed = 0;
     int status = -1;
@@ -2242,7 +2242,7 @@ static int hwa_gro_create_html(const char *path,
                                size_t error_size)
 {
     FILE *scratch = NULL;
-    HWAGROutIdentity owned;
+    HWAGROutIdentity owned = {0};
     HWAGROutIdentity current;
     int committed = 0;
     int status = -1;
@@ -2534,10 +2534,10 @@ int hwa_gap_report_output_write_tree(const char *private_directory,
     uint64_t csv_bytes = 0U;
     uint64_t json_bytes = 0U;
     uint64_t html_bytes = 0U;
-    HWAGROutIdentity result_identity;
-    HWAGROutIdentity csv_identity;
-    HWAGROutIdentity json_identity;
-    HWAGROutIdentity html_identity;
+    HWAGROutIdentity result_identity = {0};
+    HWAGROutIdentity csv_identity = {0};
+    HWAGROutIdentity json_identity = {0};
+    HWAGROutIdentity html_identity = {0};
     uint64_t tree_bytes;
     uint64_t remaining;
     uint64_t live_work;

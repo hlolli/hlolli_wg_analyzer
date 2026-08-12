@@ -15,8 +15,10 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#include <sys/stat.h>
 #include <windows.h>
 #else
 #include <dirent.h>

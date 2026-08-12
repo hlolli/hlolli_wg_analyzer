@@ -2523,10 +2523,10 @@ static int hwa_physical_add_carryover_check(
 {
     const HWAMeasureGroup *reference_group = NULL;
     const HWAMeasureGroup *model_group = NULL;
-    double reference_value;
-    double model_value;
-    double reference_confidence;
-    double model_confidence;
+    double reference_value = 0.0;
+    double model_value = 0.0;
+    double reference_confidence = 0.0;
+    double model_confidence = 0.0;
     int reference_status = 0;
     int model_status = 0;
     HWAPhysicalCheck *check;

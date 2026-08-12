@@ -33,7 +33,9 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
+#include <sys/stat.h>
 #include <windows.h>
 #define HWA_PATH_SEPARATOR '\\'
 #else

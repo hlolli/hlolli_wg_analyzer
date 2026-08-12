@@ -405,6 +405,18 @@ static int hwa_measure_csv_rows(const unsigned char *data,
     return 0;
 }
 
+static int hwa_measure_record_capacity(size_t field_count,
+                                       size_t field_bytes,
+                                       size_t *capacity)
+{
+    size_t escaped_field_bytes;
+    if (capacity == NULL || field_bytes > (SIZE_MAX - 3U) / 2U) return -1;
+    escaped_field_bytes = field_bytes * 2U + 3U;
+    if (field_count > (SIZE_MAX - 2U) / escaped_field_bytes) return -1;
+    *capacity = field_count * escaped_field_bytes + 2U;
+    return 0;
+}
+
 static int hwa_measure_csv_stream(const char *path,
                                   const HWAMeasureFileIdentity *expected_identity,
                                   uint64_t max_bytes,
@@ -429,14 +441,13 @@ static int hwa_measure_csv_stream(const char *path,
     HWAMeasureFileIdentity opened_identity;
     HWAMeasureFileIdentity final_identity;
     if (parsed_sha256 != NULL) parsed_sha256[0] = '\0';
-    if (HWA_MEASURE_FILE_MAX_FIELD_BYTES >
-        (SIZE_MAX - 4U) / 2U / HWA_MEASURE_FILE_MAX_FIELDS) {
+    if (hwa_measure_record_capacity(HWA_MEASURE_FILE_MAX_FIELDS,
+                                    HWA_MEASURE_FILE_MAX_FIELD_BYTES,
+                                    &maximum_record) != 0) {
         hwa_set_error(error, error_size,
                       "measurement record limit overflows");
         return -1;
     }
-    maximum_record = HWA_MEASURE_FILE_MAX_FIELDS *
-                     (HWA_MEASURE_FILE_MAX_FIELD_BYTES * 2U + 3U) + 2U;
     if (*work_live > max_work_bytes ||
         (uint64_t)maximum_record > max_work_bytes - *work_live) {
         hwa_set_error(error, error_size,

@@ -1520,7 +1520,7 @@ static int hwa_item_read_event(char **fields,
     double audio_start;
     double audio_end;
     double confidence;
-    double tempo;
+    double tempo = 0.0;
     int tempo_result;
     double expected_start;
     double expected_end;

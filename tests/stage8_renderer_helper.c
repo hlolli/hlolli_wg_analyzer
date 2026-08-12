@@ -22,6 +22,7 @@
 #define HWA_STAGE8_RENDERER_MODE 0
 #endif
 
+#if HWA_STAGE8_RENDERER_MODE != 1
 static void hwa_test_u16(FILE *stream, uint16_t value)
 {
     (void)fputc((int)(value & UINT16_C(0xff)), stream);
@@ -80,6 +81,7 @@ static int hwa_test_join(char *buffer,
     int written = snprintf(buffer, buffer_size, "%s/%s", directory, name);
     return written < 0 || (size_t)written >= buffer_size ? -1 : 0;
 }
+#endif
 
 #if HWA_STAGE8_RENDERER_MODE == 4 || \
     (HWA_STAGE8_RENDERER_MODE == 5 && !defined(_WIN32))
@@ -101,7 +103,9 @@ static int hwa_test_write_extra(const char *directory, const char *name)
 
 int main(int argc, char **argv)
 {
+#if HWA_STAGE8_RENDERER_MODE != 1
     char output_path[4096];
+#endif
 
     if (argc != 5 || strcmp(argv[1], "--hwa-experiment-job") != 0 ||
         strcmp(argv[3], "--output-dir") != 0 ||
@@ -122,7 +126,8 @@ int main(int argc, char **argv)
     }
 #if HWA_STAGE8_RENDERER_MODE == 1
     return 23;
-#elif HWA_STAGE8_RENDERER_MODE == 2
+#else
+#if HWA_STAGE8_RENDERER_MODE == 2
 #if defined(_WIN32)
     Sleep(2000U);
 #else
@@ -184,4 +189,5 @@ int main(int argc, char **argv)
 #endif
     (void)puts("stage8 renderer helper");
     return 0;
+#endif
 }

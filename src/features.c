@@ -1,4 +1,4 @@
-#include "features.h"
+#include "hwa_features.h"
 
 #include "dsp.h"
 #include "internal.h"

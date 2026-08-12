@@ -17,6 +17,7 @@
 #if defined(_WIN32)
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #define HWA_TEST_MKDIR(path) _mkdir(path)
 #else
 #include <sys/stat.h>

@@ -1468,8 +1468,8 @@ static int hwa_alignment_read_meta(char **fields,
                                    size_t error_size)
 {
     const char *key;
-    double value;
-    uint64_t integer_value;
+    double value = 0.0;
+    uint64_t integer_value = 0U;
     int integer_meta;
 
     if (field_count != 4U || state->meta_index >= HWA_ALIGNMENT_META_COUNT ||
@@ -1745,10 +1745,10 @@ static int hwa_alignment_read_match(char **fields,
     double reference_end;
     double target_start;
     double target_end;
-    double score_start;
-    double score_end;
+    double score_start = 0.0;
+    double score_end = 0.0;
     double confidence;
-    double tempo;
+    double tempo = 0.0;
     int score_start_result;
     int score_end_result;
     int tempo_result;
@@ -1803,8 +1803,8 @@ static int hwa_alignment_read_unmatched(char **fields,
     uint64_t id;
     double start;
     double end;
-    double start_beat;
-    double end_beat;
+    double start_beat = 0.0;
+    double end_beat = 0.0;
     double confidence;
     int start_result;
     int end_result;

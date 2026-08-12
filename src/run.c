@@ -10,7 +10,7 @@
 #include "run.h"
 
 #include "dsp.h"
-#include "features.h"
+#include "hwa_features.h"
 #include "internal.h"
 #include "numeric_locale.h"
 #include "sha256.h"
