@@ -7,14 +7,8 @@
 #include <stdint.h>
 
 #define HWA_FUZZ_MAX_INPUT_BYTES UINT64_C(1048576)
-
-#if defined(_WIN32)
-#include <windows.h>
-#define HWA_FUZZ_PATH_CAP MAX_PATH
-#else
-#include <limits.h>
-#define HWA_FUZZ_PATH_CAP PATH_MAX
-#endif
+/* Includes the terminator. Longer temporary paths are rejected. */
+#define HWA_FUZZ_PATH_CAP 4096U
 
 typedef struct HWAFuzzBytes {
     const unsigned char *data;

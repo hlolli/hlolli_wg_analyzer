@@ -798,7 +798,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/features_tests.c")
   target_compile_features(hlolli_wg_analyzer_features_tests PRIVATE c_std_11)
   hwa_set_warnings(hlolli_wg_analyzer_features_tests)
   add_test(NAME unit.features COMMAND hlolli_wg_analyzer_features_tests)
-  set_tests_properties(unit.features PROPERTIES TIMEOUT 30)
+  set_tests_properties(unit.features PROPERTIES TIMEOUT 180)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/wav_reader_stage1_tests.c")

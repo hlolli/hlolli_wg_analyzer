@@ -379,7 +379,7 @@ static void test_make_items(HWAItemSet *set,
 
 int main(void)
 {
-    char alignment_path[5] = {'a', (char)0xff, '\n', 'x', '\0'};
+    char alignment_path[] = "a\xff\nx";
     char output[TEST_OUTPUT_CAPACITY];
     size_t size;
     HWAItemSet set;

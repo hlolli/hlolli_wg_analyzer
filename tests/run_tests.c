@@ -810,15 +810,16 @@ static void test_rational_timing(const TestFiles *files)
     uint32_t state = UINT32_C(0x6d2b79f5);
     size_t index;
     static const unsigned char constant_csv[] = "index,value\n0,1\n";
+    _Static_assert(
+        (ODD_RATE * 20U + 500U) / 1000U == ODD_WINDOW &&
+            (ODD_RATE * 10U + 500U) / 1000U == ODD_HOP &&
+            ODD_WINDOW / 2U == 110U &&
+            ODD_DELAY_SAMPLES / ODD_HOP == 25U &&
+            ODD_DELAY_SAMPLES <= ODD_RATE / 4U &&
+            26U * ODD_HOP > ODD_RATE / 4U &&
+            1U + (ODD_FRAMES - ODD_WINDOW) / ODD_HOP == 121U,
+        "noninteger timing fixture arithmetic");
     memset(&result, 0, sizeof(result));
-    CHECK((ODD_RATE * 20U + 500U) / 1000U == ODD_WINDOW &&
-          (ODD_RATE * 10U + 500U) / 1000U == ODD_HOP &&
-          ODD_WINDOW / 2U == 110U &&
-          ODD_DELAY_SAMPLES / ODD_HOP == 25U &&
-          ODD_DELAY_SAMPLES <= ODD_RATE / 4U &&
-          26U * ODD_HOP > ODD_RATE / 4U &&
-          1U + (ODD_FRAMES - ODD_WINDOW) / ODD_HOP == 121U,
-          "noninteger timing fixture arithmetic");
     for (index = 0U; index < ODD_PROBE_COUNT; ++index) {
         state = state * UINT32_C(1664525) + UINT32_C(1013904223);
         probe[index] = -26.0 + 16.0 *

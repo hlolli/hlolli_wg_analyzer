@@ -794,7 +794,6 @@ static void test_success_and_publication(void)
     size_t reference_audio_size = 0U;
     size_t model_size = 0U;
     size_t model_audio_size = 0U;
-    size_t sentinel_size = 0U;
     const char *basic[] = {
         "account-production", files.reference_profile, files.reference_audio,
         files.model_profile, files.model_audio,
@@ -852,6 +851,7 @@ static void test_success_and_publication(void)
         "--output", files.alias
     };
 #if !defined(_WIN32)
+    size_t sentinel_size = 0U;
     const char *broken[] = {
         "--replace", "account-production",
         files.reference_profile, files.reference_audio,

@@ -437,8 +437,8 @@ static void test_round_trip_and_distributions(const char *directory)
 
 static void test_distribution_gap(const char *directory)
 {
-    HWAMeasurementSet reference;
-    HWAMeasurementSet model;
+    HWAMeasurementSet reference = {0};
+    HWAMeasurementSet model = {0};
     HWAProfileComparisonSet comparison;
     HWAProfileComparisonOptions limits = test_limits();
     char reference_path[PATH_MAX];
@@ -769,7 +769,7 @@ static void test_tamper(const char *directory,
     char *bytes;
     char *changed;
     size_t size;
-    size_t changed_size;
+    size_t changed_size = 0U;
     CHECK(test_path(base_path, directory, "tamper-base.hwa-measures") &&
               test_path(bad_path, directory, name),
           "tamper paths failed");

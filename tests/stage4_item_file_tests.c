@@ -303,8 +303,7 @@ static void test_full_reader(const char *directory)
     char bad_key[PATH_MAX];
     char bad_member[PATH_MAX];
     char stale_meta[PATH_MAX];
-    char score_path[10] = {'s', 'c', 'o', 'r', (char)0xff,
-                           '.', 'c', 's', 'v', '\0'};
+    char score_path[] = "scor\xff.csv";
     HWAItemSet source;
     HWAItemEvent events[2];
     HWAItem items[3];

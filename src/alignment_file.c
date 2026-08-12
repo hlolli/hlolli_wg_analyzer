@@ -2804,8 +2804,11 @@ static int hwa_alignment_full_validate_event_ids(
         }
     }
     if (count < 2U) return 0;
-    if (count > SIZE_MAX / sizeof(*order) ||
-        (uint64_t)count > UINT64_MAX / (uint64_t)sizeof(*order)) {
+    if (count > SIZE_MAX / sizeof(*order)
+#if SIZE_MAX > UINT64_MAX
+        || count > UINT64_MAX / (uint64_t)sizeof(*order)
+#endif
+    ) {
         hwa_set_error(error, error_size,
                       "alignment event-ID index storage overflows");
         return -1;

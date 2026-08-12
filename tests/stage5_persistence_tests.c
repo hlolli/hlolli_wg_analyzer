@@ -792,7 +792,7 @@ static void test_compatible_replacement(const char *base,
     char hash[HWA_SHA256_HEX_SIZE];
     char error[HWA_ERROR_SIZE] = {0};
     size_t size;
-    size_t changed_size;
+    size_t changed_size = 0U;
     int written = snprintf(normalized_name, sizeof(normalized_name),
                            "%s-normalized", name);
     CHECK(written > 0 && (size_t)written < sizeof(normalized_name) &&

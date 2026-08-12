@@ -565,11 +565,13 @@ static void test_measure_and_compare_cli(void)
         "--measure-fft-size", "512", "--measure-hop-size", "64",
         "--items", files.items, "measure", files.audio, "--output", "-"
     };
+#if !defined(_WIN32)
     const char *broken[] = {
         "--measure-fft-size", "512", "--measure-hop-size", "64",
         "--items", files.items, "measure", files.audio,
         "--output", files.third
     };
+#endif
     const char *compare[] = {
         "compare-measures", files.first, files.second,
         "--output", files.comparison

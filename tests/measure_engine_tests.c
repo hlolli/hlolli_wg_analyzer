@@ -31,6 +31,7 @@
 #endif
 
 #define TEST_PI 3.14159265358979323846264338327950288
+#define TEST_SHORT_FRAME_COUNT 4096U
 
 static int failures = 0;
 
@@ -934,7 +935,7 @@ static void test_silent_status_precedence(void)
     HWAItemSet set;
     HWAMeasurementOptions options = test_options();
     HWAMeasurementSet result;
-    double samples[frame_count];
+    double samples[TEST_SHORT_FRAME_COUNT];
     char error[HWA_ERROR_SIZE];
     const HWAMeasureObservation *rms;
     const HWAMeasureObservation *relative;
@@ -1124,7 +1125,7 @@ static void test_limits_fail_transactionally(void)
     HWAItemSet set;
     HWAMeasurementOptions options = test_options();
     HWAMeasurementSet result;
-    double samples[frame_count];
+    double samples[TEST_SHORT_FRAME_COUNT];
     char error[HWA_ERROR_SIZE];
     size_t index;
     uint64_t low;

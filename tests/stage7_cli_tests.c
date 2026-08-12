@@ -644,7 +644,6 @@ static void test_success_and_publication(void)
     size_t manifest_size;
     size_t reference_size;
     size_t model_size;
-    size_t sentinel_size = 0U;
     const char *basic[] = {
         "analyze-run", files.manifest,
         "--bind", reference_binding, "--bind", model_binding,
@@ -702,6 +701,7 @@ static void test_success_and_publication(void)
         "--output", files.alias
     };
 #if !defined(_WIN32)
+    size_t sentinel_size = 0U;
     const char *broken[] = {
         "--replace", "analyze-run", files.manifest,
         "--bind", reference_binding, "--bind", model_binding,

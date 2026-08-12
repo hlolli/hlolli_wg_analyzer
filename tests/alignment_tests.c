@@ -194,9 +194,9 @@ static void test_identity_and_rubato(void)
         0.25, 0.55, 0.35, 0.50, 0.30,
         0.45, 0.40, 0.35, 0.50, 0.35
     };
-    OwnedTrack reference;
-    OwnedTrack identity;
-    OwnedTrack warped;
+    OwnedTrack reference = {0};
+    OwnedTrack identity = {0};
+    OwnedTrack warped = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];
@@ -308,8 +308,8 @@ static void test_pickup_missing_and_repeat(void)
     static const unsigned repeat_notes[11] = {
         0U, 4U, 7U, 2U, 9U, 9U, 5U, 11U, 3U, 8U, 1U
     };
-    OwnedTrack reference;
-    OwnedTrack changed;
+    OwnedTrack reference = {0};
+    OwnedTrack changed = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];
@@ -369,8 +369,8 @@ static void test_coarse_horizontal_run_corridor(void)
     static const double target_durations[6] = {
         2.0, 0.4, 0.4, 0.4, 0.4, 0.4
     };
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];
@@ -399,8 +399,8 @@ static void test_locked_anchors(void)
     static const double equal[10] = {
         0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4
     };
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignmentAnchor locked[2];
     HWAAlignment result;
@@ -462,8 +462,8 @@ static void test_exact_limits(void)
     static const double equal[10] = {
         0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4
     };
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];
@@ -1010,8 +1010,8 @@ static void test_room_tail(void)
 {
     static const unsigned notes[5] = {0U, 4U, 7U, 2U, 9U};
     static const double durations[5] = {0.4, 0.4, 0.4, 0.4, 0.4};
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     HWAAlignFrame *grown;
@@ -1063,8 +1063,8 @@ static void test_noise_and_tuning_offset(void)
     static const double durations[10] = {
         0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3
     };
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];
@@ -1122,8 +1122,8 @@ static void test_trill(void)
     static const double target_durations[8] = {
         0.4, 0.4, 0.1, 0.1, 0.1, 0.1, 0.4, 0.4
     };
-    OwnedTrack reference;
-    OwnedTrack target;
+    OwnedTrack reference = {0};
+    OwnedTrack target = {0};
     HWAAlignmentOptions options = test_options();
     HWAAlignment result;
     char error[HWA_ERROR_SIZE];

@@ -60,7 +60,7 @@ jobs:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check host architecture
         shell: bash
         run: test "$(uname -m)" = "${{ matrix.arch }}"
@@ -103,7 +103,7 @@ jobs:
       matrix:
         build_type: [Debug, Release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -142,7 +142,7 @@ jobs:
     name: Linux GCC i686 subset
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install multilib
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
       - name: Configure
@@ -167,7 +167,7 @@ jobs:
     name: Linux GCC ppc64 big-endian subset
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install cross compiler and emulator
         run: >-
           sudo apt-get update && sudo apt-get install -y
@@ -199,7 +199,7 @@ jobs:
     env:
       WASI_SDK_VERSION: '24'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: bytecodealliance/actions/wasmtime/setup@v1
       - uses: bytecodealliance/actions/wasm-tools/setup@v1
       - name: Install WASI SDK
@@ -239,7 +239,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: >-
           cmake -S . -B build-sanitize
@@ -261,7 +261,7 @@ jobs:
     name: Benchmark contract smoke
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: >-
           cmake -S . -B build-bench
@@ -285,7 +285,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: >-
           cmake -S . -B build-fuzz
@@ -310,7 +310,7 @@ jobs:
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check host architecture
         shell: bash
         run: test "$(uname -m)" = "arm64"
@@ -346,7 +346,7 @@ jobs:
     env:
       ASAN_OPTIONS: halt_on_error=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64

@@ -365,7 +365,7 @@ static int hwa_seg_seconds_to_sample(double seconds,
     if (!isfinite(seconds) || seconds < 0.0 || rate == 0U) {
         return -1;
     }
-    scaled = (long double)seconds * (long double)rate;
+    scaled = (long double)(seconds * (double)rate);
     if (scaled > (long double)UINT64_MAX - 0.5L) {
         return -1;
     }

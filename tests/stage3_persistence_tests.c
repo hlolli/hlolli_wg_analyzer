@@ -412,7 +412,7 @@ static void test_full_alignment_reader(const char *directory)
     char match_order_path[PATH_MAX];
     char span_order_path[PATH_MAX];
     char warning_order_path[PATH_MAX];
-    char score_path[7] = {'s', (char)0xff, '.', 'c', 's', 'v', '\0'};
+    char score_path[] = "s\xff.csv";
     HWAAlignment source;
     HWAAlignment loaded;
     HWAAlignmentAnchor anchors[2];

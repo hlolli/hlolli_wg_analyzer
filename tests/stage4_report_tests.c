@@ -281,7 +281,7 @@ static void test_hash(char target[HWA_SHA256_HEX_SIZE], char byte)
 
 static void test_measurement_json(void)
 {
-    char unsafe_path[] = {'i', (char)0xff, 'm', '\0'};
+    char unsafe_path[] = "i\xffm";
     HWAMeasureItemContext context;
     HWAMeasureObservation observation;
     HWAMeasureGroup group;

@@ -591,7 +591,7 @@ static void test_determinism_and_resource_edges(void)
     HWAFrameMetrics tracks[80];
     HWASegmentationOptions options;
     HWAItemSet first;
-    HWAItemSet second;
+    HWAItemSet second = {0};
     HWAItemSet probe;
     char error[HWA_ERROR_SIZE];
     size_t index;
