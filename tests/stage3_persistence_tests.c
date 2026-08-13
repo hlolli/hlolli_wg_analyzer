@@ -428,7 +428,7 @@ static void test_full_alignment_reader(const char *directory)
     CHECK(test_path(path, directory, "full.hwa-align") &&
               test_path(roundtrip_path, directory,
                         "roundtrip.hwa-align") &&
-              test_path(nul_path, directory, "nul.hwa-align") &&
+              test_path(nul_path, directory, "embedded-nul.hwa-align") &&
               test_path(duplicate_path, directory,
                         "duplicate-id.hwa-align") &&
               test_path(duplicate_event_path, directory,

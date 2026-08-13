@@ -562,6 +562,28 @@ static size_t record_count(const char *text, const char *prefix)
     return count;
 }
 
+static int summary_has_line(const char *summary, const char *expected)
+{
+    size_t expected_size;
+    const char *line;
+
+    if (summary == NULL || expected == NULL) return 0;
+    expected_size = strlen(expected);
+    line = summary;
+    for (;;) {
+        const char *end = strchr(line, '\n');
+        size_t line_size = end != NULL ? (size_t)(end - line) : strlen(line);
+
+        if (line_size != 0U && line[line_size - 1U] == '\r') line_size--;
+        if (line_size == expected_size &&
+            memcmp(line, expected, expected_size) == 0) {
+            return 1;
+        }
+        if (end == NULL) return 0;
+        line = end + 1U;
+    }
+}
+
 static int summary_matches_saved(const char *summary, const char *saved)
 {
     const char *dtw_line = strstr(saved, "META,dtw_cells,");
@@ -575,16 +597,42 @@ static int summary_matches_saved(const char *summary, const char *saved)
         sscanf(dtw_line, "META,dtw_cells,%" SCNu64 ",cells", &dtw_cells) != 1) {
         return 0;
     }
-    (void)snprintf(expected, sizeof(expected), "Matches: %zu\n", matches);
-    if (strstr(summary, expected) == NULL) return 0;
+    (void)snprintf(expected, sizeof(expected), "Matches: %zu", matches);
+    if (!summary_has_line(summary, expected)) return 0;
     (void)snprintf(expected, sizeof(expected),
-                   "Unmatched spans: %zu\n", unmatched);
-    if (strstr(summary, expected) == NULL) return 0;
-    (void)snprintf(expected, sizeof(expected), "Warnings: %zu\n", warnings);
-    if (strstr(summary, expected) == NULL) return 0;
+                   "Unmatched spans: %zu", unmatched);
+    if (!summary_has_line(summary, expected)) return 0;
+    (void)snprintf(expected, sizeof(expected), "Warnings: %zu", warnings);
+    if (!summary_has_line(summary, expected)) return 0;
     (void)snprintf(expected, sizeof(expected),
-                   "DTW cells: %" PRIu64 "\n", dtw_cells);
-    return strstr(summary, expected) != NULL;
+                   "DTW cells: %" PRIu64, dtw_cells);
+    return summary_has_line(summary, expected);
+}
+
+static int case_summary_line_endings(void)
+{
+    static const char saved[] =
+        "HWA_ALIGNMENT,1\r\n"
+        "META,dtw_cells,37,cells,\r\n"
+        "MATCH,1,0,0,0,0,0,\r\n"
+        "UNMATCHED,1,reference,0,1,no-match,\r\n"
+        "WARNING,1,test,detail,\r\n";
+    static const char lf_summary[] =
+        "Matches: 1\n"
+        "Unmatched spans: 1\n"
+        "Warnings: 1\n"
+        "DTW cells: 37\n";
+    static const char crlf_summary[] =
+        "Matches: 1\r\n"
+        "Unmatched spans: 1\r\n"
+        "Warnings: 1\r\n"
+        "DTW cells: 37\r\n";
+
+    CHECK(summary_matches_saved(lf_summary, saved),
+          "summary checker rejected LF records");
+    CHECK(summary_matches_saved(crlf_summary, saved),
+          "summary checker rejected CRLF records");
+    return failures == 0;
 }
 
 static void json_skip_space(JsonCursor *cursor)
@@ -1291,6 +1339,7 @@ static int case_output_failure(void)
 int main(int argc, char **argv)
 {
     static const TestCase cases[] = {
+        {"stage2-summary-line-endings", case_summary_line_endings},
         {"stage2-audio", case_audio},
         {"stage2-score", case_score},
         {"stage2-json", case_json},

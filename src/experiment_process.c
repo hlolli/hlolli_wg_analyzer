@@ -139,9 +139,11 @@ static int hwa_process_private_copy(HWAExperimentProcessRenderer *renderer,
     int okay = 0;
 #if defined(_WIN32)
     HANDLE private_lock = NULL;
+    BY_HANDLE_FILE_INFORMATION written_identity;
 #endif
 
 #if defined(_WIN32)
+    memset(&written_identity, 0, sizeof(written_identity));
     {
         char base[MAX_PATH];
         unsigned attempt;
@@ -277,10 +279,14 @@ static int hwa_process_private_copy(HWAExperimentProcessRenderer *renderer,
         goto cleanup;
     }
 #if defined(_WIN32)
-    if (!DuplicateHandle(
-            GetCurrentProcess(),
+    if (!GetFileInformationByHandle(
             (HANDLE)_get_osfhandle(_fileno(destination)),
-            GetCurrentProcess(), &private_lock, GENERIC_READ, FALSE, 0U)) {
+            &written_identity) ||
+        (written_identity.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+          FILE_ATTRIBUTE_DEVICE)) != 0U ||
+        (((uint64_t)written_identity.nFileSizeHigh << 32U) |
+         (uint64_t)written_identity.nFileSizeLow) != total) {
         goto cleanup;
     }
 #endif
@@ -289,6 +295,31 @@ static int hwa_process_private_copy(HWAExperimentProcessRenderer *renderer,
         goto cleanup;
     }
     destination = NULL;
+#if defined(_WIN32)
+    {
+        BY_HANDLE_FILE_INFORMATION locked_identity;
+        memset(&locked_identity, 0, sizeof(locked_identity));
+        private_lock = CreateFileA(
+            executable, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (private_lock == INVALID_HANDLE_VALUE) {
+            private_lock = NULL;
+            goto cleanup;
+        }
+        if (!GetFileInformationByHandle(private_lock, &locked_identity) ||
+            (locked_identity.dwFileAttributes &
+             (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+              FILE_ATTRIBUTE_DEVICE)) != 0U ||
+            locked_identity.dwVolumeSerialNumber !=
+                written_identity.dwVolumeSerialNumber ||
+            locked_identity.nFileIndexHigh != written_identity.nFileIndexHigh ||
+            locked_identity.nFileIndexLow != written_identity.nFileIndexLow ||
+            locked_identity.nFileSizeHigh != written_identity.nFileSizeHigh ||
+            locked_identity.nFileSizeLow != written_identity.nFileSizeLow) {
+            goto cleanup;
+        }
+    }
+#endif
     if (fclose(source) != 0) {
         source = NULL;
         goto cleanup;
@@ -642,9 +673,10 @@ static int hwa_process_windows_directory_bytes(
     uint64_t total = 0U;
     int written = snprintf(pattern, sizeof(pattern), "%s\\*",
                            request->job_directory);
-    if (written < 0 || (size_t)written >= sizeof(pattern)) goto failed;
+    if (written < 0 || (size_t)written >= sizeof(pattern))
+        goto inspect_failed;
     search = FindFirstFileA(pattern, &entry);
-    if (search == INVALID_HANDLE_VALUE) goto failed;
+    if (search == INVALID_HANDLE_VALUE) goto inspect_failed;
     do {
         char child[4096];
         uint64_t size;
@@ -663,29 +695,38 @@ static int hwa_process_windows_directory_bytes(
             size > request->max_output_file_bytes ||
             total > UINT64_MAX - size) {
             (void)FindClose(search);
-            goto failed;
+            goto invalid_output;
         }
         total += size;
     } while (FindNextFileA(search, &entry) != 0);
     if (GetLastError() != ERROR_NO_MORE_FILES || FindClose(search) == 0)
-        goto failed;
+        goto inspect_failed;
     *bytes = total;
     if (enforce_names) {
         size_t index;
         for (index = 0U; index < request->output_count; ++index) {
             DWORD attributes;
-            if (request->outputs[index].path == NULL) goto failed;
+            if (request->outputs[index].path == NULL) goto missing_output;
             attributes = GetFileAttributesA(request->outputs[index].path);
             if (attributes == INVALID_FILE_ATTRIBUTES ||
                 (attributes & (FILE_ATTRIBUTE_DIRECTORY |
                                FILE_ATTRIBUTE_REPARSE_POINT |
-                               FILE_ATTRIBUTE_DEVICE)) != 0U) goto failed;
+                               FILE_ATTRIBUTE_DEVICE)) != 0U)
+                goto missing_output;
         }
     }
     return 0;
-failed:
+invalid_output:
     hwa_process_error(error, error_size,
-                      "invalid renderer output directory");
+                      "renderer created a non-regular or oversized output");
+    return -1;
+missing_output:
+    hwa_process_error(error, error_size,
+                      "renderer omitted a declared output");
+    return -1;
+inspect_failed:
+    hwa_process_error(error, error_size,
+                      "cannot inspect renderer output directory");
     return -1;
 }
 

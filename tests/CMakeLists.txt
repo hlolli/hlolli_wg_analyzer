@@ -871,6 +871,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stage2_cli_tests.c")
   endif()
 
   set(hlolli_wg_analyzer_stage2_cli_cases
+    stage2-summary-line-endings
     stage2-audio
     stage2-score
     stage2-json
