@@ -127,13 +127,13 @@ jobs:
         shell: pwsh
         run: |
           $runtime = if ("${{ matrix.build_type }}" -eq "Debug") { "/MDd" } else { "/MD" }
-          cl /nologo /TC $runtime /W4 /WX /permissive- /I install\include `
-            tests\public_client_tests.c `
+          cl /nologo $runtime /W4 /WX /permissive- /I install\include `
+            /Tc tests\public_client_tests.c `
             install\lib\hlolli_wg_analyzer_core.lib `
             /Fe:"$env:RUNNER_TEMP\hwa-client-c.exe"
           & "$env:RUNNER_TEMP\hwa-client-c.exe"
-          cl /nologo /TP /std:c++17 /EHsc $runtime /W4 /WX /permissive- /I install\include `
-            tests\public_client_tests.c `
+          cl /nologo /std:c++17 /EHsc $runtime /W4 /WX /permissive- /I install\include `
+            /Tp tests\public_client_tests.c `
             install\lib\hlolli_wg_analyzer_core.lib `
             /Fe:"$env:RUNNER_TEMP\hwa-client-cxx.exe"
           & "$env:RUNNER_TEMP\hwa-client-cxx.exe"
