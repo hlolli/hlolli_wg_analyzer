@@ -153,6 +153,34 @@ build/hlolli-wg-analyzer experiment experiment.json \
 The command starts the renderer only when both `--renderer` and `--allow-run`
 are present.
 
+`tools/instrument_fit.py` adds one checked selection step above an experiment.
+It reads the saved `result.hwa-experiment`, joins fit and held-out scores, and
+can add a pitch-conditioned body-shape score. Instrument adapters own rendering
+and any profile rules. The selector owns neither Csound nor a model profile.
+See [Shared string-instrument modeling](docs/string-instrument-modeling.md) for
+the violin, viola, cello, and double-bass work split.
+
+```sh
+python3 tools/instrument_fit.py select \
+  --manifest instrument-fit.json \
+  --experiment experiment-results/result.hwa-experiment \
+  --analyzer build/hlolli-wg-analyzer \
+  --profile model-profile.json \
+  --bind reference_body_fit=/private/path/fit.wav \
+  --bind reference_body_check=/private/path/check.wav \
+  --output fit-result.json
+```
+
+The score uses measured gaps and body-shape error. File hashes only bind the
+inputs and outputs to the receipt. They do not score the sound. `write-profile`
+writes a new file, asks the adapter to validate it, and writes a receipt. It
+never replaces the source profile. A render-only adapter has empty
+`profile_paths`; the writer rejects it.
+
+`check-recordings` runs the body-envelope estimator on bounded excerpts of
+real recordings. Keep private recordings outside the repository and pass each
+one with `--recording`.
+
 ## Supported input
 
 The built-in reader accepts seekable, little-endian RIFF/WAVE and RF64 files.

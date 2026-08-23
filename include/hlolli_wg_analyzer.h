@@ -202,6 +202,80 @@ typedef struct HWAAnalysis {
     double *spectrogram_db;
 } HWAAnalysis;
 
+typedef enum HWABodyEnvelopeStatus {
+    HWA_BODY_ENVELOPE_VALID = 1,
+    HWA_BODY_ENVELOPE_LOW_SUPPORT = 2,
+    HWA_BODY_ENVELOPE_NO_SUPPORT = 3
+} HWABodyEnvelopeStatus;
+
+enum {
+    HWA_BODY_ENVELOPE_LOW_POINT_SUPPORT = 1U << 0,
+    HWA_BODY_ENVELOPE_LOW_PITCH_SPREAD = 1U << 1,
+    HWA_BODY_ENVELOPE_LOW_PARTIAL_SPREAD = 1U << 2,
+    HWA_BODY_ENVELOPE_HIGH_RESIDUAL = 1U << 3
+};
+
+typedef struct HWABodyEnvelopeOptions {
+    HWAAnalysisOptions analysis;
+    double min_frequency_hz;
+    double max_frequency_hz;
+    double min_pitch_confidence;
+    size_t max_harmonics;
+    size_t bins_per_octave;
+    size_t fit_passes;
+    size_t max_observations;
+    size_t max_points;
+    uint64_t max_fit_evaluations;
+} HWABodyEnvelopeOptions;
+
+typedef struct HWABodyEnvelopePoint {
+    double frequency_hz;
+    double relative_db;
+    double residual_spread_db;
+    double confidence;
+    uint64_t observation_count;
+    size_t pitch_cell_count;
+    size_t harmonic_count;
+    uint32_t quality_flags;
+    int valid;
+} HWABodyEnvelopePoint;
+
+typedef struct HWABodyEnvelopeEstimate {
+    char *path;
+    HWABodyEnvelopeStatus status;
+    double confidence;
+    double pitch_min_hz;
+    double pitch_max_hz;
+    uint64_t frames_seen;
+    uint64_t frames_used;
+    uint64_t frames_rejected_pitch;
+    size_t observation_count;
+    HWABodyEnvelopePoint *points;
+    size_t point_count;
+} HWABodyEnvelopeEstimate;
+
+typedef struct HWABodyEnvelopeGap {
+    double frequency_hz;
+    double model_minus_reference_db;
+    double confidence;
+    int valid;
+} HWABodyEnvelopeGap;
+
+typedef struct HWABodyEnvelopeResult {
+    HWABodyEnvelopeOptions options;
+    HWABodyEnvelopeEstimate reference;
+    HWABodyEnvelopeEstimate model;
+    HWABodyEnvelopeGap *gaps;
+    size_t gap_count;
+    double shape_rmse_db;
+    double shape_correlation;
+    double comparison_confidence;
+    uint64_t retained_work_bytes;
+    uint64_t fit_evaluations;
+    int model_present;
+    int comparison_valid;
+} HWABodyEnvelopeResult;
+
 typedef enum HWAAlignmentMode {
     HWA_ALIGNMENT_AUDIO_TO_AUDIO = 1,
     HWA_ALIGNMENT_SCORE_TO_AUDIO = 2
@@ -2213,6 +2287,23 @@ int hwa_analyze_wav(const char *path,
                     size_t error_size);
 
 void hwa_analysis_free(HWAAnalysis *analysis);
+
+void hwa_body_envelope_options_default(HWABodyEnvelopeOptions *options);
+
+/*
+ * Estimate a pitch-conditioned radiated envelope from one WAVE, or compare
+ * two WAVE files when model_path is non-null. The result describes spectral
+ * shape only: room, microphone, strings, and playing remain mixed into it.
+ * The call initializes every result field, including on failure.
+ */
+int hwa_body_envelope_wavs(const char *reference_path,
+                           const char *model_path,
+                           const HWABodyEnvelopeOptions *options,
+                           HWABodyEnvelopeResult *result,
+                           char *error,
+                           size_t error_size);
+
+void hwa_body_envelope_result_free(HWABodyEnvelopeResult *result);
 
 void hwa_alignment_options_default(HWAAlignmentOptions *options);
 

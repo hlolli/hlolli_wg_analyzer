@@ -40,6 +40,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/alignment_file.c
   src/analysis.c
   src/analysis_file.c
+  src/body_envelope.c
   src/dsp.c
   src/experiment.c
   src/experiment_file.c
@@ -106,6 +107,7 @@ endif()
 
 add_executable(hlolli_wg_analyzer
   src/alignment_report.c
+  src/body_envelope_report.c
   src/experiment_process.c
   src/experiment_report.c
   src/file_output.c

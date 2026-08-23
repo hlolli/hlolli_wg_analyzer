@@ -7,6 +7,7 @@
 #include "hlolli_wg_analyzer.h"
 #include "alignment_file.h"
 #include "alignment_report.h"
+#include "body_envelope_report.h"
 #include "experiment.h"
 #include "experiment_process.h"
 #include "experiment_report.h"
@@ -74,6 +75,9 @@ typedef struct HWACli {
     int json;
     int replace;
     int analysis_clock_option_set;
+    int frame_size_option_set;
+    int hop_size_option_set;
+    int silence_option_set;
     int analysis_only_option_set;
     int analysis_resource_option_set;
     int decode_block_option_set;
@@ -97,6 +101,8 @@ static void hwa_print_usage(FILE *stream)
         "Usage:\n"
         "  hlolli-wg-analyzer [OPTIONS] inspect INPUT.wav\n"
         "  hlolli-wg-analyzer [OPTIONS] compare REFERENCE.wav MODEL.wav\n"
+        "  hlolli-wg-analyzer [OPTIONS] body-envelope REFERENCE.wav "
+        "[MODEL.wav]\n"
         "  hlolli-wg-analyzer [OPTIONS] export INPUT.wav --kind KIND "
         "--output FILE.csv\n"
         "  hlolli-wg-analyzer [OPTIONS] align REFERENCE.wav TARGET.wav "
@@ -419,17 +425,20 @@ static int hwa_parse_option_with_value(HWACli *cli,
         }
         cli->options.frame_size = size_value;
         cli->analysis_clock_option_set = 1;
+        cli->frame_size_option_set = 1;
     } else if (strcmp(option, "--hop-size") == 0) {
         if (hwa_parse_size(value, &size_value) != 0 || size_value == 0U) {
             return -1;
         }
         cli->options.hop_size = size_value;
         cli->analysis_clock_option_set = 1;
+        cli->hop_size_option_set = 1;
     } else if (strcmp(option, "--silence-threshold") == 0) {
         if (hwa_parse_double(value, &cli->options.silence_threshold_dbfs) != 0) {
             return -1;
         }
         cli->analysis_clock_option_set = 1;
+        cli->silence_option_set = 1;
     } else if (strcmp(option, "--max-bytes") == 0) {
         if (hwa_parse_u64(value, &cli->options.max_input_bytes) != 0 ||
             cli->options.max_input_bytes == 0U) {
@@ -1430,6 +1439,92 @@ static int hwa_run_compare(const HWACli *cli)
     }
     hwa_analysis_free(&model);
     hwa_analysis_free(&reference);
+    return result;
+}
+
+static int hwa_run_body_envelope(const HWACli *cli)
+{
+    HWABodyEnvelopeOptions options;
+    HWABodyEnvelopeResult body;
+    const char *model_path = NULL;
+    char error[HWA_ERROR_SIZE] = {0};
+    int report_result;
+    int result = 1;
+
+    memset(&body, 0, sizeof(body));
+    if ((cli->positional_count != 2U && cli->positional_count != 3U) ||
+        strcmp(cli->positionals[0], "body-envelope") != 0 ||
+        cli->output_path != NULL || cli->replace || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->alignment_option_set ||
+        cli->segmentation_option_set || cli->measurement_option_set ||
+        cli->comparison_option_set || cli->physical_option_set ||
+        cli->production_option_set || cli->run_option_set ||
+        cli->experiment_option_set || cli->gap_report_option_set ||
+        cli->physical_binding_count != 0U) {
+        return -1;
+    }
+    if (cli->positional_count == 3U) {
+        model_path = cli->positionals[2];
+        if (strcmp(cli->positionals[1], "-") == 0 &&
+            strcmp(model_path, "-") == 0) {
+            (void)fputs(
+                "hlolli-wg-analyzer: body-envelope accepts one stdin input\n",
+                stderr);
+            return 2;
+        }
+    }
+    hwa_body_envelope_options_default(&options);
+    options.analysis.channel_mode = cli->options.channel_mode;
+    options.analysis.selected_channel = cli->options.selected_channel;
+    options.analysis.max_input_bytes = cli->options.max_input_bytes;
+    options.analysis.max_input_frames = cli->options.max_input_frames;
+    if (cli->decode_block_option_set) {
+        options.analysis.decode_block_frames =
+            cli->options.decode_block_frames;
+    }
+    if (cli->frame_size_option_set) {
+        options.analysis.frame_size = cli->options.frame_size;
+    }
+    if (cli->hop_size_option_set) {
+        options.analysis.hop_size = cli->options.hop_size;
+    }
+    if (cli->silence_option_set) {
+        options.analysis.silence_threshold_dbfs =
+            cli->options.silence_threshold_dbfs;
+    }
+    if (cli->analysis_resource_option_set) {
+        options.analysis.max_work_bytes = cli->options.max_work_bytes;
+        options.analysis.max_transforms = cli->options.max_transforms;
+        options.analysis.max_track_points = cli->options.max_track_points;
+    }
+    if (cli->analysis_only_option_set) {
+        options.analysis.max_spectrum_values =
+            cli->options.max_spectrum_values;
+    }
+    if (hwa_body_envelope_wavs(
+            cli->positionals[1], model_path, &options, &body,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "body-envelope analysis failed");
+        hwa_body_envelope_result_free(&body);
+        return 1;
+    }
+    report_result = cli->json
+                        ? hwa_body_envelope_report_json(stdout, &body)
+                        : hwa_body_envelope_report_text(stdout, &body);
+    if (report_result == 0 &&
+        hwa_finish_stream(stdout, "standard output") == 0) {
+        result = 0;
+    } else {
+        (void)fputs("hlolli-wg-analyzer: cannot write standard output\n",
+                    stderr);
+    }
+    hwa_body_envelope_result_free(&body);
     return result;
 }
 
@@ -2639,6 +2734,8 @@ int main(int argc, char **argv)
         result = hwa_run_inspect(&cli);
     } else if (strcmp(cli.positionals[0], "compare") == 0) {
         result = hwa_run_compare(&cli);
+    } else if (strcmp(cli.positionals[0], "body-envelope") == 0) {
+        result = hwa_run_body_envelope(&cli);
     } else if (strcmp(cli.positionals[0], "export") == 0) {
         result = hwa_run_export(&cli);
     } else if (strcmp(cli.positionals[0], "align") == 0) {

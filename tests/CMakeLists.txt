@@ -2,6 +2,21 @@ add_executable(hlolli_wg_analyzer_cli_tests cli_tests.c)
 target_compile_features(hlolli_wg_analyzer_cli_tests PRIVATE c_std_11)
 hwa_set_warnings(hlolli_wg_analyzer_cli_tests)
 
+add_executable(
+  hlolli_wg_analyzer_body_envelope_tests
+  body_envelope_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_body_envelope_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_body_envelope_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_body_envelope_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_body_envelope_tests)
+add_test(
+  NAME unit.body-envelope
+  COMMAND hlolli_wg_analyzer_body_envelope_tests)
+set_tests_properties(unit.body-envelope PROPERTIES TIMEOUT 30)
+
 if(NOT MSVC)
   target_link_libraries(hlolli_wg_analyzer_cli_tests PRIVATE m)
 endif()
@@ -958,3 +973,13 @@ foreach(case_name IN LISTS hlolli_wg_analyzer_cli_cases)
     set_tests_properties(cli.${case_name} PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endforeach()
+
+find_program(HWA_PYTHON3_EXECUTABLE NAMES python3)
+if(HWA_PYTHON3_EXECUTABLE)
+  add_test(
+    NAME unit.instrument-fit
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_fit.py)
+  set_tests_properties(unit.instrument-fit PROPERTIES TIMEOUT 30)
+endif()
