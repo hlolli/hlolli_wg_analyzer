@@ -932,7 +932,7 @@ static int hwa_body_compare(HWABodyEnvelopeResult *result,
         if (reference_square > 0.0L && model_square > 0.0L) {
             result->shape_correlation =
                 (double)(covariance /
-                         sqrt(reference_square * model_square));
+                         sqrtl(reference_square * model_square));
         }
         result->comparison_confidence =
             (double)(confidence_sum / (long double)common);
