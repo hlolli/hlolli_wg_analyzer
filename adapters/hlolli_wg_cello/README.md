@@ -1,0 +1,259 @@
+# Cello open-string passive-loss fit
+
+This adapter fits one open-string loss value at a time, then checks one fixed
+four-string candidate. It can also search termination shape and loss together.
+The current G2 search adds a narrow bridge-loss peak. The D3 search keeps the
+older nut and bridge cutoff grid. One implementation freezes a separate bundle
+for C2, G2, D3, or A3:
+
+| Target | Manifest | Temporary model path | Render string |
+|---|---|---|---:|
+| `c2` | `fit.json` | `strings[0].loss_time_constant_seconds` | 1 |
+| `g2` | `fit-g2-bridge-peak.json` | four fields under `strings[1]` | 2 |
+| `d3` | `fit-d3.json` | `strings[2].loss_time_constant_seconds` | 3 |
+| `a3` | `fit-a3.json` | `strings[3].loss_time_constant_seconds` | 4 |
+
+It does not fit bow, body, release, or gesture data. It never changes the fixed
+model in place.
+
+The adapter has three checked parts:
+
+- `adapter.py` builds one frozen renderer and runs analyzer render jobs;
+- the scalar and shape `fit*.json` files score passive decay on separate fit
+  and validation recordings; and
+- `hlolli_wg_cello/examples/passive_open_string_fit.csd` makes the frozen
+  target's pizzicato while keeping the gate high. The high gate avoids the
+  normal note-off damping, which would hide passive string loss.
+
+The renderer copies the cello source, model, schema, and build files into a
+new temporary tree for each job. It changes the temporary profile, regenerates
+the temporary C source, makes a Release plug-in, and renders one PCM24 WAVE.
+It never writes to either source repository. Before and after each job it
+checks all copied inputs, the Csound header trees, Csound, its direct library,
+libsndfile, CMake, Ninja, Python, and the C compiler. Bundle creation also
+checks that the host loads the named Csound core and libsndfile paths. Output
+publication uses an exclusive hard link and never follows an existing path.
+
+## Recordings
+
+The fit note is the 2012 University of Iowa `ff` open C2 pizzicato from the
+[individual-pitch page](https://theremin.music.uiowa.edu/MIS-Pitches-2012/MISCello2012.html).
+The validation note comes from the older Iowa 2001 `ff` C-string range on the
+[cello page](https://theremin.music.uiowa.edu/MIScello.html). The second take
+uses a different player, cello, mic, and session.
+
+| File | Role | SHA-256 |
+|---|---|---|
+| 2012 `Cello.pizz.ff.sulC.C2.stereo.aif` | raw fit source | `5424133b9a1ca4143cb84c833c00bd236498934eb94ed4e204b9f6f69738c51e` |
+| 2012 `pizz-C2.wav` | fit input | `94dbd2259de5162cc16a4d5a8d9ef54590cdf7d3a9b3a37276c4483292714daa` |
+| 2001 `Cello.pizz.ff.sulC.C2A2.aiff` | raw validation source | `4df44ccb2754696d96fa422a13e414fcaffef1dfb50a2d60e7205de77117ae96` |
+| 2001 `iowa-2001-pizz-C2-check.wav` | validation input | `f61a03f01cf32cb8c60d2e9b3a98011deaace77f2fcd8b122530fc5f92f73d2a` |
+
+The validation trim keeps source samples `[209692, 465842)`: 256,150 mono frames
+at 44.1 kHz, or 5.808390 seconds. Conversion changes signed 16-bit AIFF
+big-endian samples to the same signed values in little-endian WAVE. It does
+not change rate, channels, gain, or samples. Keep both source recordings and
+all fit output outside Git. The
+[G2, D3, and A3 source receipt](../../docs/research/cello-gda-passive-loss-sources.md)
+records the other official files and exact trims.
+
+## Build a frozen bundle
+
+Use system Python 3.9 because the frozen renderer has the fixed
+`/usr/bin/python3` shebang. Pass resolved libraries that the named Csound build
+loads on the host.
+
+```sh
+/usr/bin/python3 -B adapters/hlolli_wg_cello/adapter.py build \
+  --cello-root /path/to/hlolli_wg_cello \
+  --csound /path/to/csound \
+  --csound-library /path/to/CsoundLib64 \
+  --sndfile-library /path/to/libsndfile \
+  --cmake /path/to/cmake \
+  --ninja /path/to/ninja \
+  --python /usr/bin/python3 \
+  --cc /path/to/cc \
+  --csound-build-dir /path/to/csound-build \
+  --csound-source-dir /path/to/csound-source \
+  --target g2 \
+  --reference-fit /private/path/pizz-G2.wav \
+  --reference-check /private/path/iowa-2001-pizz-G2-check.wav \
+  --output-dir /private/new/cello-g2-fit-bundle
+```
+
+The new directory contains `renderer`, `experiment.json`, `fit.json`,
+`bindings.json`, and `receipt.json`. Pass every `id=path` row from
+`bindings.json` to the analyzer as a `--bind` option. The analyzer command has
+this form:
+
+```sh
+hlolli-wg-analyzer \
+  --renderer /private/new/cello-g2-fit-bundle/renderer \
+  --allow-run \
+  --bind reference_g2_fit=/private/path/pizz-G2.wav \
+  --bind reference_g2_check=/private/path/iowa-2001-pizz-G2-check.wav \
+  --bind base_profile=/path/to/hlolli_wg_cello/model/cello-v1.json \
+  --bind cello_cmake=/path/to/hlolli_wg_cello/CMakeLists.txt \
+  --bind cello_source=/path/to/hlolli_wg_cello/src/hlolli_wg_cello.c \
+  --bind model_generator=/path/to/hlolli_wg_cello/tools/generate_model.py \
+  --bind model_manifest=/path/to/hlolli_wg_cello/model/manifest.json \
+  --bind model_schema=/path/to/hlolli_wg_cello/model/schema/cello-v1.schema.json \
+  --bind probe_csd=/path/to/hlolli_wg_cello/examples/passive_open_string_fit.csd \
+  --bind wasm_preparer=/path/to/hlolli_wg_cello/tools/prepare_wasm_source.py \
+  --output /private/new/cello-g2-experiment \
+  experiment /private/new/cello-g2-fit-bundle/experiment.json
+```
+
+Select a point with the raw model WAVE artifacts, not the Stage 8 diagnostic
+gaps. Scalar selection applies the same absolute checks used by the joint
+gate: each fit and validation goal needs loss at most 2.0, T60 ratio from 0.5
+through 2.0, and support ratio at least 0.5.
+
+```sh
+/usr/bin/python3 -B tools/instrument_fit.py select \
+  --manifest /private/new/cello-g2-fit-bundle/fit.json \
+  --experiment /private/new/cello-g2-experiment/result.hwa-experiment \
+  --analyzer /path/to/hlolli-wg-analyzer \
+  --profile /path/to/hlolli_wg_cello/model/cello-v1.json \
+  --bind reference_g2_fit=/private/path/pizz-G2.wav \
+  --bind reference_g2_check=/private/path/iowa-2001-pizz-G2-check.wav \
+  --output /private/new/cello-g2-selection.json
+```
+
+Repeat the command with `c2`, `d3`, or `a3` and the matching files. The old
+hidden C2 reference flags remain only so the first frozen receipt can be
+reproduced.
+
+For G2 or D3, replace `build` with `build-shape`. The current G2 bundle varies
+bridge cutoff, peak bandwidth, peak loss, and passive loss time across 96 fixed
+points. The D3 bundle varies loss time, nut cutoff, and bridge cutoff across 54
+points. Both manifests combine whole-tail error with eight per-partial T60
+checks. Pass the bundle's `fit.json` to the same `select` command. Shape
+selection writes only a new result; it does not edit the fixed model.
+
+`write-profile` can write one scalar candidate to a new path, but that is not
+the Stage 3 merge gate. Keep the four results separate until one joint
+candidate renders all four strings and passes a third recording set.
+
+## Check one four-string candidate
+
+`build-joint` takes the four frozen bundles, their current selection results,
+and four new audit recordings. A G2 shape result can supply four changes while
+C2, D3, and A3 each supply one. Each audit row also names its source set and
+performance. The command rejects a reused recording, a stale result, a changed
+source or tool, audio stored in either source repository, or a bundle path
+under either repository.
+
+```sh
+/usr/bin/python3 -B adapters/hlolli_wg_cello/adapter.py build-joint \
+  --scalar c2 /private/c2-bundle /private/c2-selection.json \
+  --scalar g2 /private/g2-bundle /private/g2-selection.json \
+  --scalar d3 /private/d3-bundle /private/d3-selection.json \
+  --scalar a3 /private/a3-bundle /private/a3-selection.json \
+  --audit c2 /private/audit-C2.wav source-set performance-c2 \
+  --audit g2 /private/audit-G2.wav source-set performance-g2 \
+  --audit d3 /private/audit-D3.wav source-set performance-d3 \
+  --audit a3 /private/audit-A3.wav source-set performance-a3 \
+  --output-dir /private/new/cello-joint-bundle
+```
+
+The new directory has `renderer`, `experiment.json`, `fit.json`,
+`bindings.json`, `receipt.json`, and `candidate-profile.json`. Its experiment
+has two points: the unchanged four-string baseline and one frozen candidate.
+Eight fit and validation cases give 16 Release render jobs. Audit goals reuse
+the validation renders, so audit audio cannot change the candidate or add a
+hidden build.
+
+Run the experiment with every row in `bindings.json`, then call `select` with
+the 12 `reference_*` rows. The version 2 fit manifest checks total score,
+split means, each goal, the saved scalar losses, an absolute 6 dB curve-error
+cap, a model/reference T60 ratio from 0.5 to 2.0, and a support ratio of at
+least 0.5. A failed check writes a result, exits with status 2, and omits the
+chosen fields. `write-profile` recomputes those checks and accepts only a
+passing result and the frozen renderer. It writes a new profile and receipt;
+it never replaces the source profile.
+
+The 2026 RWC Instruments release supplies three maker/player variations. The
+[source receipt](../../docs/research/cello-alternative-passive-audit-sources.md)
+records its rights, member hashes, exact splits, pitch, and raw-tail checks.
+Variation 2 mezzo fits G2 and variation 3 mezzo validates it. Variation 1 was
+already used in the earlier four-string audit, so it cannot check the new G2
+model as untouched data. The same receipt records the search for another set.
+No accessible unused four-string set meets the input checks. A synthetic run
+still tests the joint command and all seven candidate changes.
+
+## Current passive-loss result
+
+The current staged values are C2 1.00 s, D3 0.75 s, and A3 1.00 s. G2 uses a
+2.50 s loss time, an 18 kHz bridge cutoff, a 100 Hz-wide bridge-loss peak at
+the fixed 293 Hz center, and a 0.02 peak loss fraction. Its score falls from
+7.665 to 2.825 and both fit and validation goals pass. The
+[G2 report](../../docs/research/cello-g2-bridge-termination-v1.md) gives the
+per-partial results and receipts.
+
+The fixed profile still contains 0.25 s passive loss and zero peak loss for
+every string. The staged G2 values need a new independent four-string audit
+before any profile write.
+
+The [full sweep report](../../docs/research/cello-four-string-passive-loss-v3.md)
+records the historical 28-point score table, later G2 grid, fixed absolute
+limits, RWC source split, and failed final audit. The original v3 run used:
+
+- adapter: `1c83bef757054fcf29ad5cf16d2125c6e123b279e53dccc89ba97509bc244cfa`;
+- fit selector: `e4476bdfde0f44546cbae7b251f2784e257c72ab548e6057396b621e31a96c98`;
+- generic probe: `ac17b30bdddecaf23b4883b924a1af9ed7f6b01f0df47984853ff171db19ad48`.
+
+The current selector SHA-256 is
+`f8952be56bb854f5ccbc61a2c90abab11fbecf6b01e5724fdea31df942acbf91`.
+The current adapter SHA-256 is
+`96aaf02ce56edc735e8e34765df943fb8487ec2cef13e90161a6066296d96e53`.
+The earlier loss-only G2 grid had 19 points through 3.0 seconds and selected
+1.50 seconds. The later RWC variation-1 audit failed at D3 and G2. The rejected
+joint receipt hashes are
+`8858d1504351c3340b2112037c76e2a03587dd4619620316172a4525b5e3ca34`
+for the bundle and
+`f89292ea9270786813eca9e9b7e7facf05df1fb795d6d712f6152a77ceef6449`
+for the failed result.
+
+One time value per string did not pass across these players and dynamics. The
+next fit added bridge and nut cutoffs on G2 and D3 and scored eight partial
+decays. D3 passed with 0.75 s loss, 8 kHz nut cutoff, and the existing
+7086.47 Hz bridge cutoff. That G2 grid failed. The
+[shape-fit report](../../docs/research/cello-gd-passive-shape-v1.md) records
+those grids, limits, results, and hashes. The later narrow G2 bridge peak is
+the first G2 candidate to pass both fit and validation.
+
+## Historical C2 v1 sweep
+
+On 2026-08-25 the seven-level Release sweep ran 14 jobs through the real
+external-renderer process. Every model file was non-silent, unclipped, stereo
+PCM24 at 44.1 kHz, and 159,861 frames. Fit and check jobs at the same point had
+the same model hash.
+
+| Loss time (s) | Model T60 (s) | Fit loss | Check loss |
+|---:|---:|---:|---:|
+| 0.080 | 0.520 | 5.692 | 5.578 |
+| 0.125 | 0.797 | 5.335 | 5.182 |
+| 0.250 | 1.548 | 4.493 | 4.324 |
+| 0.500 | 3.003 | 3.080 | 3.301 |
+| 0.750 | 4.426 | 1.452 | 2.000 |
+| 1.000 | 5.815 | 0.514 | 1.095 |
+| 1.500 | 8.180 | 1.859 | 1.006 |
+
+The fit note measured a 5.246-second T60. The check note measured 8.441
+seconds. The combined first pass chose 1.0 second. This is a provisional C2
+result, not a fixed-model update. The Stage 8 RMS and band gaps all reached
+their cap and stayed flat; `instrument_fit.py` chose from the passive-decay
+curves in the job WAVE files instead.
+
+The source hashes for this run were:
+
+- adapter: `45d0d5667dfd2fc31f5c8fb664d6e7026ab4f4ff342d88991fc340835d8be453`;
+- fit manifest: `5e76750085717b7e72f022201fef59f0f86a5a3bc571309b9d84336bdde5d107`;
+- probe score: `c384de4fd235c3bbb3217cca9527f1348dd7c8398a7fbcbc5f45ee75a13a9ce5`;
+- fit tool: `936aa063869bd3b7e2b8dfeb0a56def6e22c3122111bd7814c252c23825b8a9f`.
+
+The bundle receipt holds the host tool, library, header-tree, input, renderer,
+manifest, and binding hashes. Apple system libraries and other transitive
+Csound libraries remain host trust inputs; the receipt does not claim to hash
+the whole operating system.

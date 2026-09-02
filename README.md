@@ -100,6 +100,23 @@ a path merely because an earlier artifact stored it.
 The sample note manifest at `examples/note-manifest.csv` shows the accepted
 score columns and event kinds.
 
+### Check isolated and harmonic decay
+
+```sh
+build/hlolli-wg-analyzer isolated-note note.wav \
+  --expected-hz 196 --metrics pitch,passive-decay
+build/hlolli-wg-analyzer --json harmonic-decay reference.wav model.wav \
+  --expected-hz 196
+```
+
+`isolated-note` checks pitch and the whole-note passive tail.
+`harmonic-decay` measures separate harmonic T60 values with fixed
+`harmonic-decay-1` rules. It uses mean channel power, rejects a second pluck,
+checks band noise and fit support, and needs at least four valid harmonics.
+With two files it reports the shared harmonic count, coverage, median bias,
+and RMS log-T60 error. Static gain does not change the slopes. Long room or
+body modes still can, so this command is a diagnostic rather than a fit rule.
+
 ### Compare profiles and check evidence
 
 ```sh
@@ -141,6 +158,18 @@ stems and probes. `rank` prints ranked gaps. `excerpt` creates checked
 listening clips. `report` creates JSON, CSV, HTML, and any requested clips in a
 new directory.
 
+For one isolated pitched note, request pitch, passive decay, or both:
+
+```sh
+build/hlolli-wg-analyzer isolated-note note.wav \
+  --expected-hz 41.20344461410875 \
+  --metrics pitch,passive-decay
+```
+
+The JSON result reports requested and valid metric masks, named rejection
+reasons, sample bounds, WAVE facts, and bounded work counts. A rejected metric
+is a checked result, not an I/O error.
+
 `experiment` runs a named renderer for a bounded parameter sweep:
 
 ```sh
@@ -154,9 +183,14 @@ The command starts the renderer only when both `--renderer` and `--allow-run`
 are present.
 
 `tools/instrument_fit.py` adds one checked selection step above an experiment.
-It reads the saved `result.hwa-experiment`, joins fit and held-out scores, and
-can add a pitch-conditioned body-shape score. Instrument adapters own rendering
-and any profile rules. The selector owns neither Csound nor a model profile.
+It reads the saved `result.hwa-experiment`, joins fit and validation scores, and
+can add a pitch-conditioned body-shape score or a gain-independent passive
+decay score. Instrument adapters own rendering and any profile rules. The
+selector owns neither Csound nor a model profile. The
+[cello open-string adapter](adapters/hlolli_wg_cello/README.md) gives a full
+rerun command. The
+[viola passive-string adapter](adapters/hlolli_wg_viola/README.md) documents
+its four targets and checked multi-tail roster.
 See [Shared string-instrument modeling](docs/string-instrument-modeling.md) for
 the violin, viola, cello, and double-bass work split.
 
@@ -171,11 +205,14 @@ python3 tools/instrument_fit.py select \
   --output fit-result.json
 ```
 
-The score uses measured gaps and body-shape error. File hashes only bind the
-inputs and outputs to the receipt. They do not score the sound. `write-profile`
-writes a new file, asks the adapter to validate it, and writes a receipt. It
-never replaces the source profile. A render-only adapter has empty
-`profile_paths`; the writer rejects it.
+The score uses measured gaps, body-shape error, and passive-decay error named
+by the fit manifest. File hashes only bind the inputs and outputs to the
+receipt. They do not score the sound. `write-profile` writes a new file, asks
+the adapter to validate it, and writes a receipt. It never replaces the source
+profile. A render-only adapter has empty `profile_paths`; the writer rejects
+it. Fit-manifest version 2 verifies one fixed candidate against fit,
+validation, and audit goals. Audit data cannot tune that candidate. The writer
+accepts it only after all saved and recomputed gates pass.
 
 `check-recordings` runs the body-envelope estimator on bounded excerpts of
 real recordings. Keep private recordings outside the repository and pass each

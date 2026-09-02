@@ -101,6 +101,37 @@ static int hwa_test_write_extra(const char *directory, const char *name)
 }
 #endif
 
+#if HWA_STAGE8_RENDERER_MODE == 7 && !defined(_WIN32)
+static int hwa_test_churn_regular_scratch(const char *directory)
+{
+    char path[4096];
+    unsigned round;
+    unsigned slot;
+
+    for (round = 0U; round < 200U; ++round) {
+        for (slot = 0U; slot < 256U; ++slot) {
+            FILE *stream;
+            char name[64];
+            int written = snprintf(name, sizeof(name), ".scratch-%u", slot);
+            if (written < 0 || (size_t)written >= sizeof(name) ||
+                hwa_test_join(path, sizeof(path), directory, name) != 0)
+                return -1;
+            stream = fopen(path, "wb");
+            if (stream == NULL || fputc((int)(round & 0xffU), stream) == EOF ||
+                fclose(stream) != 0) return -1;
+        }
+        for (slot = 0U; slot < 256U; ++slot) {
+            char name[64];
+            int written = snprintf(name, sizeof(name), ".scratch-%u", slot);
+            if (written < 0 || (size_t)written >= sizeof(name) ||
+                hwa_test_join(path, sizeof(path), directory, name) != 0 ||
+                unlink(path) != 0) return -1;
+        }
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #if HWA_STAGE8_RENDERER_MODE != 1
@@ -149,6 +180,9 @@ int main(int argc, char **argv)
         (void)nanosleep(&delay, NULL);
     }
 #endif
+#endif
+#if HWA_STAGE8_RENDERER_MODE == 7 && !defined(_WIN32)
+    if (hwa_test_churn_regular_scratch(argv[4]) != 0) return 100;
 #endif
     if (hwa_test_join(output_path, sizeof(output_path), argv[4],
                       "model.wav") != 0 ||

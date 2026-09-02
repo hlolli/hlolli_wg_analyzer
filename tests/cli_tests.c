@@ -283,6 +283,60 @@ static int write_wave(const char *path,
   return fclose(stream) == 0;
 }
 
+static int write_harmonic_decay_wave(const char *path,
+                                     double tau_seconds,
+                                     double lead_seconds) {
+  const uint32_t sample_rate = 48000u;
+  const uint32_t frames = sample_rate * 3u;
+  const uint32_t data_bytes = frames * 2u;
+  const uint32_t lead =
+      (uint32_t)llround(lead_seconds * (double)sample_rate);
+  FILE *stream = fopen(path, "wb");
+  uint32_t frame;
+
+  if (stream == NULL) {
+    return 0;
+  }
+  if (!write_bytes(stream, "RIFF", 4u) ||
+      !write_u32le(stream, 36u + data_bytes) ||
+      !write_bytes(stream, "WAVE", 4u) ||
+      !write_bytes(stream, "fmt ", 4u) || !write_u32le(stream, 16u) ||
+      !write_u16le(stream, 1u) || !write_u16le(stream, 1u) ||
+      !write_u32le(stream, sample_rate) ||
+      !write_u32le(stream, sample_rate * 2u) ||
+      !write_u16le(stream, 2u) || !write_u16le(stream, 16u) ||
+      !write_bytes(stream, "data", 4u) || !write_u32le(stream, data_bytes)) {
+    fclose(stream);
+    return 0;
+  }
+  for (frame = 0u; frame < frames; frame++) {
+    double value = 0.0;
+    int16_t encoded;
+    if (frame >= lead) {
+      const double time =
+          (double)(frame - lead) / (double)sample_rate;
+      const double envelope = exp(-time / tau_seconds);
+      size_t harmonic;
+      for (harmonic = 1u; harmonic <= 6u; harmonic++) {
+        const double harmonic_number = (double)harmonic;
+        const double gain = 0.19 - 0.018 * harmonic_number;
+        const double phase = 0.13 * harmonic_number;
+        value += gain * envelope *
+                 sin(6.2831853071795864769 * 220.0 *
+                     harmonic_number * time + phase);
+      }
+    }
+    if (value > 1.0) value = 1.0;
+    if (value < -1.0) value = -1.0;
+    encoded = (int16_t)lrint(value * 32767.0);
+    if (!write_u16le(stream, (uint16_t)encoded)) {
+      fclose(stream);
+      return 0;
+    }
+  }
+  return fclose(stream) == 0;
+}
+
 static int write_extensible_pcm16(const char *path,
                                   uint16_t extension_size,
                                   uint32_t frames) {
@@ -927,6 +981,138 @@ static int case_mono_json(void) {
   return g_failures == 0;
 }
 
+static int case_harmonic_decay_json(void) {
+  static const char *const required_fields[] = {
+      "\"schema\":\"hwa-harmonic-decay\"",
+      "\"schema_version\":1",
+      "\"command\":\"harmonic-decay\"",
+      "\"method\":\"harmonic-decay-1\"",
+      "\"options\":{\"expected_hz\":220,\"decode_block_frames\":2048,"
+      "\"max_input_bytes\":1000000,\"max_input_frames\":200000,"
+      "\"max_work_bytes\":100000000,\"max_evaluations\":100000000}",
+      "\"reference\":{\"path\":",
+      "\"model\":{\"path\":",
+      "\"format\":{\"container\":\"RIFF\",\"encoding\":\"PCM\","
+      "\"channels\":1,\"sample_rate_hz\":48000,"
+      "\"bits_per_sample\":16",
+      "\"fft_size\":",
+      "\"hop_samples\":",
+      "\"onset_sample\":",
+      "\"broad_peak_sample\":",
+      "\"analysis_start_sample\":",
+      "\"analysis_end_sample\":",
+      "\"band_count\":24,\"valid_band_count\":6,\"valid\":true,"
+      "\"rejection_mask\":0,\"rejections\":[],\"bands\":[",
+      "{\"harmonic_number\":1,\"target_hz\":220,\"selected_hz\":",
+      "\"selected_bin\":",
+      "\"signal_first_bin\":",
+      "\"signal_last_bin\":",
+      "\"lower_noise_first_bin\":",
+      "\"lower_noise_last_bin\":",
+      "\"upper_noise_first_bin\":",
+      "\"upper_noise_last_bin\":",
+      "\"anchor_snr_db\":",
+      "\"slope_db_per_second\":",
+      "\"t60_seconds\":",
+      "\"support_seconds\":",
+      "\"fit_dynamic_range_db\":",
+      "\"residual_db\":",
+      "\"fit_point_count\":",
+      "\"fit_start_sample\":",
+      "\"fit_end_sample\":",
+      "\"tail_boundary_sample\":",
+      "\"valid\":false,\"rejection_mask\":",
+      "\"rejections\":[\"low-anchor-snr\"]",
+      "\"comparison\":{\"valid\":true,"
+      "\"shared_valid_band_count\":6,"
+      "\"shared_reference_coverage\":1,\"t60_log_rmse_db\":",
+      "\"median_t60_log_bias_db\":",
+      "\"reference_valid\":true,\"model_valid\":true,\"valid\":true,"
+      "\"t60_log_error_db\":",
+      "\"work\":{\"peak_bytes\":"};
+  test_workspace workspace;
+  char reference[PATH_MAX];
+  char model[PATH_MAX];
+  const char *arguments[] = {
+      "--json", "harmonic-decay", reference, model,
+      "--expected-hz", "220", "--block-frames", "2048",
+      "--max-bytes", "1000000", "--max-frames", "200000",
+      "--max-work-bytes", "100000000",
+      "--max-note-evaluations", "100000000"};
+  const char *reference_only[] = {
+      "--json", "harmonic-decay", reference, "--expected-hz", "220"};
+  const char *fixed_method[] = {
+      "--json", "harmonic-decay", reference, "--expected-hz", "220",
+      "--frame-size", "4096"};
+  char *first = NULL;
+  char *second = NULL;
+  char *single = NULL;
+  double expected_hz = 0.0;
+  size_t index;
+  int status;
+
+  CHECK(workspace_open(&workspace), "could not create workspace");
+  if (g_failures != 0) return 0;
+  CHECK(join_path(reference, sizeof(reference), workspace.directory,
+                  "reference.wav") &&
+            join_path(model, sizeof(model), workspace.directory, "model.wav"),
+        "harmonic-decay fixture path is too long");
+  CHECK(write_harmonic_decay_wave(reference, 0.45, 0.10) &&
+            write_harmonic_decay_wave(model, 0.45, 0.27),
+        "could not write harmonic-decay fixtures");
+  if (g_failures != 0) goto cleanup;
+
+  status = run_analyzer(
+      &workspace, arguments, sizeof(arguments) / sizeof(arguments[0]));
+  expect_success(status, &workspace);
+  first = read_whole_file(workspace.stdout_path);
+  CHECK(first != NULL && first[0] == '{',
+        "harmonic-decay JSON output is empty or malformed");
+  CHECK(first != NULL && json_string_is(first, "command", "harmonic-decay"),
+        "harmonic-decay JSON command is missing");
+  CHECK(first != NULL && json_number(first, "expected_hz", &expected_hz) &&
+            near_value(expected_hz, 220.0, 0.0),
+        "harmonic-decay JSON expected frequency is wrong");
+  CHECK(first != NULL && !has_bad_number(first),
+        "harmonic-decay JSON contains NaN or infinity");
+  for (index = 0u;
+       first != NULL &&
+       index < sizeof(required_fields) / sizeof(required_fields[0]);
+       index++) {
+    CHECK(strstr(first, required_fields[index]) != NULL,
+          "harmonic-decay JSON is missing field group %zu", index);
+  }
+
+  status = run_analyzer(
+      &workspace, arguments, sizeof(arguments) / sizeof(arguments[0]));
+  expect_success(status, &workspace);
+  second = read_whole_file(workspace.stdout_path);
+  CHECK(first != NULL && second != NULL && strcmp(first, second) == 0,
+        "harmonic-decay JSON changed across identical runs");
+
+  status = run_analyzer(&workspace, reference_only,
+                        sizeof(reference_only) / sizeof(reference_only[0]));
+  expect_success(status, &workspace);
+  single = read_whole_file(workspace.stdout_path);
+  CHECK(single != NULL &&
+            strstr(single, "\"model\":null,\"comparison\":null") != NULL,
+        "reference-only harmonic decay did not use explicit nulls");
+
+  status = run_analyzer(&workspace, fixed_method,
+                        sizeof(fixed_method) / sizeof(fixed_method[0]));
+  CHECK(status == 2,
+        "harmonic-decay accepted a frame-size DSP override, exit %d", status);
+
+cleanup:
+  free(single);
+  free(second);
+  free(first);
+  (void)remove_file(model);
+  (void)remove_file(reference);
+  workspace_close(&workspace);
+  return g_failures == 0;
+}
+
 #if !defined(_WIN32)
 static int case_invalid_utf8_path_json(void) {
   static const unsigned char suffix[] = {
@@ -1460,6 +1646,7 @@ typedef struct {
 static const test_case g_cases[] = {
     {"mono-text", case_mono_text},
     {"mono-json", case_mono_json},
+    {"harmonic-decay-json", case_harmonic_decay_json},
 #if !defined(_WIN32)
     {"invalid-utf8-path-json", case_invalid_utf8_path_json},
 #endif

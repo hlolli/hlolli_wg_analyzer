@@ -1,0 +1,178 @@
+{
+  "derived_bindings": [
+    {
+      "bits_per_sample": 24,
+      "channels": 1,
+      "frame_rule": "nearest_duration",
+      "id": "iowa2001-pizz-mf-open-a1-heldout-48k-soxr",
+      "sample_rate_hz": 48000,
+      "source_id": "iowa2001-pizz-mf-open-a1-heldout"
+    },
+    {
+      "bits_per_sample": 24,
+      "channels": 1,
+      "frame_rule": "nearest_duration",
+      "id": "iowa2001-pizz-mf-open-d2-heldout-48k-soxr",
+      "sample_rate_hz": 48000,
+      "source_id": "iowa2001-pizz-mf-open-d2-heldout"
+    },
+    {
+      "bits_per_sample": 24,
+      "channels": 1,
+      "frame_rule": "nearest_duration",
+      "id": "iowa2001-pizz-mf-open-e1-heldout-48k-soxr",
+      "sample_rate_hz": 48000,
+      "source_id": "iowa2001-pizz-mf-open-e1-heldout"
+    },
+    {
+      "bits_per_sample": 24,
+      "channels": 1,
+      "frame_rule": "nearest_duration",
+      "id": "iowa2001-pizz-mf-open-g2-heldout-48k-soxr",
+      "sample_rate_hz": 48000,
+      "source_id": "iowa2001-pizz-mf-open-g2-heldout"
+    }
+  ],
+  "fit_references": [
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 24,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 418366,
+      "id": "iowa2012-pizz-a-mf-open",
+      "note": "A1",
+      "role": "fit",
+      "sample_rate_hz": 48000,
+      "sha256": "c02df52f7fef08b73c0d5a57595a448ba9f23d949a4daa926727becb883237b3",
+      "source_group": "iowa2012"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 24,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 549412,
+      "id": "iowa2012-pizz-d-mf-open",
+      "note": "D2",
+      "role": "fit",
+      "sample_rate_hz": 48000,
+      "sha256": "032494ea7dd48f6e209e2d6509c842e399d2b4ed464bd9f642e266958fb6356f",
+      "source_group": "iowa2012"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 24,
+      "channels": 1,
+      "dynamic": "ff",
+      "frames": 396725,
+      "id": "iowa2012-pizz-e-ff-open",
+      "note": "E1",
+      "role": "fit",
+      "sample_rate_hz": 48000,
+      "sha256": "bf2654fe57ec3d0470abca3786615f163ca133b19969a7d2377dc461731b6e2c",
+      "source_group": "iowa2012"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 24,
+      "channels": 1,
+      "dynamic": "pp",
+      "frames": 578239,
+      "id": "iowa2012-pizz-g-pp-open",
+      "note": "G2",
+      "role": "fit",
+      "sample_rate_hz": 48000,
+      "sha256": "c2dd4a3f69fd038faa0d9dd86cf5445e4c274efc4e5dd01047f994c55386c16b",
+      "source_group": "iowa2012"
+    }
+  ],
+  "heldout_sources": [
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 16,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 164693,
+      "id": "iowa2001-pizz-mf-open-a1-heldout",
+      "note": "A1",
+      "role": "heldout",
+      "sample_rate_hz": 44100,
+      "sha256": "ce5878f5f31304d07ef5c105befd3aeec1287eb285e389cbef8d65698046ccde",
+      "source_group": "iowa2001"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 16,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 201612,
+      "id": "iowa2001-pizz-mf-open-d2-heldout",
+      "note": "D2",
+      "role": "heldout",
+      "sample_rate_hz": 44100,
+      "sha256": "d30592256dc5358b6a87ddeb54955bcacbd22f6cd7bc6e282bd06eded16362b6",
+      "source_group": "iowa2001"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 16,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 291351,
+      "id": "iowa2001-pizz-mf-open-e1-heldout",
+      "note": "E1",
+      "role": "heldout",
+      "sample_rate_hz": 44100,
+      "sha256": "ff557aaeb6d726989cc46c5721da48eb13a85fdba7422cd6e54af1b580aa4f48",
+      "source_group": "iowa2001"
+    },
+    {
+      "articulation": "pizzicato",
+      "bits_per_sample": 16,
+      "channels": 1,
+      "dynamic": "mf",
+      "frames": 165103,
+      "id": "iowa2001-pizz-mf-open-g2-heldout",
+      "note": "G2",
+      "role": "heldout",
+      "sample_rate_hz": 44100,
+      "sha256": "d70cc9cd1b97c98592520ab6b5898028e9d055d5989d20c4049aa969ed7d4b94",
+      "source_group": "iowa2001"
+    }
+  ],
+  "schema": "hwa-double-bass-reference-contract",
+  "schema_version": 1,
+  "transform": {
+    "argv": [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-xerror",
+      "-i",
+      "{source}",
+      "-map_metadata",
+      "-1",
+      "-vn",
+      "-sn",
+      "-dn",
+      "-ac",
+      "1",
+      "-af",
+      "aresample=resampler=soxr:precision=33:dither_method=none",
+      "-ar",
+      "48000",
+      "-c:a",
+      "pcm_s24le",
+      "-fflags",
+      "+bitexact",
+      "-flags:a",
+      "+bitexact",
+      "-f",
+      "wav",
+      "{derived}"
+    ],
+    "method": "ffmpeg-libsoxr-precision33-v1"
+  }
+}

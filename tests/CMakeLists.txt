@@ -535,6 +535,16 @@ target_compile_features(
 hwa_set_warnings(hlolli_wg_analyzer_stage8_renderer_quick)
 
 add_executable(
+  hlolli_wg_analyzer_stage8_renderer_churn
+  stage8_renderer_helper.c)
+target_compile_definitions(
+  hlolli_wg_analyzer_stage8_renderer_churn
+  PRIVATE HWA_STAGE8_RENDERER_MODE=7)
+target_compile_features(
+  hlolli_wg_analyzer_stage8_renderer_churn PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_stage8_renderer_churn)
+
+add_executable(
   hlolli_wg_analyzer_stage8_cli_tests
   stage8_cli_tests.c)
 target_include_directories(
@@ -557,7 +567,8 @@ add_test(
     $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_large>
     $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_extra>
     $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_worker>
-    $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_quick>)
+    $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_quick>
+    $<TARGET_FILE:hlolli_wg_analyzer_stage8_renderer_churn>)
 set_tests_properties(cli.stage8-experiment PROPERTIES TIMEOUT 300)
 
 add_executable(
@@ -736,6 +747,38 @@ add_test(
   NAME unit.analysis-api
   COMMAND hlolli_wg_analyzer_analysis_api_tests)
 set_tests_properties(unit.analysis-api PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_isolated_note_tests
+  isolated_note_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_isolated_note_tests
+  PRIVATE ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_isolated_note_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_isolated_note_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_isolated_note_tests)
+add_test(
+  NAME unit.isolated-note
+  COMMAND hlolli_wg_analyzer_isolated_note_tests)
+set_tests_properties(unit.isolated-note PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_harmonic_decay_tests
+  harmonic_decay_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_harmonic_decay_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_harmonic_decay_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_harmonic_decay_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_harmonic_decay_tests)
+add_test(
+  NAME unit.harmonic-decay
+  COMMAND hlolli_wg_analyzer_harmonic_decay_tests)
+set_tests_properties(unit.harmonic-decay PROPERTIES TIMEOUT 60)
 
 add_executable(
   hlolli_wg_analyzer_report_tests
@@ -941,6 +984,7 @@ set(
   hlolli_wg_analyzer_cli_cases
   mono-text
   mono-json
+  harmonic-decay-json
   stereo-json
   supported-formats
   compare-unequal-json
@@ -977,9 +1021,60 @@ endforeach()
 find_program(HWA_PYTHON3_EXECUTABLE NAMES python3)
 if(HWA_PYTHON3_EXECUTABLE)
   add_test(
+    NAME cli.isolated-note
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_isolated_note_cli.py
+      --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.isolated-note PROPERTIES TIMEOUT 60)
+
+  add_test(
+    NAME unit.bounded-pitch
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_bounded_pitch.py)
+  set_tests_properties(unit.bounded-pitch PROPERTIES TIMEOUT 30)
+
+  add_test(
     NAME unit.instrument-fit
     COMMAND
       ${HWA_PYTHON3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_fit.py)
   set_tests_properties(unit.instrument-fit PROPERTIES TIMEOUT 30)
+
+  if(NOT WIN32)
+    add_test(
+      NAME unit.viola-fit-adapter
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_viola_fit_adapter.py)
+    set_tests_properties(unit.viola-fit-adapter PROPERTIES TIMEOUT 60)
+  endif()
+
+  add_test(
+    NAME unit.cello-fit-adapter
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_cello_fit_adapter.py)
+  set_tests_properties(unit.cello-fit-adapter PROPERTIES TIMEOUT 30)
+
+  if(NOT WIN32)
+    add_test(
+      NAME unit.double-bass-manifest
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_double_bass_manifest.py)
+    set_tests_properties(unit.double-bass-manifest PROPERTIES TIMEOUT 60)
+
+    add_test(
+      NAME unit.double-bass-adapter
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_double_bass_adapter.py
+        --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+    set_tests_properties(unit.double-bass-adapter PROPERTIES TIMEOUT 120)
+  endif()
 endif()

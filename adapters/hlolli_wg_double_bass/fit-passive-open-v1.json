@@ -1,0 +1,126 @@
+{
+  "adapter_id": "hlolli_wg_double_bass-passive-open-v1",
+  "objectives": [
+    {
+      "case": "iowa2001-pizz-mf-open-a1-heldout-48k-soxr",
+      "id": "check_a1_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2001-pizz-mf-open-a1-heldout-48k-soxr",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2001-pizz-mf-open-d2-heldout-48k-soxr",
+      "id": "check_d2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2001-pizz-mf-open-d2-heldout-48k-soxr",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2001-pizz-mf-open-e1-heldout-48k-soxr",
+      "id": "check_e1_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2001-pizz-mf-open-e1-heldout-48k-soxr",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2001-pizz-mf-open-g2-heldout-48k-soxr",
+      "id": "check_g2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2001-pizz-mf-open-g2-heldout-48k-soxr",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2012-pizz-a-mf-open",
+      "id": "fit_a1_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2012-pizz-a-mf-open",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "fit",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2012-pizz-d-mf-open",
+      "id": "fit_d2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2012-pizz-d-mf-open",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "fit",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2012-pizz-e-ff-open",
+      "id": "fit_e1_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2012-pizz-e-ff-open",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "fit",
+      "weight": 1.0
+    },
+    {
+      "case": "iowa2012-pizz-g-pp-open",
+      "id": "fit_g2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "iowa2012-pizz-g-pp-open",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "fit",
+      "weight": 1.0
+    }
+  ],
+  "parameters": [
+    {
+      "baseline": 0.25,
+      "id": "string_a_loss_seconds",
+      "maximum": 30.0,
+      "minimum": 0.01,
+      "profile_paths": [["strings", 1, "loss_time_constant_seconds"]],
+      "unit": "seconds"
+    },
+    {
+      "baseline": 0.25,
+      "id": "string_d_loss_seconds",
+      "maximum": 30.0,
+      "minimum": 0.01,
+      "profile_paths": [["strings", 2, "loss_time_constant_seconds"]],
+      "unit": "seconds"
+    },
+    {
+      "baseline": 0.25,
+      "id": "string_e_loss_seconds",
+      "maximum": 30.0,
+      "minimum": 0.01,
+      "profile_paths": [["strings", 0, "loss_time_constant_seconds"]],
+      "unit": "seconds"
+    },
+    {
+      "baseline": 0.25,
+      "id": "string_g_loss_seconds",
+      "maximum": 30.0,
+      "minimum": 0.01,
+      "profile_paths": [["strings", 3, "loss_time_constant_seconds"]],
+      "unit": "seconds"
+    }
+  ],
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "selection": {
+    "check_weight": 1.0,
+    "max_candidate_worst_harm": 0.25,
+    "max_check_loss_increase": 0.15
+  }
+}

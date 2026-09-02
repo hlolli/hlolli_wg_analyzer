@@ -10,6 +10,8 @@ extern "C" {
 
 #define HWA_VERSION "1.1.0"
 #define HWA_ANALYSIS_METHOD_VERSION "stage1-1"
+#define HWA_ISOLATED_NOTE_METHOD_VERSION "isolated-note-1"
+#define HWA_HARMONIC_DECAY_METHOD_VERSION "harmonic-decay-1"
 #define HWA_ALIGNMENT_METHOD_VERSION "stage2-1"
 #define HWA_SEGMENTATION_METHOD_VERSION "stage3-1"
 #define HWA_MEASUREMENT_METHOD_VERSION "stage4-1"
@@ -201,6 +203,160 @@ typedef struct HWAAnalysis {
     size_t spectrum_bins;
     double *spectrogram_db;
 } HWAAnalysis;
+
+typedef enum HWAIsolatedNoteMetric {
+    HWA_ISOLATED_NOTE_PITCH = 1U << 0,
+    HWA_ISOLATED_NOTE_PASSIVE_DECAY = 1U << 1
+} HWAIsolatedNoteMetric;
+
+enum {
+    HWA_ISOLATED_NOTE_REJECT_SILENCE = 1U << 0,
+    HWA_ISOLATED_NOTE_REJECT_NOISE = 1U << 1,
+    HWA_ISOLATED_NOTE_REJECT_OCTAVE = 1U << 2,
+    HWA_ISOLATED_NOTE_REJECT_BOUNDARY = 1U << 3,
+    HWA_ISOLATED_NOTE_REJECT_LOW_SUPPORT = 1U << 4,
+    HWA_ISOLATED_NOTE_REJECT_LOW_DYNAMIC_RANGE = 1U << 5,
+    HWA_ISOLATED_NOTE_REJECT_HIGH_RESIDUAL = 1U << 6,
+    HWA_ISOLATED_NOTE_REJECT_LATE_PULSE = 1U << 7
+};
+
+typedef struct HWAIsolatedNoteOptions {
+    double expected_hz;
+    uint32_t metric_mask;
+    size_t decode_block_frames;
+    uint64_t max_input_bytes;
+    uint64_t max_input_frames;
+    uint64_t max_work_bytes;
+    uint64_t max_evaluations;
+} HWAIsolatedNoteOptions;
+
+typedef struct HWAIsolatedNotePitch {
+    double hz;
+    double cents;
+    double confidence;
+    double coverage;
+    uint64_t window_count;
+    uint64_t accepted_window_count;
+    uint64_t start_sample;
+    uint64_t end_sample;
+    int valid;
+} HWAIsolatedNotePitch;
+
+typedef struct HWAIsolatedNoteDecay {
+    double slope_db_per_second;
+    double t60_seconds;
+    double support_seconds;
+    double dynamic_range_db;
+    double residual_db;
+    double floor_dbfs;
+    uint64_t point_count;
+    uint64_t start_sample;
+    uint64_t end_sample;
+    int valid;
+} HWAIsolatedNoteDecay;
+
+typedef struct HWAIsolatedNoteResult {
+    char *path;
+    HWAFormat format;
+    double expected_hz;
+    uint32_t requested_mask;
+    uint32_t valid_mask;
+    uint32_t rejection_mask;
+    HWAIsolatedNotePitch pitch;
+    HWAIsolatedNoteDecay decay;
+    uint64_t peak_work_bytes;
+    uint64_t evaluation_count;
+} HWAIsolatedNoteResult;
+
+enum {
+    HWA_HARMONIC_DECAY_REJECT_NO_ONSET = 1U << 0,
+    HWA_HARMONIC_DECAY_REJECT_LATE_PULSE = 1U << 1,
+    HWA_HARMONIC_DECAY_REJECT_LOW_ANCHOR_SNR = 1U << 2,
+    HWA_HARMONIC_DECAY_REJECT_BAND_OUT_OF_RANGE = 1U << 3,
+    HWA_HARMONIC_DECAY_REJECT_LOW_SUPPORT = 1U << 4,
+    HWA_HARMONIC_DECAY_REJECT_LOW_DYNAMIC_RANGE = 1U << 5,
+    HWA_HARMONIC_DECAY_REJECT_NON_DECAY = 1U << 6,
+    HWA_HARMONIC_DECAY_REJECT_HIGH_RESIDUAL = 1U << 7,
+    HWA_HARMONIC_DECAY_REJECT_TRUNCATED_FIT = 1U << 8,
+    HWA_HARMONIC_DECAY_REJECT_LOW_HARMONIC_COVERAGE = 1U << 9
+};
+
+typedef struct HWAHarmonicDecayOptions {
+    double expected_hz;
+    size_t decode_block_frames;
+    uint64_t max_input_bytes;
+    uint64_t max_input_frames;
+    uint64_t max_work_bytes;
+    uint64_t max_evaluations;
+} HWAHarmonicDecayOptions;
+
+typedef struct HWAHarmonicDecayBand {
+    uint32_t harmonic_number;
+    double target_hz;
+    double selected_hz;
+    size_t selected_bin;
+    size_t signal_first_bin;
+    size_t signal_last_bin;
+    size_t lower_noise_first_bin;
+    size_t lower_noise_last_bin;
+    size_t upper_noise_first_bin;
+    size_t upper_noise_last_bin;
+    double anchor_snr_db;
+    double slope_db_per_second;
+    double t60_seconds;
+    double support_seconds;
+    double fit_dynamic_range_db;
+    double residual_db;
+    uint64_t fit_point_count;
+    uint64_t fit_start_sample;
+    uint64_t fit_end_sample;
+    uint64_t tail_boundary_sample;
+    uint32_t rejection_mask;
+    int valid;
+} HWAHarmonicDecayBand;
+
+typedef struct HWAHarmonicDecayProfile {
+    char *path;
+    HWAFormat format;
+    size_t fft_size;
+    size_t hop_samples;
+    uint64_t onset_sample;
+    uint64_t broad_peak_sample;
+    uint64_t analysis_start_sample;
+    uint64_t analysis_end_sample;
+    HWAHarmonicDecayBand *bands;
+    size_t band_count;
+    size_t valid_band_count;
+    uint32_t rejection_mask;
+    uint64_t peak_work_bytes;
+    uint64_t evaluation_count;
+    int valid;
+} HWAHarmonicDecayProfile;
+
+typedef struct HWAHarmonicDecayComparison {
+    uint32_t harmonic_number;
+    double t60_log_error_db;
+    int reference_valid;
+    int model_valid;
+    int valid;
+} HWAHarmonicDecayComparison;
+
+typedef struct HWAHarmonicDecayResult {
+    HWAHarmonicDecayOptions options;
+    double expected_hz;
+    HWAHarmonicDecayProfile reference;
+    HWAHarmonicDecayProfile model;
+    HWAHarmonicDecayComparison *comparisons;
+    size_t comparison_count;
+    size_t shared_valid_band_count;
+    double shared_reference_coverage;
+    double t60_log_rmse_db;
+    double median_t60_log_bias_db;
+    uint64_t peak_work_bytes;
+    uint64_t evaluation_count;
+    int model_present;
+    int comparison_valid;
+} HWAHarmonicDecayResult;
 
 typedef enum HWABodyEnvelopeStatus {
     HWA_BODY_ENVELOPE_VALID = 1,
@@ -2287,6 +2443,39 @@ int hwa_analyze_wav(const char *path,
                     size_t error_size);
 
 void hwa_analysis_free(HWAAnalysis *analysis);
+
+void hwa_isolated_note_options_default(HWAIsolatedNoteOptions *options);
+
+/*
+ * Check one isolated, pitched WAVE note against an exact expected frequency.
+ * The requested and valid masks let callers require pitch, passive decay, or
+ * both without treating a rejected estimate as an input or I/O failure.
+ * The call initializes every result field, including on failure.
+ */
+int hwa_analyze_isolated_note_wav(const char *path,
+                                  const HWAIsolatedNoteOptions *options,
+                                  HWAIsolatedNoteResult *result,
+                                  char *error,
+                                  size_t error_size);
+
+void hwa_isolated_note_result_free(HWAIsolatedNoteResult *result);
+
+void hwa_harmonic_decay_options_default(HWAHarmonicDecayOptions *options);
+
+/*
+ * Estimate late per-harmonic T60 values from one isolated note. When
+ * model_path is non-null, compare matching harmonic numbers. The method keeps
+ * channel power separate, fixes all DSP choices in the method version, and
+ * initializes every result field, including on failure.
+ */
+int hwa_harmonic_decay_wavs(const char *reference_path,
+                            const char *model_path,
+                            const HWAHarmonicDecayOptions *options,
+                            HWAHarmonicDecayResult *result,
+                            char *error,
+                            size_t error_size);
+
+void hwa_harmonic_decay_result_free(HWAHarmonicDecayResult *result);
 
 void hwa_body_envelope_options_default(HWABodyEnvelopeOptions *options);
 

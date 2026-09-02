@@ -14,8 +14,10 @@
 #include "file_output.h"
 #include "gap_report.h"
 #include "gap_report_output.h"
+#include "harmonic_decay_report.h"
 #include "item_file.h"
 #include "item_report.h"
+#include "isolated_note_report.h"
 #include "measure_file.h"
 #include "measure_report.h"
 #include "physical_file.h"
@@ -58,6 +60,8 @@ typedef struct HWACli {
     HWARunOptions run_options;
     HWAExperimentOptions experiment_options;
     HWAGapReportOptions gap_report_options;
+    HWAIsolatedNoteOptions isolated_note_options;
+    HWAHarmonicDecayOptions harmonic_decay_options;
     const char *positionals[5];
     size_t positional_count;
     const char *output_path;
@@ -80,6 +84,7 @@ typedef struct HWACli {
     int silence_option_set;
     int analysis_only_option_set;
     int analysis_resource_option_set;
+    int analysis_spectral_resource_option_set;
     int decode_block_option_set;
     int input_frame_limit_set;
     int alignment_option_set;
@@ -91,6 +96,10 @@ typedef struct HWACli {
     int run_option_set;
     int experiment_option_set;
     int gap_report_option_set;
+    int isolated_note_option_set;
+    int isolated_note_expected_set;
+    int isolated_note_metrics_set;
+    int harmonic_decay_expected_set;
     int allow_run;
 } HWACli;
 
@@ -103,6 +112,10 @@ static void hwa_print_usage(FILE *stream)
         "  hlolli-wg-analyzer [OPTIONS] compare REFERENCE.wav MODEL.wav\n"
         "  hlolli-wg-analyzer [OPTIONS] body-envelope REFERENCE.wav "
         "[MODEL.wav]\n"
+        "  hlolli-wg-analyzer --json harmonic-decay REFERENCE.wav "
+        "[MODEL.wav] --expected-hz HZ\n"
+        "  hlolli-wg-analyzer isolated-note INPUT.wav --expected-hz HZ "
+        "--metrics pitch|passive-decay|pitch,passive-decay\n"
         "  hlolli-wg-analyzer [OPTIONS] export INPUT.wav --kind KIND "
         "--output FILE.csv\n"
         "  hlolli-wg-analyzer [OPTIONS] align REFERENCE.wav TARGET.wav "
@@ -168,6 +181,9 @@ static void hwa_print_usage(FILE *stream)
         "  --max-spectrum-values N     Maximum stored spectrogram values.\n"
         "  --max-lag N                 Maximum stereo delay lag in samples.\n"
         "  --true-peak-oversample N    1 or 4.\n"
+        "  --expected-hz HZ            Expected note fundamental.\n"
+        "  --metrics LIST              Isolated-note metrics to check.\n"
+        "  --max-note-evaluations N    Maximum note-analysis checks.\n"
         "\n");
     (void)fprintf(
         stream,
@@ -375,6 +391,23 @@ static int hwa_parse_double(const char *text, double *value)
     return 0;
 }
 
+static int hwa_parse_isolated_note_metrics(const char *text,
+                                           uint32_t *mask)
+{
+    if (strcmp(text, "pitch") == 0) {
+        *mask = HWA_ISOLATED_NOTE_PITCH;
+    } else if (strcmp(text, "passive-decay") == 0) {
+        *mask = HWA_ISOLATED_NOTE_PASSIVE_DECAY;
+    } else if (strcmp(text, "pitch,passive-decay") == 0 ||
+               strcmp(text, "passive-decay,pitch") == 0) {
+        *mask = HWA_ISOLATED_NOTE_PITCH |
+                HWA_ISOLATED_NOTE_PASSIVE_DECAY;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
 static int hwa_need_value(int argc,
                           char **argv,
                           int *argument,
@@ -413,6 +446,8 @@ static int hwa_parse_option_with_value(HWACli *cli,
             return -1;
         }
         cli->options.decode_block_frames = size_value;
+        cli->isolated_note_options.decode_block_frames = size_value;
+        cli->harmonic_decay_options.decode_block_frames = size_value;
         cli->measurement_options.decode_block_frames = size_value;
         cli->physical_options.decode_block_frames = size_value;
         cli->production_options.decode_block_frames = size_value;
@@ -456,6 +491,10 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->run_options.max_input_bytes = cli->options.max_input_bytes;
         cli->gap_report_options.max_input_bytes =
             cli->options.max_input_bytes;
+        cli->isolated_note_options.max_input_bytes =
+            cli->options.max_input_bytes;
+        cli->harmonic_decay_options.max_input_bytes =
+            cli->options.max_input_bytes;
     } else if (strcmp(option, "--max-frames") == 0) {
         if (hwa_parse_u64(value, &cli->options.max_input_frames) != 0 ||
             cli->options.max_input_frames == 0U) {
@@ -470,25 +509,61 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->run_options.max_input_frames = cli->options.max_input_frames;
         cli->gap_report_options.max_input_frames =
             cli->options.max_input_frames;
+        cli->isolated_note_options.max_input_frames =
+            cli->options.max_input_frames;
+        cli->harmonic_decay_options.max_input_frames =
+            cli->options.max_input_frames;
         cli->input_frame_limit_set = 1;
     } else if (strcmp(option, "--max-work-bytes") == 0) {
         if (hwa_parse_u64(value, &cli->options.max_work_bytes) != 0 ||
             cli->options.max_work_bytes == 0U) {
             return -1;
         }
+        cli->isolated_note_options.max_work_bytes =
+            cli->options.max_work_bytes;
+        cli->harmonic_decay_options.max_work_bytes =
+            cli->options.max_work_bytes;
         cli->analysis_resource_option_set = 1;
+    } else if (strcmp(option, "--expected-hz") == 0) {
+        if (hwa_parse_double(value,
+                             &cli->isolated_note_options.expected_hz) != 0) {
+            return -1;
+        }
+        cli->harmonic_decay_options.expected_hz =
+            cli->isolated_note_options.expected_hz;
+        cli->isolated_note_option_set = 1;
+        cli->isolated_note_expected_set = 1;
+        cli->harmonic_decay_expected_set = 1;
+    } else if (strcmp(option, "--metrics") == 0) {
+        if (hwa_parse_isolated_note_metrics(
+                value, &cli->isolated_note_options.metric_mask) != 0) {
+            return -1;
+        }
+        cli->isolated_note_option_set = 1;
+        cli->isolated_note_metrics_set = 1;
+    } else if (strcmp(option, "--max-note-evaluations") == 0) {
+        if (hwa_parse_u64(
+                value, &cli->isolated_note_options.max_evaluations) != 0 ||
+            cli->isolated_note_options.max_evaluations == 0U) {
+            return -1;
+        }
+        cli->harmonic_decay_options.max_evaluations =
+            cli->isolated_note_options.max_evaluations;
+        cli->isolated_note_option_set = 1;
     } else if (strcmp(option, "--max-transforms") == 0) {
         if (hwa_parse_size(value, &cli->options.max_transforms) != 0 ||
             cli->options.max_transforms == 0U) {
             return -1;
         }
         cli->analysis_resource_option_set = 1;
+        cli->analysis_spectral_resource_option_set = 1;
     } else if (strcmp(option, "--max-track-points") == 0) {
         if (hwa_parse_size(value, &cli->options.max_track_points) != 0 ||
             cli->options.max_track_points == 0U) {
             return -1;
         }
         cli->analysis_resource_option_set = 1;
+        cli->analysis_spectral_resource_option_set = 1;
     } else if (strcmp(option, "--max-spectrum-values") == 0) {
         if (hwa_parse_size(value, &cli->options.max_spectrum_values) != 0 ||
             cli->options.max_spectrum_values == 0U) {
@@ -1284,6 +1359,8 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
     hwa_run_options_default(&cli->run_options);
     hwa_experiment_options_default(&cli->experiment_options);
     hwa_gap_report_options_default(&cli->gap_report_options);
+    hwa_isolated_note_options_default(&cli->isolated_note_options);
+    hwa_harmonic_decay_options_default(&cli->harmonic_decay_options);
     for (argument = 1; argument < argc; ++argument) {
         const char *current = argv[argument];
 
@@ -1525,6 +1602,109 @@ static int hwa_run_body_envelope(const HWACli *cli)
                     stderr);
     }
     hwa_body_envelope_result_free(&body);
+    return result;
+}
+
+static int hwa_run_isolated_note(const HWACli *cli)
+{
+    HWAIsolatedNoteResult note;
+    char error[HWA_ERROR_SIZE] = {0};
+    int result = 1;
+
+    memset(&note, 0, sizeof(note));
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "isolated-note") != 0 ||
+        !cli->isolated_note_expected_set ||
+        !cli->isolated_note_metrics_set ||
+        cli->output_path != NULL || cli->replace || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->analysis_clock_option_set ||
+        cli->analysis_only_option_set || cli->alignment_option_set ||
+        cli->segmentation_option_set || cli->measurement_option_set ||
+        cli->comparison_option_set || cli->physical_option_set ||
+        cli->production_option_set || cli->run_option_set ||
+        cli->experiment_option_set || cli->gap_report_option_set ||
+        cli->physical_binding_count != 0U) {
+        return -1;
+    }
+    if (hwa_analyze_isolated_note_wav(
+            cli->positionals[1], &cli->isolated_note_options, &note,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "isolated-note analysis failed");
+        hwa_isolated_note_result_free(&note);
+        return 1;
+    }
+    if (hwa_isolated_note_report_json(stdout, &note) == 0 &&
+        hwa_finish_stream(stdout, "standard output") == 0) {
+        result = 0;
+    } else {
+        (void)fputs("hlolli-wg-analyzer: cannot write standard output\n",
+                    stderr);
+    }
+    hwa_isolated_note_result_free(&note);
+    return result;
+}
+
+static int hwa_run_harmonic_decay(const HWACli *cli)
+{
+    HWAHarmonicDecayResult decay;
+    const char *model_path = NULL;
+    char error[HWA_ERROR_SIZE] = {0};
+    int result = 1;
+
+    memset(&decay, 0, sizeof(decay));
+    if ((cli->positional_count != 2U && cli->positional_count != 3U) ||
+        strcmp(cli->positionals[0], "harmonic-decay") != 0 ||
+        !cli->json || !cli->harmonic_decay_expected_set ||
+        cli->isolated_note_metrics_set ||
+        cli->output_path != NULL || cli->replace || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->analysis_clock_option_set ||
+        cli->analysis_only_option_set ||
+        cli->analysis_spectral_resource_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->physical_binding_count != 0U) {
+        return -1;
+    }
+    if (cli->positional_count == 3U) {
+        model_path = cli->positionals[2];
+        if (strcmp(cli->positionals[1], "-") == 0 &&
+            strcmp(model_path, "-") == 0) {
+            (void)fputs(
+                "hlolli-wg-analyzer: harmonic-decay accepts one stdin input\n",
+                stderr);
+            return 2;
+        }
+    }
+    if (hwa_harmonic_decay_wavs(
+            cli->positionals[1], model_path,
+            &cli->harmonic_decay_options, &decay,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "harmonic-decay analysis failed");
+        hwa_harmonic_decay_result_free(&decay);
+        return 1;
+    }
+    if (hwa_harmonic_decay_report_json(stdout, &decay) == 0 &&
+        hwa_finish_stream(stdout, "standard output") == 0) {
+        result = 0;
+    } else {
+        (void)fputs("hlolli-wg-analyzer: cannot write standard output\n",
+                    stderr);
+    }
+    hwa_harmonic_decay_result_free(&decay);
     return result;
 }
 
@@ -2718,7 +2898,11 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "experiment") != 0 &&
+    if (strcmp(cli.positionals[0], "isolated-note") != 0 &&
+        strcmp(cli.positionals[0], "harmonic-decay") != 0 &&
+        cli.isolated_note_option_set) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "experiment") != 0 &&
         strcmp(cli.positionals[0], "rank") != 0 &&
         strcmp(cli.positionals[0], "excerpt") != 0 &&
         strcmp(cli.positionals[0], "report") != 0 &&
@@ -2736,6 +2920,10 @@ int main(int argc, char **argv)
         result = hwa_run_compare(&cli);
     } else if (strcmp(cli.positionals[0], "body-envelope") == 0) {
         result = hwa_run_body_envelope(&cli);
+    } else if (strcmp(cli.positionals[0], "isolated-note") == 0) {
+        result = hwa_run_isolated_note(&cli);
+    } else if (strcmp(cli.positionals[0], "harmonic-decay") == 0) {
+        result = hwa_run_harmonic_decay(&cli);
     } else if (strcmp(cli.positionals[0], "export") == 0) {
         result = hwa_run_export(&cli);
     } else if (strcmp(cli.positionals[0], "align") == 0) {

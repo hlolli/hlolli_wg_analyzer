@@ -1,0 +1,42 @@
+{
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "adapter_id": "hlolli-wg-viola-passive-a-v1",
+  "parameters": [
+    {
+      "id": "loss_time_constant_a_seconds",
+      "unit": "seconds",
+      "minimum": 0.02,
+      "maximum": 5.0,
+      "baseline": 0.25,
+      "profile_paths": [["strings", 3, "loss_time_constant_seconds"]]
+    }
+  ],
+  "objectives": [
+    {
+      "id": "fit_passive_decay",
+      "kind": "passive-decay",
+      "case": "a4-passive-fit",
+      "reference_binding": "reference_a4_fit",
+      "resource_id": "model.final",
+      "split": "fit",
+      "weight": 1.0,
+      "scale": 3.0
+    },
+    {
+      "id": "check_passive_decay",
+      "kind": "passive-decay",
+      "case": "a4-passive-check",
+      "reference_binding": "reference_a4_check",
+      "resource_id": "model.final",
+      "split": "check",
+      "weight": 1.0,
+      "scale": 3.0
+    }
+  ],
+  "selection": {
+    "check_weight": 1.0,
+    "max_check_loss_increase": 0.0,
+    "max_candidate_worst_harm": 3.0
+  }
+}

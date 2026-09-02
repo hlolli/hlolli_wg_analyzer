@@ -531,8 +531,20 @@ static int hwa_process_directory_bytes(
         }
         (void)snprintf(child, path_size + name_size + 2U,
                        "%s/%s", request->job_directory, entry->d_name);
+        if (lstat(child, &status) != 0) {
+            int saved_errno = errno;
+            free(child);
+            if (!enforce_names && saved_errno == ENOENT) {
+                errno = 0;
+                continue;
+            }
+            (void)closedir(directory);
+            hwa_process_error(error, error_size,
+                              "renderer created a non-regular or oversized output");
+            return -1;
+        }
         if ((enforce_names && !hwa_process_expected_path(request, child)) ||
-            lstat(child, &status) != 0 || !S_ISREG(status.st_mode) ||
+            !S_ISREG(status.st_mode) ||
             status.st_size < 0 ||
             (uint64_t)status.st_size > request->max_output_file_bytes ||
             total > UINT64_MAX - (uint64_t)status.st_size) {

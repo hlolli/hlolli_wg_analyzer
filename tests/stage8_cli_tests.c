@@ -43,6 +43,7 @@ typedef struct TestFiles {
     char second[PATH_MAX];
     char third[PATH_MAX];
     char fourth[PATH_MAX];
+    char fifth[PATH_MAX];
     char stdout_path[PATH_MAX];
     char stderr_path[PATH_MAX];
     char renderer_link[PATH_MAX];
@@ -56,6 +57,7 @@ static const char *renderer_large;
 static const char *renderer_extra;
 static const char *renderer_worker;
 static const char *renderer_quick;
+static const char *renderer_churn;
 static int failures;
 
 #define CHECK(condition, ...)                                                \
@@ -120,6 +122,7 @@ static int test_files_open(TestFiles *files)
            test_join(files->second, files->directory, "second.hwa-bundle") &&
            test_join(files->third, files->directory, "third.hwa-bundle") &&
            test_join(files->fourth, files->directory, "fourth.hwa-bundle") &&
+           test_join(files->fifth, files->directory, "fifth.hwa-bundle") &&
            test_join(files->stdout_path, files->directory, "stdout.txt") &&
            test_join(files->stderr_path, files->directory, "stderr.txt") &&
            test_join(files->renderer_link, files->directory,
@@ -626,13 +629,27 @@ static void test_success(TestFiles *files, const char *binding)
 #endif
 #if !defined(_WIN32)
     {
+        char churn_result[PATH_MAX];
+        const char *churn[] = {
+            "--renderer", renderer_churn, "--allow-run", "--bind", binding,
+            "--output", files->fourth, "experiment", files->manifest
+        };
+        CHECK(test_run(files, churn, sizeof(churn) / sizeof(churn[0])) == 0 &&
+                  test_result_path(churn_result, files->fourth) &&
+                  test_exists(churn_result) &&
+                  !test_tree_has_name(files->fourth, ".scratch-0"),
+              "transient regular renderer scratch caused a false failure");
+    }
+#endif
+#if !defined(_WIN32)
+    {
         const char *broken[] = {
             "--renderer", renderer_ok, "--allow-run", "--bind", binding,
-            "--output", files->fourth, "experiment", files->manifest
+            "--output", files->fifth, "experiment", files->manifest
         };
         CHECK(test_broken_stdout(files, broken,
                                  sizeof(broken) / sizeof(broken[0])) != 0 &&
-                  !test_exists(files->fourth),
+                  !test_exists(files->fifth),
               "broken stdout left a committed Stage 8 bundle");
     }
 #endif
@@ -643,10 +660,10 @@ int main(int argc, char **argv)
     TestFiles files;
     char binding[PATH_MAX + 32U];
     int written;
-    if (argc != 9) {
+    if (argc != 10) {
         (void)fprintf(stderr,
                       "usage: %s ANALYZER OK FAIL SLOW LARGE EXTRA WORKER "
-                      "QUICK\n",
+                      "QUICK CHURN\n",
                       argv[0]);
         return 2;
     }
@@ -658,6 +675,7 @@ int main(int argc, char **argv)
     renderer_extra = argv[6];
     renderer_worker = argv[7];
     renderer_quick = argv[8];
+    renderer_churn = argv[9];
     if (!test_files_open(&files)) return 2;
     written = snprintf(binding, sizeof(binding), "artist=%s", files.reference);
     if (written < 0 || (size_t)written >= sizeof(binding) ||

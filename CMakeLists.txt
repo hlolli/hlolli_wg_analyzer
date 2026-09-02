@@ -49,7 +49,9 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/gap_report_clip.c
   src/gap_report_file.c
   src/gap_report_output.c
+  src/harmonic_decay.c
   src/item_file.c
+  src/isolated_note.c
   src/measure_compare.c
   src/measure_engine.c
   src/measure_file.c
@@ -111,7 +113,9 @@ add_executable(hlolli_wg_analyzer
   src/experiment_process.c
   src/experiment_report.c
   src/file_output.c
+  src/harmonic_decay_report.c
   src/item_report.c
+  src/isolated_note_report.c
   src/main.c
   src/measure_report.c
   src/physical_report.c
