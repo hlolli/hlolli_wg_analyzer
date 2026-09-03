@@ -22,6 +22,8 @@ extern "C" {
 #define HWA_EXPERIMENT_METHOD_VERSION "stage8-1"
 #define HWA_GAP_REPORT_METHOD_VERSION "stage9-1"
 #define HWA_GAP_REPORT_AUDIBILITY_METHOD "hwa-audibility-1"
+#define HWA_EVENT_BUNDLE_SCHEMA "hwa-events"
+#define HWA_EVENT_BUNDLE_SCHEMA_VERSION 1U
 #define HWA_PRODUCTION_SOURCE_MEASUREMENT_METHOD_VERSION "stage4-1"
 /* Kept for source compatibility with the original analysis API. */
 #define HWA_METHOD_VERSION HWA_ANALYSIS_METHOD_VERSION
@@ -2412,6 +2414,161 @@ typedef struct HWAGapReportResult {
     size_t warning_count;
 } HWAGapReportResult;
 
+typedef enum HWAEventAudioKind {
+    HWA_EVENT_SOURCE_RECORDING = 1,
+    HWA_EVENT_DERIVED_AUDIO = 2,
+    HWA_EVENT_INSTRUMENT_STEM = 3,
+    HWA_EVENT_AUDIO_KIND_COUNT = 4
+} HWAEventAudioKind;
+
+typedef enum HWAEventValueKind {
+    HWA_EVENT_VALUE_TEXT = 1,
+    HWA_EVENT_VALUE_F64 = 2,
+    HWA_EVENT_VALUE_I64 = 3,
+    HWA_EVENT_VALUE_BOOL = 4,
+    HWA_EVENT_VALUE_KIND_COUNT = 5
+} HWAEventValueKind;
+
+typedef enum HWAEventValueBasis {
+    HWA_EVENT_OBSERVATION = 1,
+    HWA_EVENT_INFERENCE = 2,
+    HWA_EVENT_SCORE_VALUE = 3,
+    HWA_EVENT_VALUE_BASIS_COUNT = 4
+} HWAEventValueBasis;
+
+typedef enum HWAEventTraceFormat {
+    HWA_EVENT_TRACE_CSV_F64 = 1,
+    HWA_EVENT_TRACE_F64LE = 2,
+    HWA_EVENT_TRACE_FORMAT_COUNT = 3
+} HWAEventTraceFormat;
+
+typedef struct HWAEventBundleLimits {
+    uint64_t max_manifest_bytes;
+    uint64_t max_index_bytes;
+    uint64_t max_payload_file_bytes;
+    uint64_t max_bundle_bytes;
+    uint64_t max_work_bytes;
+    size_t max_audio_files;
+    size_t max_events;
+    size_t max_values;
+    size_t max_traces;
+    size_t max_trace_refs;
+    size_t max_providers;
+    size_t max_warnings;
+    size_t max_nesting_depth;
+    size_t max_json_depth;
+    size_t max_json_tokens;
+} HWAEventBundleLimits;
+
+typedef struct HWAEventProvider {
+    uint64_t id;
+    char *name;
+    char *version;
+    char model_sha256[HWA_SHA256_HEX_SIZE];
+    char *settings_json;
+} HWAEventProvider;
+
+typedef struct HWAEventAudio {
+    uint64_t id;
+    HWAEventAudioKind kind;
+    char *name;
+    char *relative_path;
+    char *path_hint;
+    char sha256[HWA_SHA256_HEX_SIZE];
+    uint64_t file_bytes;
+    HWAFormat format;
+    uint64_t source_recording_id;
+    int source_recording_id_valid;
+} HWAEventAudio;
+
+typedef struct HWAEventValue {
+    char *name;
+    HWAEventValueKind kind;
+    HWAEventValueBasis basis;
+    char *text;
+    double number;
+    int64_t integer;
+    int boolean;
+    char *unit;
+    double score;
+    uint64_t provider_id;
+    int score_valid;
+    int provider_id_valid;
+    int selected;
+} HWAEventValue;
+
+typedef struct HWAEventTrace {
+    uint64_t id;
+    char *name;
+    char *unit;
+    char *relative_path;
+    char sha256[HWA_SHA256_HEX_SIZE];
+    HWAEventTraceFormat format;
+    uint64_t source_recording_id;
+    uint64_t first_sample;
+    uint64_t hop_samples;
+    uint64_t window_samples;
+    uint64_t point_count;
+    uint32_t value_width;
+    uint64_t file_bytes;
+} HWAEventTrace;
+
+typedef struct HWAEventTraceRef {
+    uint64_t trace_id;
+    char *role;
+    uint64_t first_point;
+    uint64_t point_count;
+} HWAEventTraceRef;
+
+typedef struct HWAPerformanceEvent {
+    uint64_t id;
+    char *kind;
+    uint64_t source_recording_id;
+    uint64_t evidence_audio_id;
+    uint64_t parent_id;
+    uint64_t start_sample;
+    uint64_t end_sample;
+    char *voice;
+    char *part;
+    char *score_event_id;
+    int evidence_audio_id_valid;
+    int parent_id_valid;
+    HWAEventValue *values;
+    size_t value_count;
+    HWAEventTraceRef *trace_refs;
+    size_t trace_ref_count;
+} HWAPerformanceEvent;
+
+typedef struct HWAEventWarning {
+    uint64_t id;
+    char *code;
+    char *message;
+    uint64_t event_id;
+    int event_id_valid;
+} HWAEventWarning;
+
+typedef struct HWAEventBundle {
+    char *directory;
+    char manifest_sha256[HWA_SHA256_HEX_SIZE];
+    uint64_t total_file_bytes;
+    uint64_t retained_work_bytes;
+    HWAEventProvider *providers;
+    size_t provider_count;
+    HWAEventAudio *audio;
+    size_t audio_count;
+    HWAEventTrace *traces;
+    size_t trace_count;
+    HWAPerformanceEvent *events;
+    size_t event_count;
+    HWAEventWarning *warnings;
+    size_t warning_count;
+} HWAEventBundle;
+
+typedef struct HWAEventFileBinding {
+    const char *relative_path;
+    const char *source_path;
+} HWAEventFileBinding;
+
 void hwa_analysis_options_default(HWAAnalysisOptions *options);
 
 /*
@@ -2710,6 +2867,41 @@ int hwa_build_gap_report_files(
     size_t error_size);
 
 void hwa_gap_report_result_free(HWAGapReportResult *result);
+
+void hwa_event_bundle_limits_default(HWAEventBundleLimits *limits);
+
+/* Validate one caller-owned event bundle without reading or writing files. */
+int hwa_event_bundle_validate(const HWAEventBundle *bundle,
+                              const HWAEventBundleLimits *limits,
+                              char *error,
+                              size_t error_size);
+
+/*
+ * Read and validate one complete hwa-events directory. Stored path hints stay
+ * inert. Success returns owned metadata while dense trace and audio payloads
+ * remain on disk. The call initializes every result field, including on
+ * failure. Free a successful result before reusing it.
+ */
+int hwa_event_bundle_read(const char *directory,
+                          const HWAEventBundleLimits *limits,
+                          HWAEventBundle *bundle,
+                          char *error,
+                          size_t error_size);
+
+/*
+ * Write and validate one new hwa-events directory. Every bundled payload must
+ * have one explicit relative-path/source-path binding. Existing output is
+ * never replaced. The input bundle and bindings remain caller-owned.
+ */
+int hwa_event_bundle_write(const char *output_directory,
+                           const HWAEventBundle *bundle,
+                           const HWAEventFileBinding *bindings,
+                           size_t binding_count,
+                           const HWAEventBundleLimits *limits,
+                           char *error,
+                           size_t error_size);
+
+void hwa_event_bundle_free(HWAEventBundle *bundle);
 
 const char *hwa_container_name(HWAContainer container);
 const char *hwa_encoding_name(HWAEncoding encoding);

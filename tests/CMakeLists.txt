@@ -17,6 +17,123 @@ add_test(
   COMMAND hlolli_wg_analyzer_body_envelope_tests)
 set_tests_properties(unit.body-envelope PROPERTIES TIMEOUT 30)
 
+add_executable(
+  hlolli_wg_analyzer_event_bundle_tests
+  event_bundle_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_bundle_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_bundle_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_bundle_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_bundle_tests)
+add_test(
+  NAME unit.event-bundle
+  COMMAND hlolli_wg_analyzer_event_bundle_tests)
+set_tests_properties(unit.event-bundle PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_event_bundle_conformance_tests
+  event_bundle_conformance_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_bundle_conformance_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_bundle_conformance_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_bundle_conformance_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_bundle_conformance_tests)
+add_test(
+  NAME unit.event-bundle-conformance
+  COMMAND hlolli_wg_analyzer_event_bundle_conformance_tests)
+set_tests_properties(unit.event-bundle-conformance PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_inference_tests
+  inference_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_inference_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_inference_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_inference_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_inference_tests)
+add_test(
+  NAME unit.inference-provider
+  COMMAND hlolli_wg_analyzer_inference_tests)
+set_tests_properties(unit.inference-provider PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_event_analysis_tests
+  event_analysis_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_analysis_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_analysis_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_analysis_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_analysis_tests)
+add_test(
+  NAME unit.event-analysis
+  COMMAND hlolli_wg_analyzer_event_analysis_tests)
+set_tests_properties(unit.event-analysis PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_event_analysis_cli_tests
+  event_analysis_cli_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_analysis_cli_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_analysis_cli_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_analysis_cli_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_analysis_cli_tests)
+add_test(
+  NAME cli.analyze-events
+  COMMAND hlolli_wg_analyzer_event_analysis_cli_tests
+          $<TARGET_FILE:hlolli_wg_analyzer>)
+set_tests_properties(cli.analyze-events PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_event_bundle_cli_tests
+  event_bundle_cli_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_bundle_cli_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_bundle_cli_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_bundle_cli_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_bundle_cli_tests)
+add_test(
+  NAME cli.validate-event-bundle
+  COMMAND hlolli_wg_analyzer_event_bundle_cli_tests
+          $<TARGET_FILE:hlolli_wg_analyzer>)
+set_tests_properties(cli.validate-event-bundle PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_event_csound_roundtrip_tests
+  event_csound_roundtrip_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_event_csound_roundtrip_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_event_csound_roundtrip_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_event_csound_roundtrip_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_csound_roundtrip_tests)
+add_test(
+  NAME unit.event-csound-score
+  COMMAND hlolli_wg_analyzer_event_csound_roundtrip_tests)
+set_tests_properties(unit.event-csound-score PROPERTIES TIMEOUT 30)
+find_program(HWA_CSOUND_EXECUTABLE NAMES csound)
+if(HWA_CSOUND_EXECUTABLE)
+  add_test(
+    NAME integration.event-csound-roundtrip
+    COMMAND hlolli_wg_analyzer_event_csound_roundtrip_tests
+            "${HWA_CSOUND_EXECUTABLE}")
+  set_tests_properties(integration.event-csound-roundtrip PROPERTIES TIMEOUT 30)
+endif()
+
 if(NOT MSVC)
   target_link_libraries(hlolli_wg_analyzer_cli_tests PRIVATE m)
 endif()

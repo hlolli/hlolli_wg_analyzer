@@ -50,6 +50,8 @@ build/hlolli-wg-analyzer compare reference.wav candidate.wav
 build/hlolli-wg-analyzer --json compare reference.wav candidate.wav
 build/hlolli-wg-analyzer export candidate.wav \
   --kind frames --output candidate-frames.csv
+build/hlolli-wg-analyzer analyze-events candidate.wav \
+  --output candidate.hwa-events
 ```
 
 `inspect` and `compare` print text by default. Pass `--json` for JSON.
@@ -73,6 +75,20 @@ Run `hlolli-wg-analyzer --help` for all options and limits.
 build/hlolli-wg-analyzer export candidate.wav \
   --kind spectrogram --output candidate-spectrum.csv
 ```
+
+### Extract events and traces
+
+```sh
+build/hlolli-wg-analyzer analyze-events solo.wav \
+  --output solo.hwa-events
+build/hlolli-wg-analyzer validate-event-bundle solo.hwa-events
+```
+
+`analyze-events` finds note candidates in solo or mostly monophonic voiced
+audio. It saves sample bounds, level, pitch, onset, spectrum values, and nine
+frame traces in a new directory. It does not infer rhythm, notation, parts, or
+polyphonic voices. See [Analyze events version 1](docs/analyze-events-v1.md)
+and [Event bundle version 1](docs/event-bundle-v1.md).
 
 ### Align, segment, and measure
 

@@ -8,6 +8,7 @@
 #include "alignment_file.h"
 #include "alignment_report.h"
 #include "body_envelope_report.h"
+#include "event_analysis.h"
 #include "experiment.h"
 #include "experiment_process.h"
 #include "experiment_report.h"
@@ -20,6 +21,7 @@
 #include "isolated_note_report.h"
 #include "measure_file.h"
 #include "measure_report.h"
+#include "output.h"
 #include "physical_file.h"
 #include "physical_report.h"
 #include "production_file.h"
@@ -86,6 +88,7 @@ typedef struct HWACli {
     int analysis_resource_option_set;
     int analysis_spectral_resource_option_set;
     int decode_block_option_set;
+    int max_bytes_option_set;
     int input_frame_limit_set;
     int alignment_option_set;
     int segmentation_option_set;
@@ -144,6 +147,10 @@ static void hwa_print_usage(FILE *stream)
         "--bind ID=PATH [--bind ID=PATH ...] --output NEW_DIRECTORY\n"
         "  hlolli-wg-analyzer [OPTIONS] report REPORT.json "
         "--bind ID=PATH [--bind ID=PATH ...] --output NEW_DIRECTORY\n"
+        "  hlolli-wg-analyzer [--json] validate-event-bundle "
+        "DIRECTORY.hwa-events\n"
+        "  hlolli-wg-analyzer [ANALYSIS OPTIONS] analyze-events INPUT.wav "
+        "--output NEW.hwa-events\n"
         "\n"
         "Commands that accept standard input use -. Segment and saved-artifact "
         "commands require named files.\n"
@@ -495,6 +502,7 @@ static int hwa_parse_option_with_value(HWACli *cli,
             cli->options.max_input_bytes;
         cli->harmonic_decay_options.max_input_bytes =
             cli->options.max_input_bytes;
+        cli->max_bytes_option_set = 1;
     } else if (strcmp(option, "--max-frames") == 0) {
         if (hwa_parse_u64(value, &cli->options.max_input_frames) != 0 ||
             cli->options.max_input_frames == 0U) {
@@ -2877,6 +2885,197 @@ static int hwa_run_gap_report(HWACli *cli)
     return result;
 }
 
+static int hwa_event_bundle_child_counts(const HWAEventBundle *bundle,
+                                         size_t *value_count,
+                                         size_t *trace_ref_count)
+{
+    size_t values = 0U;
+    size_t trace_refs = 0U;
+    size_t index;
+    if (bundle == NULL || value_count == NULL || trace_ref_count == NULL)
+        return -1;
+    for (index = 0U; index < bundle->event_count; ++index) {
+        if (SIZE_MAX - values < bundle->events[index].value_count ||
+            SIZE_MAX - trace_refs < bundle->events[index].trace_ref_count)
+            return -1;
+        values += bundle->events[index].value_count;
+        trace_refs += bundle->events[index].trace_ref_count;
+    }
+    *value_count = values;
+    *trace_ref_count = trace_refs;
+    return 0;
+}
+
+static int hwa_report_event_bundle_json(FILE *stream,
+                                        const HWAEventBundle *bundle)
+{
+    size_t value_count;
+    size_t trace_ref_count;
+    if (stream == NULL || bundle == NULL ||
+        hwa_event_bundle_child_counts(bundle, &value_count,
+                                      &trace_ref_count) != 0 ||
+        fputs("{\"schema\":\"hwa-event-bundle-validation\","
+              "\"schema_version\":1,"
+              "\"command\":\"validate-event-bundle\","
+              "\"valid\":true,\"valid_means\":\"schema conformance\","
+              "\"bundle_schema\":\"" HWA_EVENT_BUNDLE_SCHEMA "\","
+              "\"bundle_schema_version\":", stream) == EOF ||
+        fprintf(stream, "%u,\"directory\":",
+                HWA_EVENT_BUNDLE_SCHEMA_VERSION) < 0 ||
+        hwa_json_write_string(stream,
+                              bundle->directory != NULL
+                                  ? bundle->directory : "") != 0 ||
+        fputs(",\"manifest_sha256\":", stream) == EOF ||
+        hwa_json_write_string(stream, bundle->manifest_sha256) != 0 ||
+        fprintf(stream,
+                ",\"counts\":{\"providers\":%zu,\"audio\":%zu,"
+                "\"events\":%zu,\"values\":%zu,\"traces\":%zu,"
+                "\"trace_refs\":%zu,\"warnings\":%zu},"
+                "\"retained_work_bytes\":%" PRIu64 ","
+                "\"total_file_bytes\":%" PRIu64 "}\n",
+                bundle->provider_count, bundle->audio_count,
+                bundle->event_count, value_count, bundle->trace_count,
+                trace_ref_count, bundle->warning_count,
+                bundle->retained_work_bytes,
+                bundle->total_file_bytes) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int hwa_report_event_bundle_text(FILE *stream,
+                                        const HWAEventBundle *bundle)
+{
+    size_t value_count;
+    size_t trace_ref_count;
+    if (stream == NULL || bundle == NULL ||
+        hwa_event_bundle_child_counts(bundle, &value_count,
+                                      &trace_ref_count) != 0 ||
+        fprintf(stream,
+                "Event bundle validation passed\n"
+                "Schema: %s %u\n"
+                "Directory: %s\n"
+                "Manifest SHA-256: %s\n"
+                "Counts: %zu provider%s, %zu audio, %zu event%s, "
+                "%zu value%s, %zu trace%s, %zu trace reference%s, "
+                "%zu warning%s\n"
+                "Retained work bytes: %" PRIu64 "\n"
+                "Total file bytes: %" PRIu64 "\n"
+                "Valid means schema conformance.\n",
+                HWA_EVENT_BUNDLE_SCHEMA, HWA_EVENT_BUNDLE_SCHEMA_VERSION,
+                bundle->directory != NULL ? bundle->directory : "",
+                bundle->manifest_sha256,
+                bundle->provider_count,
+                bundle->provider_count == 1U ? "" : "s",
+                bundle->audio_count,
+                bundle->event_count,
+                bundle->event_count == 1U ? "" : "s",
+                value_count, value_count == 1U ? "" : "s",
+                bundle->trace_count,
+                bundle->trace_count == 1U ? "" : "s",
+                trace_ref_count, trace_ref_count == 1U ? "" : "s",
+                bundle->warning_count,
+                bundle->warning_count == 1U ? "" : "s",
+                bundle->retained_work_bytes,
+                bundle->total_file_bytes) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int hwa_run_validate_event_bundle(const HWACli *cli)
+{
+    HWAEventBundleLimits limits;
+    HWAEventBundle bundle;
+    char error[HWA_ERROR_SIZE] = {0};
+    int result = 1;
+    memset(&bundle, 0, sizeof(bundle));
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "validate-event-bundle") != 0 ||
+        cli->output_path != NULL || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL ||
+        cli->resume_path != NULL || cli->allow_run ||
+        cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_resource_option_set || cli->decode_block_option_set ||
+        cli->max_bytes_option_set || cli->input_frame_limit_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set) {
+        return -1;
+    }
+    if (strcmp(cli->positionals[1], "-") == 0) {
+        (void)fputs(
+            "hlolli-wg-analyzer: validate-event-bundle needs a named directory\n",
+            stderr);
+        return 2;
+    }
+    hwa_event_bundle_limits_default(&limits);
+    if (hwa_event_bundle_read(cli->positionals[1], &limits, &bundle,
+                              error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "event bundle validation failed");
+        hwa_event_bundle_free(&bundle);
+        return 1;
+    }
+    if ((cli->json
+             ? hwa_report_event_bundle_json(stdout, &bundle)
+             : hwa_report_event_bundle_text(stdout, &bundle)) == 0 &&
+        hwa_finish_stream(stdout, "standard output") == 0) {
+        result = 0;
+    }
+    hwa_event_bundle_free(&bundle);
+    return result;
+}
+
+static int hwa_run_analyze_events(const HWACli *cli)
+{
+    HWAEventAnalysisOptions options;
+    char error[HWA_ERROR_SIZE] = {0};
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "analyze-events") != 0 ||
+        cli->output_path == NULL || cli->output_path[0] == '\0' ||
+        strcmp(cli->positionals[1], "-") == 0 ||
+        strcmp(cli->output_path, "-") == 0 || cli->json || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL ||
+        cli->resume_path != NULL || cli->allow_run ||
+        cli->physical_binding_count != 0U || cli->analysis_only_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set) {
+        return -1;
+    }
+    hwa_event_analysis_options_default(&options);
+    options.analysis = cli->options;
+    options.analysis.collect_tracks = 1;
+    options.analysis.collect_spectrogram = 0;
+    if (hwa_event_analysis_options_validate(
+            &options, error, sizeof(error)) != 0)
+        return -1;
+    if (hwa_analyze_events_wav(
+            cli->positionals[1], cli->output_path, &options,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "event analysis failed");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     HWACli cli;
@@ -2946,6 +3145,10 @@ int main(int argc, char **argv)
                strcmp(cli.positionals[0], "excerpt") == 0 ||
                strcmp(cli.positionals[0], "report") == 0) {
         result = hwa_run_gap_report(&cli);
+    } else if (strcmp(cli.positionals[0], "validate-event-bundle") == 0) {
+        result = hwa_run_validate_event_bundle(&cli);
+    } else if (strcmp(cli.positionals[0], "analyze-events") == 0) {
+        result = hwa_run_analyze_events(&cli);
     } else {
         result = -1;
     }

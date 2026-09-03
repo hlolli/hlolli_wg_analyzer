@@ -44,12 +44,16 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/dsp.c
   src/experiment.c
   src/experiment_file.c
+  src/event_analysis.c
+  src/event_bundle.c
+  src/event_csound.c
   src/features.c
   src/gap_report.c
   src/gap_report_clip.c
   src/gap_report_file.c
   src/gap_report_output.c
   src/harmonic_decay.c
+  src/inference.c
   src/item_file.c
   src/isolated_note.c
   src/measure_compare.c
