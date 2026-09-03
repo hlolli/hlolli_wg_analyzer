@@ -1,23 +1,23 @@
 # Cello third passive-audit source receipt
 
-Checked on 2026-08-31. This first search found no complete third set. A later
-check found the new 2026 RWC online release and ran two real joint audits; see
-[the replacement receipt](cello-alternative-passive-audit-sources.md). This
-note still pins four OrchideaSOL files as a later source, but the official
-audio download needs an IRCAM Forum login. That gate blocks local raw hashes,
-archive-member checks, frame counts, exact whole-file spans, pitch checks, and
-`passive-decay-v4` results.
+First checked on 2026-08-31 and completed on 2026-09-02 from an
+authorized copy of the official general ZIP. The audio may be analyzed for
+this research but may not be redistributed. The archive, source WAVE files,
+and analyzer output remain outside Git.
 
-Do not use these four files for fitting or rank changes. Keep the archive,
-source WAVE files, work files, and analyzer output outside Git. The fixed model
-has not changed.
+These four files form the untouched third audit set. They may accept or reject
+the already fixed candidate, but they must not tune it or choose another
+parameter value. The fixed model has not changed.
 
 ## Pinned OrchideaSOL set
 
 The [official OrchideaSOL 2.0 record](https://zenodo.org/records/3740399)
 describes 13,265 isolated notes recorded at IRCAM from 1996 through 1999. It
 states that the files are mono 16-bit WAVE at 44.1 kHz and last two to ten
-seconds. Zenodo hosts the metadata but not the audio.
+seconds. The checked 2020 general ZIP instead stores these four members as
+mono 24-bit PCM WAVE at 44.1 kHz; the byte, ZIP, and decoded format checks
+below take precedence for this audit. Zenodo hosts the metadata but not the
+audio.
 
 The official metadata file is
 [`OrchideaSOL_metadata.csv`](https://zenodo.org/api/records/3740399/files/OrchideaSOL_metadata.csv/content).
@@ -52,48 +52,98 @@ lists release `_OrchideaSOL2020_release`. Its public API names these assets:
 | General ZIP | [`/asset/108/None`](https://forum.ircam.fr/asset/108/None) | 8,371,284,936 | `697ca9f9d6f0bcaceb8b3d2e3e0206ac` |
 | Named Windows ZIP | [`_OrchideaSOL2020_release_win.zip`](https://forum.ircam.fr/asset/1601/_OrchideaSOL2020_release_win.zip) | 8,381,264,325 | `eb0ade68d7a191f57f28a03665c226df` |
 
-Both URLs redirected to IRCAM sign-in when checked without a session. The API
-reported `authorized_download: false`. The four metadata paths above are
-exact, but the archive member prefix cannot be checked without the ZIP. Do not
-guess that prefix in a manifest.
+Anonymous requests still redirect to IRCAM sign-in. The authorized research
+copy checked on 2026-09-02 is the general ZIP named above. Its byte count is
+`8371284936`, its MD5 matches the official `697ca9f9d6f0bcaceb8b3d2e3e0206ac`,
+and its SHA-256 is
+`983d56381290202f11acf08186002b9e2531eda69c91444b690fe0065362fdb7`.
+The exact member prefix is `_OrchideaSOL2020_release/OrchideaSOL2020/`.
 
 Zenodo says that the audio uses the
 [IRCAM Forum License](https://forum.ircam.fr/legal/contrat-de-licence-forum-ircam/),
-while the metadata uses CC BY 4.0. The current Forum terms give an individual
-free account personal use of free items. The base grant is personal,
-non-transferable, non-exclusive, and non-commercial; commercial use needs
-other terms. The terms also limit copying. This receipt therefore does not
-treat the audio as redistributable. Each user must accept the IRCAM terms and
-keep the audio outside Git.
+while the metadata uses CC BY 4.0. The local authorization permits analysis for
+this research but not redistribution. No archive member, decoded sample, or
+private path belongs in Git or a release artifact.
 
-### Blocked audit receipt
+### Completed archive and raw-file receipt
 
-| String | Raw WAVE SHA-256 | Exact source span | Work SHA-256 | v4 result |
-|---|---|---|---|---|
-| C2 | blocked by sign-in | frame count not read | not made | not run |
-| G2 | blocked by sign-in | frame count not read | not made | not run |
-| D3 | blocked by sign-in | frame count not read | not made | not run |
-| A3 | blocked by sign-in | frame count not read | not made | not run |
+Each extracted WAVE matched one unique ZIP member by path, uncompressed size,
+and CRC-32. It also matched the MD5 in the official
+`OrchideaSOL2020.md5.txt` shipped with the release.
 
-Once an authorized user supplies one official ZIP outside Git:
+| String | Raw bytes | ZIP bytes | CRC-32 | Official MD5 | Raw SHA-256 |
+|---|---:|---:|---|---|---|
+| C2 | 840,782 | 466,831 | `b4090e2e` | `24c9e0ba7a1a732ce9d52ca594eb0f79` | `d7e2a83cafdcfa5d59d50603850f129fbdc407ecdafb5c1a9b61bbb805344bb2` |
+| G2 | 1,073,504 | 631,357 | `dbaa0038` | `8af99aa238fd997503f17dd7130f0c1d` | `628e6b86975ed2c50d04cca304cb8f0d7d761d3bdd1f1735da5efc49995e38fd` |
+| D3 | 975,240 | 557,637 | `bbe07974` | `52a51ac71d0afe79f1957aa0ef53ef00` | `6fcb6b1b1bf8bb9ccc791bb479e52b41467af073c5cf99f45a64181418f86577` |
+| A3 | 643,616 | 380,527 | `b0bd5db2` | `82fe25456dc3e701e2fcf0d88a52466b` | `349f99894e337aba12303f9f483fb59f3b78ebcdc9ef64ae8eb4a59b4a856fda` |
 
-1. Check its byte count and MD5 against the matching asset above, then record
-   its SHA-256.
-2. List the ZIP and bind the real archive members to the four exact metadata
-   paths. Reject a missing or duplicate member.
-3. Extract only those members outside Git. Check that each is mono PCM16 WAVE
-   at 44.1 kHz, record its byte and frame counts, and record its SHA-256.
-4. Prefer no trim. If each file contains one isolated pluck as the record says,
-   use the exact half-open span `[0, source_frame_count)`. A format-only WAVE
-   rewrite must preserve every PCM sample. Record its SHA-256. Reject unrelated
-   sound or a second pluck instead of editing the file until it passes.
-5. Run the bounded pitch check around C2, G2, D3, and A3. Report measured pitch
-   and cents from A4=440; do not resample or correct pitch.
-6. Run the current `passive-decay-v4` check and record the fit tool's SHA-256.
-   Keep its 20 dB minimum decay range and 5 dB maximum line residual. Do not
-   raise a limit.
-7. Admit the set only if all four raw tails pass. Keep it in the audit split and
-   do not use its result to pick new parameter values.
+All four files are mono PCM24 WAVE at 44.1 kHz. Each contains one isolated
+pluck and needs no trim or format rewrite, so the audit uses the whole raw
+half-open frame span.
+
+| String | Exact source frames | Measured pitch | Cents from A4=440 | T60 | Range | Support | Line residual |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| C2 | `[0,280234)` | 64.8310 Hz | -15.30 | 3.2181 s | 35.034 dB | 1.7460 s | 0.739 dB |
+| G2 | `[0,357808)` | 97.6298 Hz | -6.53 | 5.6572 s | 35.141 dB | 2.2449 s | 1.916 dB |
+| D3 | `[0,325053)` | 146.2847 Hz | -6.47 | 4.1983 s | 35.189 dB | 1.5964 s | 2.916 dB |
+| A3 | `[0,214512)` | 220.7779 Hz | +6.11 | 3.2325 s | 35.036 dB | 1.8358 s | 1.064 dB |
+
+The pitch check used `bounded_pitch.py` SHA-256
+`6ca7aadf25e3f4b4787a0e89c156ab5f5125b3e4e04e6fe36769e7826a6d622d`.
+The raw-tail check used `passive-decay-v4` from `instrument_fit.py` SHA-256
+`f8952be56bb854f5ccbc61a2c90abab11fbecf6b01e5724fdea31df942acbf91`.
+Its local public-safe result hashes to
+`64d8cbcd58c2ba3074f0b42d89927fed3c86c20537051922dfd2ffa664892556`.
+Every tail exceeds the fixed 20 dB range minimum and stays below the 5 dB line
+residual maximum. The complete set therefore passes the predeclared input gate
+and is admitted only as the held-out audit split.
+
+## Held-out candidate result
+
+The input gate above completed before the frozen seven-value candidate was
+rendered against this set. A fresh Linux rerun reproduced the staged scalar
+values: C2 1.00 s, D3 0.75 s, A3 1.00 s, and the G2 point with 2.50 s loss,
+18 kHz bridge cutoff, 100 Hz peak bandwidth, and 0.02 peak loss. The G2 grid
+again selected point 71 and reduced its fit/validation score from 7.6647 to
+2.8248.
+
+The joint candidate improved the total and every split mean, but the fixed
+per-goal gate rejected it. C2, D3, and G2 exceeded the 2.0 audit loss cap, and
+D3 became 1.4271 worse than its baseline, above the 0.25 harm cap.
+
+| Measure | Baseline | Candidate |
+|---|---:|---:|
+| Total score | 11.9223 | 4.7043 |
+| Fit mean | 4.9483 | 1.2586 |
+| Validation mean | 3.8438 | 1.0590 |
+| Audit mean | 3.1302 | 2.3867 |
+
+| Audit goal | Baseline loss | Candidate loss | T60 ratio | Support ratio | Result |
+|---|---:|---:|---:|---:|---|
+| A3 | 3.6468 | 0.6183 | 1.2450 | 1.1766 | pass |
+| C2 | 3.2065 | 2.6091 | 1.8070 | 1.8143 | fail: loss above 2.0 |
+| D3 | 2.1357 | 3.5628 | 0.9168 | 1.3625 | fail: loss above 2.0 and harm above 0.25 |
+| G2 | 3.5317 | 2.7567 | 1.4671 | 1.9778 | fail: loss above 2.0 |
+
+All T60 and support ratios passed. All fit and validation objectives passed.
+Those aggregate successes do not override one failed held-out goal.
+`instrument_fit.py select` therefore exited with status 2 and wrote a checked
+failed result; no model profile or profile receipt was written.
+
+| Evidence | SHA-256 |
+|---|---|
+| G2 experiment | `c94356a2da2914cd45059a848d1909d20c5bd0799cc347c222d05819c45bfddc` |
+| G2 selection | `ff2a9321087f87da172784646cb2f2a5dc4e2a40ad10a56c1d28dddaedba57d7` |
+| Joint bundle receipt | `43dcc8f74d84c927db73ae96574a484bb5fd9b4f0438da50a870bc8792d27c1e` |
+| Frozen candidate profile | `31d99c799d5831e51411c1bf16b966f1f7f16da17391c1792c8c46399e5fb828` |
+| Joint experiment | `1619aa361b624a2cb6f436f852fdc1c515cc63b3c1fcb198d5c7d9ff35f5c281` |
+| Failed joint selection | `82c2de7a117efa638a23ea6b75a6695964115166cf79bfb88e6fcb222b11615c` |
+
+The frozen candidate is rejected. The fixed profile remains violin-derived.
+This held-out set must not now be used to tune replacement parameter values;
+a materially changed model needs fit/validation evidence and another untouched
+audit before a profile write.
 
 ## TinySOL does not contain pizzicato
 
@@ -223,8 +273,9 @@ its v4 passes only as decay-gate diagnostics.
 
 ## Decision
 
-Pin the four OrchideaSOL metadata rows for the third audit, but keep the audit
-gate closed until an authorized official archive supplies all four raw files.
+The authorized official archive supplied all four raw files, and the completed
+joint audit rejected the frozen candidate. This OrchideaSOL set is now consumed
+as held-out evidence and cannot be reused to tune or audit a replacement.
 TinySOL and Philharmonia lack the needed recordings. CORA does not name
 pizzicato or prove that its files are unretuned. The Freesound previews show
 suitable decay shapes but do not meet the raw, tuning, or untouched-source

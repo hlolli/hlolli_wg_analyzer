@@ -2,15 +2,15 @@
 
 This adapter fits one open-string loss value at a time, then checks one fixed
 four-string candidate. It can also search termination shape and loss together.
-The current G2 search adds a narrow bridge-loss peak. The D3 search keeps the
-older nut and bridge cutoff grid. One implementation freezes a separate bundle
-for C2, G2, D3, or A3:
+The current C2 and D3 searches vary nut cutoff, bridge cutoff, and loss time.
+The G2 search adds a narrow bridge-loss peak. One implementation freezes a
+separate bundle for C2, G2, D3, or A3:
 
 | Target | Manifest | Temporary model path | Render string |
 |---|---|---|---:|
-| `c2` | `fit.json` | `strings[0].loss_time_constant_seconds` | 1 |
+| `c2` | `fit-c2-frequency-loss.json` | three fields under `strings[0]` | 1 |
 | `g2` | `fit-g2-bridge-peak.json` | four fields under `strings[1]` | 2 |
-| `d3` | `fit-d3.json` | `strings[2].loss_time_constant_seconds` | 3 |
+| `d3` | `fit-d3-frequency-loss.json` | three fields under `strings[2]` | 3 |
 | `a3` | `fit-a3.json` | `strings[3].loss_time_constant_seconds` | 4 |
 
 It does not fit bow, body, release, or gesture data. It never changes the fixed
@@ -59,19 +59,20 @@ records the other official files and exact trims.
 
 ## Build a frozen bundle
 
-Use system Python 3.9 because the frozen renderer has the fixed
-`/usr/bin/python3` shebang. Pass resolved libraries that the named Csound build
-loads on the host.
+Pass one resolved regular Python 3 executable. The frozen renderer records and
+reuses that exact interpreter, so it also works on hosts such as NixOS that do
+not provide `/usr/bin/python3`. Pass resolved libraries that the named Csound
+build loads on the host.
 
 ```sh
-/usr/bin/python3 -B adapters/hlolli_wg_cello/adapter.py build \
+python3 -B adapters/hlolli_wg_cello/adapter.py build \
   --cello-root /path/to/hlolli_wg_cello \
   --csound /path/to/csound \
   --csound-library /path/to/CsoundLib64 \
   --sndfile-library /path/to/libsndfile \
   --cmake /path/to/cmake \
   --ninja /path/to/ninja \
-  --python /usr/bin/python3 \
+  --python /absolute/path/to/python3 \
   --cc /path/to/cc \
   --csound-build-dir /path/to/csound-build \
   --csound-source-dir /path/to/csound-source \
@@ -110,7 +111,7 @@ gate: each fit and validation goal needs loss at most 2.0, T60 ratio from 0.5
 through 2.0, and support ratio at least 0.5.
 
 ```sh
-/usr/bin/python3 -B tools/instrument_fit.py select \
+python3 -B tools/instrument_fit.py select \
   --manifest /private/new/cello-g2-fit-bundle/fit.json \
   --experiment /private/new/cello-g2-experiment/result.hwa-experiment \
   --analyzer /path/to/hlolli-wg-analyzer \
@@ -124,28 +125,66 @@ Repeat the command with `c2`, `d3`, or `a3` and the matching files. The old
 hidden C2 reference flags remain only so the first frozen receipt can be
 reproduced.
 
-For G2 or D3, replace `build` with `build-shape`. The current G2 bundle varies
-bridge cutoff, peak bandwidth, peak loss, and passive loss time across 96 fixed
-points. The D3 bundle varies loss time, nut cutoff, and bridge cutoff across 54
-points. Both manifests combine whole-tail error with eight per-partial T60
-checks. Pass the bundle's `fit.json` to the same `select` command. Shape
-selection writes only a new result; it does not edit the fixed model.
+For C2, G2, or D3, replace `build` with `build-shape`. The current C2 bundle
+varies loss time, nut cutoff, and bridge cutoff across 48 fixed points. G2
+varies bridge cutoff, peak bandwidth, peak loss, and passive loss time across
+96 points. D3 varies loss time, nut cutoff, and bridge cutoff across 24 points.
+The shape manifests combine whole-tail error with eight per-partial T60 checks.
+C2 and D3 rank fit loss only after validation acts as a binary gate. Pass the
+bundle's `fit.json` to the same `select` command. Shape selection writes only a
+new result; it does not edit the fixed model.
 
-`write-profile` can write one scalar candidate to a new path, but that is not
-the Stage 3 merge gate. Keep the four results separate until one joint
+`write-profile` can write one per-string candidate to a new path, but that is
+not the Stage 3 merge gate. Keep the four results separate until one joint
 candidate renders all four strings and passes a third recording set.
+
+## Build a source-balanced corpus bundle
+
+`build-corpus` accepts a checked `hwa-cello-passive-corpus-plan` instead of one
+fit and one validation file. Each reference names its source identity,
+performance, dynamic, split, path, and measured fundamental. A source identity
+must stay in one split, each split needs at least two independent sources, and
+duplicate audio is rejected. The adapter renders once per source and grid
+point, at that source's median admitted pitch, while all admitted dynamics
+share the source-conditioned model artifact.
+
+```sh
+python3 -B adapters/hlolli_wg_cello/adapter.py build-corpus \
+  --target c2 \
+  --corpus-plan /private/corpus-plan-c2.json \
+  --cello-root /path/to/hlolli_wg_cello \
+  --csound /path/to/csound \
+  --csound-library /path/to/CsoundLib64 \
+  --sndfile-library /path/to/libsndfile \
+  --cmake /path/to/cmake \
+  --ninja /path/to/ninja \
+  --python /absolute/path/to/python3 \
+  --cc /path/to/cc \
+  --csound-build-dir /path/to/csound-build \
+  --csound-source-dir /path/to/csound-source \
+  --output-dir /private/c2-corpus-bundle
+```
+
+Within each objective kind, admitted dynamics divide one source's weight.
+Both source-separated development folds rank the generic model; the score then
+uses worst-source loss and point ID as tie-breaks. Source-mean and physical
+limits gate eligibility. This is intentionally different from pretending that
+one cello's extra takes are extra independent instruments. The
+[generic-corpus report](../../docs/research/cello-generic-passive-corpus-v1.md)
+records the current source split, intake corrections, grids, and results.
 
 ## Check one four-string candidate
 
-`build-joint` takes the four frozen bundles, their current selection results,
-and four new audit recordings. A G2 shape result can supply four changes while
-C2, D3, and A3 each supply one. Each audit row also names its source set and
-performance. The command rejects a reused recording, a stale result, a changed
-source or tool, audio stored in either source repository, or a bundle path
-under either repository.
+`build-joint` takes the four legacy frozen bundles, their current selection
+results, and four new audit recordings. Generic-corpus results remain separate
+until all four strings pass and a corpus-aware candidate assembler is frozen;
+the current C2 failure intentionally blocks that step. Each audit row also
+names its source set and performance. The command rejects a
+reused recording, a stale result, a changed source or tool, audio stored in
+either source repository, or a bundle path under either repository.
 
 ```sh
-/usr/bin/python3 -B adapters/hlolli_wg_cello/adapter.py build-joint \
+python3 -B adapters/hlolli_wg_cello/adapter.py build-joint \
   --scalar c2 /private/c2-bundle /private/c2-selection.json \
   --scalar g2 /private/g2-bundle /private/g2-selection.json \
   --scalar d3 /private/d3-bundle /private/d3-selection.json \
@@ -178,22 +217,43 @@ The 2026 RWC Instruments release supplies three maker/player variations. The
 records its rights, member hashes, exact splits, pitch, and raw-tail checks.
 Variation 2 mezzo fits G2 and variation 3 mezzo validates it. Variation 1 was
 already used in the earlier four-string audit, so it cannot check the new G2
-model as untouched data. The same receipt records the search for another set.
-No accessible unused four-string set meets the input checks. A synthetic run
-still tests the joint command and all seven candidate changes.
+model as untouched data. An authorized OrchideaSOL set later supplied the
+independent audit; its archive, audio, and results remain outside Git and may
+not be redistributed.
 
 ## Current passive-loss result
 
-The current staged values are C2 1.00 s, D3 0.75 s, and A3 1.00 s. G2 uses a
-2.50 s loss time, an 18 kHz bridge cutoff, a 100 Hz-wide bridge-loss peak at
-the fixed 293 Hz center, and a 0.02 peak loss fraction. Its score falls from
-7.665 to 2.825 and both fit and validation goals pass. The
+The 2026-09-03 generic-corpus run admits 28 open-string takes across four
+independent cellos/players/sessions and balances source identities rather than
+raw file count. G2, D3, and A3 pass. They select:
+
+- G2: 18 kHz bridge cutoff, 200 Hz-wide 293 Hz bridge-loss peak, 0.02 peak
+  loss, and 3.0 s broadband loss time;
+- D3: the existing 7086.471 Hz bridge cutoff, 8 kHz nut cutoff, and 0.75 s
+  loss time; and
+- A3: 12 kHz bridge and nut cutoffs with 1.0 s loss time.
+
+C2 fails both its original and expanded existing-control grids. The best
+follow-up has acceptable means for all four source identities but overlaps only
+two of three valid harmonics on the RWC variation-3 mezzo reference: its
+fundamental is too short while harmonics 3 and 8 are already too long. No
+four-string candidate or audit run is therefore valid yet. The
+[generic-corpus report](../../docs/research/cello-generic-passive-corpus-v1.md)
+records intake, weighting, grids, results, and receipts.
+
+The earlier per-recording C2/D3 run is retained as historical development
+evidence in the [C2/D3 report](../../docs/research/cello-cd-frequency-loss-v1.md).
+The earlier G2 result used 2.5 s loss and a 100 Hz peak; its
 [G2 report](../../docs/research/cello-g2-bridge-termination-v1.md) gives the
 per-partial results and receipts.
 
 The fixed profile still contains 0.25 s passive loss and zero peak loss for
-every string. The staged G2 values need a new independent four-string audit
-before any profile write.
+every string. The independent OrchideaSOL joint audit rejected the staged
+seven-value candidate: C2, D3, and G2 exceeded the 2.0 curve-loss cap, and D3
+also exceeded the 0.25 harm cap. Aggregate fit, validation, audit, and total
+scores improved, but per-goal failures block a profile write. The
+[audit receipt](../../docs/research/cello-third-passive-audit-source.md)
+records the measurements and result hashes.
 
 The [full sweep report](../../docs/research/cello-four-string-passive-loss-v3.md)
 records the historical 28-point score table, later G2 grid, fixed absolute
@@ -203,10 +263,10 @@ limits, RWC source split, and failed final audit. The original v3 run used:
 - fit selector: `e4476bdfde0f44546cbae7b251f2784e257c72ab548e6057396b621e31a96c98`;
 - generic probe: `ac17b30bdddecaf23b4883b924a1af9ed7f6b01f0df47984853ff171db19ad48`.
 
-The current selector SHA-256 is
-`f8952be56bb854f5ccbc61a2c90abab11fbecf6b01e5724fdea31df942acbf91`.
-The current adapter SHA-256 is
-`96aaf02ce56edc735e8e34765df943fb8487ec2cef13e90161a6066296d96e53`.
+The current source-balanced selector has SHA-256
+`cc30b374c4cd29452ba374ff062e81e28e086b82a6af8b4be8aa1c27695b3392`.
+The current adapter, including the frozen C2/A3 follow-up grids, has SHA-256
+`7f0290069dc87536f81e011a1354f6914431f5d230bd70617f3c456be2f5e48b`.
 The earlier loss-only G2 grid had 19 points through 3.0 seconds and selected
 1.50 seconds. The later RWC variation-1 audit failed at D3 and G2. The rejected
 joint receipt hashes are

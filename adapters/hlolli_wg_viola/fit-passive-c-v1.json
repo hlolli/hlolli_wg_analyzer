@@ -8,7 +8,7 @@
       "unit": "seconds",
       "minimum": 0.02,
       "maximum": 5.0,
-      "baseline": 0.25,
+      "baseline": 1.15,
       "profile_paths": [["strings", 0, "loss_time_constant_seconds"]]
     }
   ],

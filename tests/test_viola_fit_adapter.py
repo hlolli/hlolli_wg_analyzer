@@ -195,19 +195,19 @@ def fake_viola_tree(root: Path) -> Path:
     )
     model = {
         "strings": [
-            {"loss_time_constant_seconds": 0.25,
+            {"loss_time_constant_seconds": 1.15,
              "nut_cutoff_hz": 20000.0,
              "bridge_cutoff_hz": 5386.995271806526,
              "nut_loss_fraction": 0.25},
-            {"loss_time_constant_seconds": 0.25,
+            {"loss_time_constant_seconds": 1.9,
              "nut_cutoff_hz": 4200.0,
              "bridge_cutoff_hz": 4964.244281108786,
              "nut_loss_fraction": 0.25},
-            {"loss_time_constant_seconds": 0.25,
+            {"loss_time_constant_seconds": 0.85,
              "nut_cutoff_hz": 12000.0,
              "bridge_cutoff_hz": 7086.471045764144,
              "nut_loss_fraction": 0.25},
-            {"loss_time_constant_seconds": 0.25,
+            {"loss_time_constant_seconds": 0.45,
              "nut_cutoff_hz": 12000.0,
              "bridge_cutoff_hz": 6024.580442039031,
              "nut_loss_fraction": 0.25},
@@ -843,7 +843,7 @@ class ViolaFitAdapterTests(unittest.TestCase):
                     "unit": "seconds",
                     "minimum": 0.02,
                     "maximum": 5.0,
-                    "baseline": 0.25,
+                    "baseline": 1.9,
                     "levels": [
                         0.10, 0.15, 0.25, 0.35, 0.45, 0.55,
                         0.70, 0.85, 1.00, 1.15, 1.30, 1.45, 1.60,
@@ -1790,7 +1790,7 @@ class ViolaFitAdapterTests(unittest.TestCase):
                 "unit": "seconds",
                 "minimum": 0.02,
                 "maximum": 5.0,
-                "baseline": 0.25,
+                "baseline": 1.15,
                 "levels": [
                     0.10, 0.15, 0.25, 0.35, 0.45, 0.55,
                     0.70, 0.85, 1.00, 1.15, 1.30, 1.45, 1.60, 1.75,
@@ -1897,19 +1897,20 @@ class ViolaFitAdapterTests(unittest.TestCase):
         spec.loader.exec_module(tool)
         expected = {
             "c3": (0, 1, 130.8127826502993, 130.58241487372985,
-                   "loss_time_constant_c_seconds"),
+                   "loss_time_constant_c_seconds", 1.15),
             "g3": (1, 2, 195.99771799087463, 195.58538558422308,
-                   "loss_time_constant_g_seconds"),
+                   "loss_time_constant_g_seconds", 1.9),
             "d4": (2, 3, 293.6647679174076, 292.96845778349154,
-                   "loss_time_constant_d_seconds"),
+                   "loss_time_constant_d_seconds", 0.85),
             "a4": (3, 4, 440.0, 441.08823856808476,
-                   "loss_time_constant_a_seconds"),
+                   "loss_time_constant_a_seconds", 0.45),
         }
 
         self.assertEqual(set(module.STRING_TARGETS), set(expected))
         for target, facts in expected.items():
             with self.subTest(target=target):
-                profile_index, render_string, nominal_hz, measured_hz, parameter_id = facts
+                (profile_index, render_string, nominal_hz, measured_hz,
+                 parameter_id, baseline) = facts
                 target_spec = module.STRING_TARGETS[target]
                 manifest = tool.fit_manifest(FIT_MANIFESTS[target])
                 module.validate_fit_manifest(manifest, target)
@@ -1919,7 +1920,11 @@ class ViolaFitAdapterTests(unittest.TestCase):
                 self.assertEqual(target_spec["measured_reference_hz"], measured_hz)
                 self.assertEqual(target_spec["render_a4"],
                                  440.0 * measured_hz / nominal_hz)
+                self.assertEqual(target_spec["baseline"], baseline)
                 self.assertEqual(manifest["parameters"][0]["id"], parameter_id)
+                self.assertEqual(
+                    manifest["parameters"][0]["baseline"], baseline,
+                )
                 self.assertEqual(
                     manifest["parameters"][0]["profile_paths"],
                     [["strings", profile_index, "loss_time_constant_seconds"]],

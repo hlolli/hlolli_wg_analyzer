@@ -1053,6 +1053,14 @@ if(HWA_PYTHON3_EXECUTABLE)
   endif()
 
   add_test(
+    NAME unit.viola-recording-session
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_viola_recording_session.py)
+  set_tests_properties(unit.viola-recording-session PROPERTIES TIMEOUT 60)
+
+  add_test(
     NAME unit.cello-fit-adapter
     COMMAND
       ${HWA_PYTHON3_EXECUTABLE}

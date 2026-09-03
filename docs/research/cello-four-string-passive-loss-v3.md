@@ -335,10 +335,23 @@ against the libraries loaded by the host before it freezes their hashes.
 ## Next gate
 
 Do not copy the four values into the fixed model. Three RWC cello variations
-now cover G2 fit, validation, and final audit. The fit and validation split
-passes, but the final D3 and G2 curves reject one loss time per string. The next
-passive-loss step must fit the existing bridge cutoff, nut cutoff, and nut loss
-split with the time value, then repeat the same fixed split. Do not use the
-failed audit to rank new values, and do not lower a limit to accept the vector.
+cover G2 fit, validation, and the consumed final audit. The later OrchideaSOL
+audit is also consumed and cannot rank another candidate.
+
+A predeclared 2026-09-03 follow-up used only eligible Iowa fit and validation
+data to test existing nut and bridge cutoffs with loss time on C2 and D3. Both
+per-string selectors passed. `nut_loss_fraction` was not swept because its two
+passive half-loop powers multiply back to the same full-loop gain. The
+[C2/D3 frequency-loss report](cello-cd-frequency-loss-v1.md) records the grids,
+metrics, and receipts. Those selections still need assembly with separately
+passing G2 and A3 evidence and another untouched four-string audit.
 
 No current result proves bow, bridge, body, release, or gesture data.
+
+## Generic-corpus follow-up
+
+The [generic passive-corpus run](cello-generic-passive-corpus-v1.md) balances
+28 admitted takes across four source identities. G2, D3, and A3 pass, but C2
+fails both the original and expanded existing-control grids. No four-string
+candidate exists yet, and the newly reserved fifth player/cello/session must
+remain untouched until C2 passes and candidate assembly is frozen.

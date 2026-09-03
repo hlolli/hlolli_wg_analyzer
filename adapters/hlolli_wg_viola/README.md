@@ -4,6 +4,121 @@ This adapter builds one local bundle for one open viola string. Each bundle
 varies only that string's passive loss time. It keeps the public Csound opcode
 and fixed model format unchanged.
 
+## Controlled recording intake
+
+`recording_session.py` is a read-only intake gate for future private recording
+evidence. It does not copy audio, print paths, write a receipt, or read or alter
+a viola model. Run it with an absolute manifest path:
+
+```sh
+python3 -B adapters/hlolli_wg_viola/recording_session.py validate \
+  --manifest /private/viola-session/manifest.json
+```
+
+The strict `hwa-viola-recording-session` version 1 object has these fields:
+
+```json
+{
+  "schema": "hwa-viola-recording-session",
+  "schema_version": 1,
+  "session_id": "viola-session-01",
+  "source_family": "controlled-viola-01",
+  "split": "check",
+  "recording_setup": {
+    "instrument_id": "viola-01",
+    "bow_id": "bow-01",
+    "performer_id": "performer-01",
+    "room_id": "room-01",
+    "recorder_id": "recorder-01",
+    "audio_interface_id": "interface-01",
+    "clock_source": "interface-internal"
+  },
+  "tuning": {
+    "a4_hz": 440.0,
+    "reference": {
+      "pitch": "A4",
+      "frequency_hz": 440.0,
+      "measurement_method": "strobe-tuner-01"
+    }
+  },
+  "strings": [
+    {"id": "c", "open_pitch": "C3", "length_m": 0.4, "measurement_method": "steel-rule-01"},
+    {"id": "g", "open_pitch": "G3", "length_m": 0.4, "measurement_method": "steel-rule-01"},
+    {"id": "d", "open_pitch": "D4", "length_m": 0.4, "measurement_method": "steel-rule-01"},
+    {"id": "a", "open_pitch": "A4", "length_m": 0.4, "measurement_method": "steel-rule-01"}
+  ],
+  "channels": [
+    {"id": "bridge-mic", "role": "instrument", "transducer_id": "mic-01", "input_id": "input-01"}
+  ],
+  "source_files": [
+    {
+      "id": "source-01",
+      "path": "audio/source-01.wav",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "layout": {
+        "sample_rate_hz": 96000,
+        "bits_per_sample": 24,
+        "frame_count": 960000,
+        "channel_ids": ["bridge-mic"]
+      }
+    }
+  ],
+  "takes": [
+    {
+      "id": "pizz-c-01",
+      "kind": "passive-pizzicato",
+      "file_id": "source-01",
+      "start_frame": 0,
+      "frame_count": 96000,
+      "string_id": "c",
+      "pitch": "C3"
+    },
+    {
+      "id": "arco-g-01",
+      "kind": "steady-arco",
+      "file_id": "source-01",
+      "start_frame": 96000,
+      "frame_count": 96000,
+      "string_id": "g",
+      "pitch": "G3",
+      "articulation": "sustain",
+      "bow": {
+        "force_n": 1.0,
+        "speed_m_per_s": 0.2,
+        "bridge_distance_m": 0.04,
+        "position_ratio": 0.1,
+        "direction": "down-bow",
+        "measurement_methods": {
+          "force": "load-cell-01",
+          "speed": "motion-track-01",
+          "bridge_distance": "steel-rule-01"
+        }
+      }
+    },
+    {"id": "room-01", "kind": "room-tone", "file_id": "source-01", "start_frame": 192000, "frame_count": 96000},
+    {"id": "sync-01", "kind": "sync", "file_id": "source-01", "start_frame": 288000, "frame_count": 9600}
+  ],
+  "processing": []
+}
+```
+
+IDs and object fields are closed and duplicate-free. Source paths are
+normalized relative POSIX paths beneath the manifest directory. Every source
+must be a regular non-symlink RIFF/WAVE file whose exact bytes match its
+SHA-256 and declared frame/channel layout; only nonempty 96 kHz integer PCM24
+is accepted. Take frame regions must stay inside their source. Passive takes
+have string and pitch fields but no bow object. Steady arco takes also have a
+named articulation and positive physical bow measurements; force is at most
+100 N, speed at most 20 m/s, and bridge distance is below the measured string
+length. `position_ratio` must equal `bridge_distance_m / length_m` within
+`1e-9` relative or `1e-12` absolute tolerance. Bow direction is `up-bow` or
+`down-bow`; every force, speed, and bridge-distance method is named.
+
+Success prints one deterministic, path-free JSON line containing the exact
+manifest-byte SHA-256, channel/source/take counts (including take kinds), and
+the accepted PCM layout. Failure prints no path and exits nonzero. Source-file
+inspection is cached for repeated bindings. The validator writes nothing.
+
 The four target contracts are separate:
 
 | Target | Model path | Render string | Iowa fit pitch | Iowa fit A4 |
@@ -18,6 +133,13 @@ source receipt. Each roster case has its own measured pitch. The adapter sets
 the constructor value to `440 * case pitch / nominal open pitch` and renders
 that same pitch. The probe checks that the tuned open string and render pitch
 agree. Cases do not share tuning.
+
+The current C, G, D, and A loss baselines are 1.15, 1.90, 0.85, and 0.45
+seconds. A 2026-09-03 cross-corpus experiment chose them as perceptual
+whole-tail duration compromises, not as measurements of physical string loss.
+The older Stage 3 receipts and their frozen bundles retain the former
+0.25-second baseline and remain valid historical runs. New bundles use the
+current model values above.
 
 For each scalar search job, the frozen renderer:
 
@@ -281,10 +403,13 @@ on Linux. The current builder supports Darwin and Linux toolchains.
 ## Current limit
 
 The fit manifest scores aligned decay shape and ignores gain, polarity, and
-leading silence. RWC variation 2 now supplies accepted C, D, and A check
-tails. All three RWC variation 2 G tails fail the fixed 20 dB range gate and
-stay rejected. The accepted Best Music Tools A442 open-G tail supplies the one
-G check for this directional diagnostic. One fit and one check tail cannot
-approve a fixed G value; obtain another controlled G tail before a model
-write. RWC variation 3 stays sealed. The scalar adapter writes one chosen
-string value at a time. The joint diagnostic does not choose or write values.
+leading silence. RWC variation 2 supplies accepted C, D, and A check tails.
+All three RWC variation 2 G tails fail the fixed 20 dB range gate and stay
+rejected. The accepted Best Music Tools A442 open-G tail supplies the one G
+check for the older directional diagnostic. One fit and one check tail would
+still be insufficient for a physical G-loss claim; another controlled G tail
+would be needed before making that claim. The 2026-09-03 fixed-model update
+instead used a separately frozen perceptual whole-tail criterion with equal
+Iowa, RWC, and OrchideaSOL corpus weight, and it makes no physical-loss claim.
+RWC variation 3 stays sealed. The scalar adapter writes one chosen string
+value at a time. The joint diagnostic does not choose or write values.

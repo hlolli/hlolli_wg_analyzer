@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import struct
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 import wave
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER = ROOT / "adapters" / "hlolli_wg_cello" / "adapter.py"
 FIT_TOOL = ROOT / "tools" / "instrument_fit.py"
+PYTHON = Path(sys.executable).resolve()
 
 
 def load_adapter():
@@ -26,6 +31,34 @@ def load_adapter():
 
 def rows_by_id_for_test(rows):
     return {row["id"]: row for row in rows}
+
+
+def run_adapter(command):
+    module = load_adapter()
+
+    def checked_libraries(unused_csound, libraries, unused_cwd):
+        return [
+            {
+                "id": name,
+                "path": str(path.resolve()),
+                "sha256": module.sha256(path),
+            }
+            for name, path in sorted(libraries.items())
+        ]
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with mock.patch.object(module.sys, "argv", [str(ADAPTER), *command[2:]]), \
+            mock.patch.object(
+                module, "verify_loaded_libraries",
+                side_effect=checked_libraries,
+            ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        return_code = module.main()
+    return types.SimpleNamespace(
+        returncode=return_code,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
 
 
 def pcm16_wave(path, frames=256, rate=44100, channels=2):
@@ -73,6 +106,8 @@ def fake_cello_tree(root):
             '"bridge_cutoff_hz":5386.995271806526,'
             '"bridge_low_shelf_cutoff_hz":500.0,'
             '"bridge_low_shelf_loss_fraction":0.0,'
+            '"bridge_high_shelf_cutoff_hz":200.0,'
+            '"bridge_high_shelf_loss_fraction":0.0,'
             '"bridge_loss_peak_frequency_hz":293.0,'
             '"bridge_loss_peak_bandwidth_hz":200.0,'
             '"bridge_loss_peak_fraction":0.0},'
@@ -80,6 +115,8 @@ def fake_cello_tree(root):
             '"bridge_cutoff_hz":4964.244281108786,'
             '"bridge_low_shelf_cutoff_hz":500.0,'
             '"bridge_low_shelf_loss_fraction":0.0,'
+            '"bridge_high_shelf_cutoff_hz":200.0,'
+            '"bridge_high_shelf_loss_fraction":0.0,'
             '"bridge_loss_peak_frequency_hz":293.0,'
             '"bridge_loss_peak_bandwidth_hz":200.0,'
             '"bridge_loss_peak_fraction":0.0},'
@@ -87,6 +124,8 @@ def fake_cello_tree(root):
             '"bridge_cutoff_hz":7086.471045764144,'
             '"bridge_low_shelf_cutoff_hz":500.0,'
             '"bridge_low_shelf_loss_fraction":0.0,'
+            '"bridge_high_shelf_cutoff_hz":200.0,'
+            '"bridge_high_shelf_loss_fraction":0.0,'
             '"bridge_loss_peak_frequency_hz":293.0,'
             '"bridge_loss_peak_bandwidth_hz":200.0,'
             '"bridge_loss_peak_fraction":0.0},'
@@ -94,6 +133,8 @@ def fake_cello_tree(root):
             '"bridge_cutoff_hz":6024.580442039031,'
             '"bridge_low_shelf_cutoff_hz":500.0,'
             '"bridge_low_shelf_loss_fraction":0.0,'
+            '"bridge_high_shelf_cutoff_hz":200.0,'
+            '"bridge_high_shelf_loss_fraction":0.0,'
             '"bridge_loss_peak_frequency_hz":293.0,'
             '"bridge_loss_peak_bandwidth_hz":200.0,'
             '"bridge_loss_peak_fraction":0.0}]}'
@@ -108,7 +149,7 @@ def fake_cello_tree(root):
 
 def build_fake_bundle(root, target=None, probe_override=None, shape=False,
                       reference_offset=0, reference_paths=None,
-                      output_dir=None):
+                      output_dir=None, corpus=False):
     cello = root / "cello"
     cello.mkdir()
     fake_cello_tree(cello)
@@ -125,7 +166,7 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
         path = root / name
         if name == "csound":
             source = (
-                "#!/usr/bin/python3\n"
+                "#!{}\n".format(PYTHON) +
                 "import json, pathlib, sys, wave\n"
                 "if '--version' in sys.argv:\n"
                 "    root = pathlib.Path(__file__).resolve().parent\n"
@@ -144,6 +185,7 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
                 "float(row['bridge_cutoff_hz']) / 10 + "
                 "float(row['bridge_low_shelf_cutoff_hz']) / 10 + "
                 "float(row['bridge_low_shelf_loss_fraction']) * 1000 + "
+                "float(row['bridge_high_shelf_loss_fraction']) * 100000 + "
                 "float(row['bridge_loss_peak_bandwidth_hz']) / 10 + "
                 "float(row['bridge_loss_peak_fraction']) * 2000)\n"
                 "sample = round(sample_value).to_bytes(3, 'little', signed=True)\n"
@@ -155,7 +197,7 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
             )
         elif name == "cmake":
             source = (
-                "#!/usr/bin/python3\n"
+                "#!{}\n".format(PYTHON) +
                 "import json, pathlib, sys\n"
                 "if '--build' in sys.argv:\n"
                 "    root = pathlib.Path(sys.argv[sys.argv.index('--build') + 1])\n"
@@ -170,7 +212,7 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
                 "    (root / 'taus').write_text(json.dumps(values))\n"
             )
         else:
-            source = "#!/usr/bin/python3\n"
+            source = "#!{}\n".format(PYTHON)
         path.write_text(source, encoding="ascii")
         path.chmod(0o755)
         tools.append(path)
@@ -183,15 +225,17 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
     (csound_source / "include" / "csdl.h").write_text(
         "csdl", encoding="ascii")
     output = output_dir if output_dir is not None else root / "bundle"
+    command_name = ("build-corpus" if corpus else
+                    "build-shape" if shape else "build")
     command = [
-        sys.executable, str(ADAPTER), "build-shape" if shape else "build",
+        sys.executable, str(ADAPTER), command_name,
         "--cello-root", str(cello),
         "--csound", str(tools[0]),
         "--csound-library", str(tools[1]),
         "--sndfile-library", str(tools[6]),
         "--cmake", str(tools[2]),
         "--ninja", str(tools[3]),
-        "--python", "/usr/bin/python3",
+        "--python", str(PYTHON),
         "--cc", str(tools[5]),
         "--csound-build-dir", str(csound_build),
         "--csound-source-dir", str(csound_source),
@@ -199,7 +243,48 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
     ]
     if probe_override is not None:
         command.extend(["--probe-csd", str(probe_override)])
-    if target is None:
+    if corpus:
+        if target is None:
+            target = "c2"
+        predeclaration = root / "predeclaration.json"
+        predeclaration.write_text('{"frozen":true}\n', encoding="ascii")
+        references = []
+        nominal = {
+            "c2": 65.40639132514966,
+            "g2": 97.99885899543733,
+            "d3": 146.8323839587038,
+            "a3": 220.0,
+        }[target]
+        for index, (split, source) in enumerate((
+                ("fit", "fit-one"), ("fit", "fit-two"),
+                ("check", "check-one"), ("check", "check-two"))):
+            path = root / (source + ".wav")
+            pcm16_wave(path, frames=300 + index)
+            references.append({
+                "id": source,
+                "source_id": source,
+                "performance_id": source + "-mf",
+                "dynamic": "mf",
+                "split": split,
+                "path": str(path),
+                "fundamental_hz": nominal + 0.01 * index,
+            })
+        corpus_plan = root / "corpus-plan.json"
+        corpus_plan.write_text(json.dumps({
+            "schema": "hwa-cello-passive-corpus-plan",
+            "schema_version": 1,
+            "target": target,
+            "predeclaration_path": str(predeclaration),
+            "predeclaration_sha256": hashlib.sha256(
+                predeclaration.read_bytes()
+            ).hexdigest(),
+            "references": references,
+        }), encoding="utf-8")
+        command.extend([
+            "--target", target,
+            "--corpus-plan", str(corpus_plan),
+        ])
+    elif target is None:
         command.extend([
             "--reference-c2-fit", str(fit),
             "--reference-c2-check", str(check),
@@ -210,9 +295,7 @@ def build_fake_bundle(root, target=None, probe_override=None, shape=False,
             "--reference-fit", str(fit),
             "--reference-check", str(check),
         ])
-    completed = subprocess.run(
-        command, check=False, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+    completed = run_adapter(command)
     return completed, output, cello
 
 
@@ -382,9 +465,12 @@ def fake_shape_selection(bundle, target, values):
     return path
 
 
-def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False):
+def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False,
+                            shape_targets=None):
     if selected is None:
         selected = {"c2": 1.0, "g2": 1.0, "d3": 0.75, "a3": 1.0}
+    if shape_targets is None:
+        shape_targets = {"g2"} if shape_g2 else set()
     scalar_rows = []
     audit_rows = []
     source_profiles = []
@@ -398,10 +484,10 @@ def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False):
         completed, bundle, cello = build_fake_bundle(
             scalar_root, target, reference_offset=index * 2,
             reference_paths=reference_paths,
-            shape=shape_g2 and target == "g2")
+            shape=target in shape_targets)
         if completed.returncode != 0:
             return completed, root / "joint-bundle", source_profiles
-        if shape_g2 and target == "g2":
+        if target in shape_targets:
             selection = fake_shape_selection(bundle, target, selected[target])
         else:
             selection = fake_scalar_selection(bundle, target, selected[target])
@@ -441,9 +527,7 @@ def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False):
     command.extend(scalar_rows)
     command.extend(audit_rows)
     command.extend(["--output-dir", str(output)])
-    completed = subprocess.run(
-        command, check=False, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True)
+    completed = run_adapter(command)
     return completed, output, source_profiles
 
 
@@ -483,6 +567,41 @@ def shape_render_request(binding, output_path, target="g2", values=None):
 
 
 class CelloFitAdapterTests(unittest.TestCase):
+    def test_linux_library_check_finds_ldd_on_the_clean_host_path(self):
+        module = load_adapter()
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            csound_library = root / "libcsound64.so"
+            sndfile_library = root / "libsndfile.so"
+            csound_library.write_bytes(b"csound")
+            sndfile_library.write_bytes(b"sndfile")
+            completed = types.SimpleNamespace(
+                stdout=(
+                    "libcsound64.so => {} (0x1)\n"
+                    "libsndfile.so => {} (0x2)\n"
+                ).format(csound_library, sndfile_library).encode("utf-8"),
+                stderr=b"",
+            )
+            with mock.patch.object(module.sys, "platform", "linux"), \
+                    mock.patch.object(
+                        module.shutil, "which", return_value="/host/bin/ldd",
+                    ) as find_ldd, mock.patch.object(
+                        module, "run_command", return_value=completed,
+                    ):
+                rows = module.verify_loaded_libraries(
+                    root / "csound",
+                    {
+                        "csound_library": csound_library,
+                        "sndfile_library": sndfile_library,
+                    },
+                    root,
+                )
+            find_ldd.assert_called_once_with("ldd", path=module.CLEAN_PATH)
+            self.assertEqual(
+                [row["id"] for row in rows],
+                ["csound_library", "sndfile_library"],
+            )
+
     def test_build_shape_freezes_a_g2_bridge_peak_grid(self):
         with tempfile.TemporaryDirectory() as text:
             root = Path(text)
@@ -548,6 +667,199 @@ class CelloFitAdapterTests(unittest.TestCase):
                 hashes.append(hashlib.sha256(output.read_bytes()).hexdigest())
             self.assertNotEqual(hashes[0], hashes[1])
 
+    def test_build_shape_freezes_c2_and_d3_frequency_loss_grids(self):
+        expected = {
+            "c2": (48, ["bridge_cutoff_c_hz",
+                         "loss_time_constant_c_seconds",
+                         "nut_cutoff_c_hz"]),
+            "d3": (24, ["bridge_cutoff_d_hz",
+                         "loss_time_constant_d_seconds",
+                         "nut_cutoff_d_hz"]),
+        }
+        for target, (point_count, parameter_ids) in expected.items():
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as text:
+                completed, bundle, unused_cello = build_fake_bundle(
+                    Path(text), target, shape=True
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                experiment = json.loads(
+                    (bundle / "experiment.json").read_text(encoding="utf-8")
+                )
+                fit = json.loads(
+                    (bundle / "fit.json").read_text(encoding="utf-8")
+                )
+                receipt = json.loads(
+                    (bundle / "receipt.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(receipt["point_count"], point_count)
+                self.assertEqual(
+                    [row["id"] for row in experiment["parameters"]],
+                    parameter_ids,
+                )
+                self.assertEqual(fit["selection"]["check_weight"], 0.0)
+                self.assertEqual(
+                    {row["kind"] for row in fit["objectives"]},
+                    {"passive-decay", "harmonic-decay"},
+                )
+
+    def test_build_corpus_balances_four_independent_sources(self):
+        for target, point_count in (("c2", 96), ("g2", 96),
+                                    ("d3", 24), ("a3", 24)):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as text:
+                completed, bundle, unused_cello = build_fake_bundle(
+                    Path(text), target, corpus=True
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                experiment = json.loads(
+                    (bundle / "experiment.json").read_text(encoding="utf-8")
+                )
+                fit = json.loads(
+                    (bundle / "fit.json").read_text(encoding="utf-8")
+                )
+                receipt = json.loads(
+                    (bundle / "receipt.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(receipt["schema"],
+                                 "hwa-cello-corpus-fit-adapter-bundle")
+                self.assertEqual(receipt["source_count"], 4)
+                self.assertEqual(receipt["point_count"], point_count)
+                self.assertEqual(receipt["case_count"], 4)
+                self.assertEqual(len(experiment["cases"]), 4)
+                self.assertEqual(len(fit["objectives"]), 8)
+                self.assertEqual(fit["selection"]["check_weight"], 1.0)
+                self.assertEqual(
+                    fit["selection"]["max_candidate_source_mean_loss"], 3.0
+                )
+                self.assertEqual(
+                    {row["source_group"] for row in fit["objectives"]},
+                    {"fit-one", "fit-two", "check-one", "check-two"},
+                )
+                self.assertEqual(
+                    {row["weight"] for row in fit["objectives"]}, {1.0}
+                )
+
+    def test_corpus_manifest_balances_unequal_source_counts(self):
+        module = load_adapter()
+        rows = []
+        for split, source, dynamics in (
+                ("fit", "fit-one", ("pp", "mf")),
+                ("fit", "fit-two", ("ff",)),
+                ("check", "check-one", ("pp", "mf", "ff")),
+                ("check", "check-two", ("mf",))):
+            for dynamic in dynamics:
+                rows.append({
+                    "split": split,
+                    "source_id": source,
+                    "dynamic": dynamic,
+                    "case_id": "c2-pizz-{}-{}".format(split, source),
+                    "binding_id": "reference-c2-{}-{}".format(
+                        source, dynamic
+                    ),
+                    "fundamental_hz": 65.4,
+                })
+        manifest = module.corpus_fit_manifest("c2", rows)
+        totals = {}
+        for row in manifest["objectives"]:
+            kind = row["kind"]
+            source = next(
+                source for source in ("fit-one", "fit-two", "check-one",
+                                      "check-two")
+                if source in row["id"]
+            )
+            totals[(row["split"], source, kind)] = (
+                totals.get((row["split"], source, kind), 0.0) +
+                row["weight"]
+            )
+        self.assertEqual(set(totals.values()), {1.0})
+
+    def test_corpus_followup_grids_are_frozen(self):
+        module = load_adapter()
+        self.assertEqual(
+            [row["levels"] for row in module.corpus_parameter_rows("c2")],
+            [
+                [100.0, 200.0, 400.0],
+                [0.0, 0.00125, 0.0025, 0.005],
+                [0.25, 1.25, 1.5, 2.0],
+                [6000.0, 20000.0],
+            ],
+        )
+        self.assertEqual(
+            [row["levels"] for row in module.corpus_parameter_rows("a3")],
+            [
+                [6024.580442039031, 12000.0, 18000.0],
+                [0.25, 1.0, 1.5, 2.0],
+                [12000.0, 20000.0],
+            ],
+        )
+
+    def test_corpus_renderer_uses_frozen_source_geometry(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            completed, bundle, unused_cello = build_fake_bundle(
+                root, "c2", corpus=True
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            bindings = rows_by_id_for_test(json.loads(
+                (bundle / "bindings.json").read_text(encoding="utf-8")
+            )["bindings"])
+            binding = bindings["reference_c2_fit-one"]
+            job = root / "corpus-job"
+            job.mkdir()
+            output = job / "model.wav"
+            request = render_request(binding, output)
+            request["case_id"] = "c2-pizz-fit-fit-one"
+            request["inputs"][0]["binding_id"] = binding["id"]
+            request["parameters"] = [{
+                "id": row["id"],
+                "unit": row["unit"],
+                "value": row["baseline"],
+            } for row in json.loads(
+                (bundle / "receipt.json").read_text(encoding="utf-8")
+            )["parameters"]]
+            request_path = job / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            rendered = subprocess.run([
+                str(bundle / "renderer"), "--hwa-experiment-job",
+                str(request_path), "--output-dir", str(job),
+            ], check=False, stdout=subprocess.PIPE,
+               stderr=subprocess.PIPE, text=True)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            with wave.open(str(output), "rb") as stream:
+                self.assertEqual(stream.getnframes(), 529200)
+            neutral_hash = hashlib.sha256(output.read_bytes()).hexdigest()
+
+            shelf_job = root / "corpus-shelf-job"
+            shelf_job.mkdir()
+            shelf_output = shelf_job / "model.wav"
+            shelf_request = render_request(binding, shelf_output)
+            shelf_request["case_id"] = "c2-pizz-fit-fit-one"
+            shelf_request["inputs"][0]["binding_id"] = binding["id"]
+            shelf_request["parameters"] = [{
+                "id": row["id"],
+                "unit": row["unit"],
+                "value": (0.0025 if row["id"] ==
+                          "bridge_high_shelf_loss_c_fraction" else
+                          row["baseline"]),
+            } for row in json.loads(
+                (bundle / "receipt.json").read_text(encoding="utf-8")
+            )["parameters"]]
+            shelf_request_path = shelf_job / "request.json"
+            shelf_request_path.write_text(
+                json.dumps(shelf_request), encoding="utf-8"
+            )
+            shelf_rendered = subprocess.run([
+                str(bundle / "renderer"), "--hwa-experiment-job",
+                str(shelf_request_path), "--output-dir", str(shelf_job),
+            ], check=False, stdout=subprocess.PIPE,
+               stderr=subprocess.PIPE, text=True)
+            self.assertEqual(
+                shelf_rendered.returncode, 0, shelf_rendered.stderr
+            )
+            self.assertNotEqual(
+                neutral_hash,
+                hashlib.sha256(shelf_output.read_bytes()).hexdigest(),
+            )
+
     def test_build_joint_accepts_a_target_specific_g2_grid_value(self):
         with tempfile.TemporaryDirectory() as text:
             selected = {"c2": 1.0, "g2": 2.25, "d3": 0.75, "a3": 1.0}
@@ -611,6 +923,42 @@ class CelloFitAdapterTests(unittest.TestCase):
                 sample = int.from_bytes(
                     stream.readframes(1)[:3], "little", signed=True)
             self.assertEqual(sample, 27320)
+
+    def test_build_joint_accepts_frequency_loss_shapes_on_three_strings(self):
+        with tempfile.TemporaryDirectory() as text:
+            selected = {
+                "c2": {
+                    "bridge_cutoff_c_hz": 3500.0,
+                    "loss_time_constant_c_seconds": 1.0,
+                    "nut_cutoff_c_hz": 6000.0,
+                },
+                "g2": {
+                    "bridge_cutoff_g_hz": 18000.0,
+                    "bridge_loss_peak_bandwidth_g_hz": 100.0,
+                    "bridge_loss_peak_g_fraction": 0.02,
+                    "loss_time_constant_g_seconds": 2.5,
+                },
+                "d3": {
+                    "bridge_cutoff_d_hz": 7086.471045764144,
+                    "loss_time_constant_d_seconds": 0.75,
+                    "nut_cutoff_d_hz": 8000.0,
+                },
+                "a3": 1.0,
+            }
+            completed, output, unused_profiles = build_fake_joint_bundle(
+                Path(text), selected=selected,
+                shape_targets={"c2", "g2", "d3"},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            receipt = json.loads(
+                (output / "receipt.json").read_text(encoding="utf-8")
+            )
+            profile = json.loads(
+                (output / "candidate-profile.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(receipt["candidate_changes"]), 10)
+            self.assertEqual(profile["strings"][0]["nut_cutoff_hz"], 6000.0)
+            self.assertEqual(profile["strings"][2]["nut_cutoff_hz"], 8000.0)
 
     def test_build_joint_freezes_one_four_string_candidate(self):
         with tempfile.TemporaryDirectory() as text:

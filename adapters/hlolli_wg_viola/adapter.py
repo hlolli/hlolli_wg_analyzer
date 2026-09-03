@@ -63,6 +63,7 @@ STRING_TARGETS = {
         "nominal_open_hz": 130.8127826502993,
         "measured_reference_hz": 130.58241487372985,
         "parameter_id": "loss_time_constant_c_seconds",
+        "baseline": 1.15,
     },
     "g3": {
         "adapter_id": "hlolli-wg-viola-passive-g-v1",
@@ -72,6 +73,7 @@ STRING_TARGETS = {
         "nominal_open_hz": 195.99771799087463,
         "measured_reference_hz": 195.58538558422308,
         "parameter_id": "loss_time_constant_g_seconds",
+        "baseline": 1.9,
     },
     "d4": {
         "adapter_id": "hlolli-wg-viola-passive-d-v1",
@@ -81,6 +83,7 @@ STRING_TARGETS = {
         "nominal_open_hz": 293.6647679174076,
         "measured_reference_hz": 292.96845778349154,
         "parameter_id": "loss_time_constant_d_seconds",
+        "baseline": 0.85,
     },
     "a4": {
         "adapter_id": "hlolli-wg-viola-passive-a-v1",
@@ -90,6 +93,7 @@ STRING_TARGETS = {
         "nominal_open_hz": 440.0,
         "measured_reference_hz": 441.08823856808476,
         "parameter_id": "loss_time_constant_a_seconds",
+        "baseline": 0.45,
     },
 }
 for _target_spec in STRING_TARGETS.values():
@@ -112,7 +116,7 @@ def passive_parameter(target: str) -> dict[str, Any]:
         "unit": "seconds",
         "minimum": 0.02,
         "maximum": 5.0,
-        "baseline": 0.25,
+        "baseline": spec["baseline"],
         "profile_paths": [[
             "strings", spec["profile_index"], "loss_time_constant_seconds",
         ]],

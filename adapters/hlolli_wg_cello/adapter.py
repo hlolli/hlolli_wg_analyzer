@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Build and run the checked renderer for the fixed cello model."""
 
 import argparse
@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ SOURCE_DIR = Path(__file__).resolve().parent
 FIT_SELECTOR = SOURCE_DIR.parents[1] / "tools" / "instrument_fit.py"
 LEVELS = [0.08, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5]
 JOINT_ADAPTER_ID = "hlolli-wg-cello-passive-joint-v1"
+CLEAN_PATH = "/run/current-system/sw/bin:/usr/bin:/bin"
 JOINT_PARAMETER = {
     "id": "joint_candidate",
     "unit": "choice",
@@ -37,6 +39,14 @@ SELECTION_METHOD_VERSION = "instrument-fit-selection-v1"
 PASSIVE_DECAY_METHOD_VERSION = "passive-decay-v4"
 PASSIVE_DECAY_SHAPE_METHOD_VERSION = "passive-decay-shape-v1"
 HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-v1"
+CORPUS_PLAN_SCHEMA = "hwa-cello-passive-corpus-plan"
+CORPUS_BUNDLE_SCHEMA = "hwa-cello-corpus-fit-adapter-bundle"
+NOMINAL_OPEN_FREQUENCIES = {
+    "c2": 65.40639132514966,
+    "g2": 97.99885899543733,
+    "d3": 146.8323839587038,
+    "a3": 220.0,
+}
 STRING_SPECS = {
     "c2": {
         "adapter_id": "hlolli-wg-cello-c2-passive-v1",
@@ -91,6 +101,33 @@ STRING_SPECS = {
 }
 
 SHAPE_SPECS = {
+    "c2": {
+        "adapter_id": "hlolli-wg-cello-c2-frequency-loss-v1",
+        "fit_manifest": SOURCE_DIR / "fit-c2-frequency-loss.json",
+        "parameters": [
+            {
+                "id": "bridge_cutoff_c_hz", "unit": "hertz",
+                "baseline": 5386.995271806526,
+                "levels": [1800.0, 3500.0, 5386.995271806526],
+                "profile_key": "bridge_cutoff_hz",
+            },
+            {
+                "id": "loss_time_constant_c_seconds", "unit": "seconds",
+                "baseline": 0.25,
+                "levels": [0.25, 0.75, 1.0, 1.25],
+                "profile_key": "loss_time_constant_seconds",
+            },
+            {
+                "id": "nut_cutoff_c_hz", "unit": "hertz",
+                "baseline": 20000.0,
+                "levels": [1500.0, 3000.0, 6000.0, 20000.0],
+                "profile_key": "nut_cutoff_hz",
+            },
+        ],
+        "fit_frequency": 64.91842207054125,
+        "check_frequency": 65.48199107496103,
+        "check_weight": 0.0,
+    },
     "g2": {
         "adapter_id": "hlolli-wg-cello-g2-passive-bridge-peak-v1",
         "fit_manifest": SOURCE_DIR / "fit-g2-bridge-peak.json",
@@ -124,13 +161,87 @@ SHAPE_SPECS = {
         "check_frequency": 97.5819,
     },
     "d3": {
-        "adapter_id": "hlolli-wg-cello-d3-passive-shape-v1",
-        "fit_manifest": SOURCE_DIR / "fit-d3-shape.json",
-        "tau_levels": [0.25, 0.5, 0.75, 1.0, 1.25, 1.5],
-        "nut_cutoff_levels": [8000.0, 12000.0, 18000.0],
-        "bridge_cutoff_levels": [1800.0, 3500.0, 7086.471045764144],
-        "fit_frequency": 144.7113,
-        "check_frequency": 145.2142,
+        "adapter_id": "hlolli-wg-cello-d3-frequency-loss-v2",
+        "fit_manifest": SOURCE_DIR / "fit-d3-frequency-loss.json",
+        "parameters": [
+            {
+                "id": "bridge_cutoff_d_hz", "unit": "hertz",
+                "baseline": 7086.471045764144,
+                "levels": [3500.0, 7086.471045764144],
+                "profile_key": "bridge_cutoff_hz",
+            },
+            {
+                "id": "loss_time_constant_d_seconds", "unit": "seconds",
+                "baseline": 0.25,
+                "levels": [0.25, 0.5, 0.75, 1.0],
+                "profile_key": "loss_time_constant_seconds",
+            },
+            {
+                "id": "nut_cutoff_d_hz", "unit": "hertz",
+                "baseline": 12000.0,
+                "levels": [4000.0, 8000.0, 12000.0],
+                "profile_key": "nut_cutoff_hz",
+            },
+        ],
+        "fit_frequency": 146.7681298,
+        "check_frequency": 146.38423966606234,
+        "check_weight": 0.0,
+    },
+}
+
+
+CORPUS_PARAMETER_SPECS = {
+    "c2": {
+        "adapter_id": "hlolli-wg-cello-c2-high-shelf-v1",
+        "parameters": [
+            {
+                "id": "bridge_high_shelf_cutoff_c_hz", "unit": "hertz",
+                "baseline": 200.0,
+                "levels": [100.0, 200.0, 400.0],
+                "profile_key": "bridge_high_shelf_cutoff_hz",
+            },
+            {
+                "id": "bridge_high_shelf_loss_c_fraction", "unit": "ratio",
+                "baseline": 0.0,
+                "levels": [0.0, 0.00125, 0.0025, 0.005],
+                "profile_key": "bridge_high_shelf_loss_fraction",
+            },
+            {
+                "id": "loss_time_constant_c_seconds", "unit": "seconds",
+                "baseline": 0.25,
+                "levels": [0.25, 1.25, 1.5, 2.0],
+                "profile_key": "loss_time_constant_seconds",
+            },
+            {
+                "id": "nut_cutoff_c_hz", "unit": "hertz",
+                "baseline": 20000.0,
+                "levels": [6000.0, 20000.0],
+                "profile_key": "nut_cutoff_hz",
+            },
+        ],
+    },
+    "a3": {
+        "adapter_id": "hlolli-wg-cello-a3-frequency-loss-v1",
+        "parameters": [
+            {
+                "id": "bridge_cutoff_a_hz", "unit": "hertz",
+                "baseline": 6024.580442039031,
+                "levels": [6024.580442039031, 12000.0, 18000.0],
+                "profile_key": "bridge_cutoff_hz",
+            },
+            {
+                "id": "loss_time_constant_a_seconds", "unit": "seconds",
+                "baseline": 0.25,
+                "levels": [0.25, 1.0, 1.5, 2.0],
+                "profile_key": "loss_time_constant_seconds",
+            },
+            {
+                "id": "nut_cutoff_a_hz", "unit": "hertz",
+                "baseline": 12000.0,
+                "levels": [12000.0, 20000.0],
+                "profile_key": "nut_cutoff_hz",
+            },
+        ],
     },
 }
 
@@ -198,6 +309,36 @@ def public_parameter(row):
     return {name: row[name] for name in (
         "id", "unit", "minimum", "maximum", "baseline", "levels"
     )}
+
+
+def corpus_parameter_rows(target):
+    if target in CORPUS_PARAMETER_SPECS:
+        rows = [
+            {
+                **row,
+                "minimum": min(row["levels"]),
+                "maximum": max(row["levels"]),
+                "levels": list(row["levels"]),
+            }
+            for row in CORPUS_PARAMETER_SPECS[target]["parameters"]
+        ]
+        return sorted(rows, key=lambda row: row["id"])
+    if target in SHAPE_SPECS:
+        return shape_parameters(target)
+    return [{
+        **parameter_for(STRING_SPECS[target]),
+        "profile_key": "loss_time_constant_seconds",
+    }]
+
+
+def corpus_adapter_id(target):
+    if target in CORPUS_PARAMETER_SPECS:
+        base = CORPUS_PARAMETER_SPECS[target]["adapter_id"]
+    else:
+        base = (SHAPE_SPECS[target]["adapter_id"]
+                if target in SHAPE_SPECS else
+                STRING_SPECS[target]["adapter_id"])
+    return base + "-corpus-v1"
 
 
 class AdapterError(ValueError):
@@ -410,6 +551,144 @@ def build_shape_experiment(references, dependencies, target):
         "sample_count": 0, "replicates": 1,
     }
     return experiment
+
+
+def corpus_fit_manifest(target, rows):
+    spec = STRING_SPECS[target]
+    parameters = corpus_parameter_rows(target)
+    counts = {}
+    for row in rows:
+        key = (row["split"], row["source_id"])
+        counts[key] = counts.get(key, 0) + 1
+    objectives = []
+    for row in rows:
+        prefix = "{}_{}_{}_{}".format(
+            row["split"], target, row["source_id"], row["dynamic"]
+        )
+        weight = 1.0 / counts[(row["split"], row["source_id"])]
+        common = {
+            "case": row["case_id"],
+            "reference_binding": row["binding_id"],
+            "resource_id": "model.final",
+            "source_group": row["source_id"],
+            "split": row["split"],
+            "weight": weight,
+        }
+        objectives.extend([
+            {
+                **common,
+                "id": prefix + "_passive_decay",
+                "kind": "passive-decay",
+                "scale": 3.0,
+            },
+            {
+                **common,
+                "fundamental_hz": row["fundamental_hz"],
+                "harmonic_count": 8,
+                "id": prefix + "_harmonic_decay",
+                "kind": "harmonic-decay",
+                "scale": 0.5,
+            },
+        ])
+    return {
+        "schema": "hwa-instrument-fit",
+        "schema_version": 1,
+        "adapter_id": corpus_adapter_id(target),
+        "parameters": [{
+            "id": row["id"],
+            "unit": row["unit"],
+            "minimum": row["minimum"],
+            "maximum": row["maximum"],
+            "baseline": row["baseline"],
+            "profile_paths": [[
+                "strings", spec["profile_index"], row["profile_key"]
+            ]],
+        } for row in parameters],
+        "objectives": sorted(objectives, key=lambda row: row["id"]),
+        "selection": {
+            "check_weight": 1.0,
+            "max_candidate_harmonic_maximum_error_octaves": 3.0,
+            "max_candidate_harmonic_mean_error_octaves": 1.5,
+            "max_candidate_loss": 16.0,
+            "max_candidate_source_mean_loss": 3.0,
+            "max_candidate_worst_harm": 0.25,
+            "max_check_loss_increase": 0.0,
+            "max_source_mean_loss_increase": 0.25,
+            "maximum_candidate_t60_ratio": 3.0,
+            "minimum_candidate_support_ratio": 1.0 / 3.0,
+            "minimum_candidate_t60_ratio": 1.0 / 3.0,
+        },
+    }
+
+
+def build_corpus_experiment(rows, dependencies, target):
+    inputs = {row["binding_id"]: row["path"] for row in rows}
+    for name, path in dependencies.items():
+        if name in inputs:
+            raise AdapterError("duplicate input id: {}".format(name))
+        inputs[name] = regular(path, name)
+    cases = {}
+    grouped = {}
+    for row in rows:
+        grouped.setdefault((row["split"], row["source_id"]), []).append(row)
+    nominal = NOMINAL_OPEN_FREQUENCIES[target]
+    for (split, source_id), source_rows in sorted(grouped.items()):
+        source_rows.sort(key=lambda row: (row["dynamic"], row["id"]))
+        frequencies = sorted(row["fundamental_hz"] for row in source_rows)
+        middle = len(frequencies) // 2
+        frequency = (frequencies[middle] if len(frequencies) % 2 else
+                     0.5 * (frequencies[middle - 1] + frequencies[middle]))
+        case_id = source_rows[0]["case_id"]
+        anchor = source_rows[0]
+        cases[case_id] = {
+            "id": case_id,
+            "split": split,
+            "weight": 1,
+            "stems": [
+                stem("model.final", "model", None, "model.wav"),
+                stem("reference.final", "reference", anchor["binding_id"],
+                     None, anchor["channels"]),
+            ],
+            "probes": [],
+            "links": [],
+        }
+        render = {
+            "a4": 440.0 * frequency / nominal,
+            "frames": MODEL_FRAMES,
+            "frequency": frequency,
+            "string": STRING_SPECS[target]["render_string"],
+        }
+        for row in source_rows:
+            row["render"] = render
+    responses = [
+        {"id": "final.band.120-250", "role": "final",
+         "feature": "band_level_dbfs", "index": 2},
+        {"id": "final.band.250-500", "role": "final",
+         "feature": "band_level_dbfs", "index": 3},
+        {"id": "final.band.60-120", "role": "final",
+         "feature": "band_level_dbfs", "index": 1},
+        {"id": "final.rms", "role": "final",
+         "feature": "rms_dbfs", "index": 0},
+    ]
+    return {
+        "schema": "hwa-experiment",
+        "schema_version": 1,
+        "method_version": "stage8-1",
+        "clock_rate_hz": 44100,
+        "inputs": [
+            {"id": name, "sha256": sha256(path)}
+            for name, path in sorted(inputs.items())
+        ],
+        "parameters": [
+            public_parameter(row) for row in corpus_parameter_rows(target)
+        ],
+        "plan": {
+            "kind": "grid", "seed": 1007,
+            "sample_count": 0, "replicates": 1,
+        },
+        "cases": [cases[name] for name in sorted(cases)],
+        "responses": responses,
+    }
 
 
 def joint_experiment(references, dependencies):
@@ -668,7 +947,7 @@ def validate_shape_fit_manifest(path, target):
     if manifest.get("objectives") != expected_objectives:
         raise AdapterError("shape fit manifest objective contract changed")
     expected_selection = {
-        "check_weight": 1.0,
+        "check_weight": shape.get("check_weight", 1.0),
         "max_candidate_harmonic_maximum_error_octaves": 1.5,
         "max_candidate_harmonic_mean_error_octaves": 0.75,
         "max_candidate_loss": 2.0,
@@ -875,14 +1154,15 @@ def scalar_chain(target, bundle_path, selection_path):
             row["profile_key"] if shape_mode
             else "loss_time_constant_seconds"
         )
-        changes.append({
-            "parameter": row["id"],
-            "path": ["strings", spec["profile_index"], profile_key],
-            "before": row["baseline"], "after": value,
-            "minimum": row["minimum"], "maximum": row["maximum"],
-            "unit": row["unit"],
-            "source_fit_result_sha256": sha256(selection_path),
-        })
+        if value != row["baseline"]:
+            changes.append({
+                "parameter": row["id"],
+                "path": ["strings", spec["profile_index"], profile_key],
+                "before": row["baseline"], "after": value,
+                "minimum": row["minimum"], "maximum": row["maximum"],
+                "unit": row["unit"],
+                "source_fit_result_sha256": sha256(selection_path),
+            })
     evidence = rows_by_id(
         [{"id": row.get("objective"), **row}
          for row in chosen.get("evidence", []) if type(row) is dict],
@@ -936,8 +1216,17 @@ def frozen_renderer(config, output):
                if line.rstrip("\r\n") == marker]
     if len(matches) != 1:
         raise AdapterError("renderer source marker changed")
+    if not lines or not lines[0].startswith("#!"):
+        raise AdapterError("renderer source needs an interpreter line")
     ending = "\n" if lines[matches[0]].endswith("\n") else ""
     lines[matches[0]] = "FROZEN_CONFIG = " + repr(config) + ending
+    lines[0] = (
+        "#!/bin/sh\n\"\"\":\"\n"
+        "TMPDIR=${{TMPDIR:-/tmp}}\nexport TMPDIR\n"
+        "exec {} \"$0\" \"$@\"\n\":\"\"\"\n".format(
+            shlex.quote(config["tools"]["python"]["path"])
+        )
+    )
     output.write_text("".join(lines), encoding="utf-8")
     output.chmod(0o755)
 
@@ -1048,32 +1337,81 @@ def checked_config(config):
             config.get("profile_index") == spec["profile_index"] and
             config.get("render") == expected_render
         )
+    elif mode == "corpus":
+        target = config.get("target")
+        spec = STRING_SPECS.get(target) if type(target) is str else None
+        expected_parameters = (
+            [public_parameter(row) for row in corpus_parameter_rows(target)]
+            if target in STRING_SPECS else None
+        )
+        cases = config.get("cases")
+        valid_cases = type(cases) is dict and len(cases) >= 4
+        split_counts = {"fit": 0, "check": 0}
+        seen_bindings = set()
+        if valid_cases:
+            try:
+                for case_id, case in cases.items():
+                    if (type(case_id) is not str or len(case_id) > 127 or
+                            type(case) is not dict or
+                            set(case) != {"split", "binding",
+                                         "reference_channels", "render"} or
+                            case["split"] not in split_counts or
+                            type(case["binding"]) is not str or
+                            case["binding"] in seen_bindings or
+                            case["reference_channels"] not in (1, 2)):
+                        valid_cases = False
+                        break
+                    render = case["render"]
+                    if (type(render) is not dict or
+                            set(render) != {"a4", "frames", "frequency",
+                                           "string"} or
+                            render["frames"] != MODEL_FRAMES or
+                            render["string"] != spec["render_string"]):
+                        valid_cases = False
+                        break
+                    frequency = finite(
+                        render["frequency"], "corpus render frequency"
+                    )
+                    a4 = finite(render["a4"], "corpus render A4")
+                    nominal = NOMINAL_OPEN_FREQUENCIES[target]
+                    if (abs(1200.0 * math.log2(frequency / nominal)) > 60.0 or
+                            not math.isclose(
+                                a4, 440.0 * frequency / nominal,
+                                rel_tol=0.0, abs_tol=1.0e-12)):
+                        valid_cases = False
+                        break
+                    split_counts[case["split"]] += 1
+                    seen_bindings.add(case["binding"])
+            except (AdapterError, KeyError, TypeError, ValueError):
+                valid_cases = False
+        valid_cases = valid_cases and all(
+            count >= 2 for count in split_counts.values()
+        )
+        valid_mode = (
+            spec is not None and
+            config.get("adapter_id") == corpus_adapter_id(target) and
+            config.get("parameters") == expected_parameters and
+            config.get("profile_index") == spec["profile_index"] and
+            valid_cases
+        )
     elif mode == "joint":
         changes = config.get("candidate_changes")
-        expected_paths = [
-            ["strings", 0, "loss_time_constant_seconds"],
-            ["strings", 1, "loss_time_constant_seconds"],
-            ["strings", 2, "loss_time_constant_seconds"],
-            ["strings", 3, "loss_time_constant_seconds"],
-        ]
-        expanded_paths = [
-            ["strings", 0, "loss_time_constant_seconds"],
-            ["strings", 1, "bridge_cutoff_hz"],
-            ["strings", 1, "bridge_loss_peak_bandwidth_hz"],
-            ["strings", 1, "bridge_loss_peak_fraction"],
-            ["strings", 1, "loss_time_constant_seconds"],
-            ["strings", 2, "loss_time_constant_seconds"],
-            ["strings", 3, "loss_time_constant_seconds"],
-        ]
-        paths = (
-            expected_paths if type(changes) is list and len(changes) == 4
-            else expanded_paths
-        )
-        valid_changes = type(changes) is list and len(changes) == len(paths)
+        allowed_keys = {
+            "bridge_cutoff_hz", "bridge_high_shelf_cutoff_hz",
+            "bridge_high_shelf_loss_fraction",
+            "bridge_loss_peak_bandwidth_hz", "bridge_loss_peak_fraction",
+            "loss_time_constant_seconds", "nut_cutoff_hz",
+        }
+        valid_changes = type(changes) is list and bool(changes)
         if valid_changes:
             try:
+                paths = [row.get("path") for row in changes]
                 valid_changes = all(
-                    type(row) is dict and row.get("path") == paths[index] and
+                    type(row) is dict and type(row.get("path")) is list and
+                    len(row["path"]) == 3 and row["path"][0] == "strings" and
+                    type(row["path"][1]) is int and
+                    0 <= row["path"][1] < len(STRING_SPECS) and
+                    row["path"][2] in allowed_keys and
                     finite(row.get("minimum"), "joint minimum") <
                     finite(row.get("maximum"), "joint maximum") and
                     finite(row.get("minimum"), "joint minimum") <=
@@ -1081,9 +1419,12 @@ def checked_config(config):
                     finite(row.get("maximum"), "joint maximum") and
                     finite(row.get("before"), "joint baseline") !=
                     finite(row.get("after"), "joint value")
-                    for index, row in enumerate(changes)
-                )
-            except AdapterError:
+                    for row in changes
+                ) and len({tuple(path) for path in paths}) == len(paths) and {
+                    path[1] for path in paths
+                    if path[2] == "loss_time_constant_seconds"
+                } == set(range(len(STRING_SPECS)))
+            except (AdapterError, TypeError):
                 valid_changes = False
         valid_mode = (
             config.get("adapter_id") == JOINT_ADAPTER_ID and
@@ -1261,7 +1602,7 @@ def validate_render_request(request_path, output_dir):
         raise AdapterError("output path already exists")
 
     parameters = request["parameters"]
-    if FROZEN_CONFIG.get("mode") == "shape":
+    if FROZEN_CONFIG.get("mode") in ("shape", "corpus"):
         expected_parameters = FROZEN_CONFIG.get("parameters")
         if (type(parameters) is not list or
                 type(expected_parameters) is not list or
@@ -1314,7 +1655,7 @@ def run_command(arguments, name, cwd=None, extra_environment=None):
         "LC_ALL": "C",
         "LANG": "C",
         "TZ": "UTC",
-        "PATH": "/usr/bin:/bin",
+        "PATH": CLEAN_PATH,
     }
     if extra_environment is not None:
         environment.update(extra_environment)
@@ -1353,8 +1694,8 @@ def verify_loaded_libraries(csound, libraries, cwd):
             for name, path in expected.items()
         }
     elif sys.platform.startswith("linux"):
-        ldd = Path("/usr/bin/ldd")
-        if not ldd.is_file():
+        ldd = shutil.which("ldd", path=CLEAN_PATH)
+        if ldd is None:
             raise AdapterError("cannot find ldd for the Csound library check")
         completed = run_command(
             [ldd, csound], "Csound library check", cwd)
@@ -1439,14 +1780,17 @@ def write_candidate_profile(source, output, value):
                     strings[index].get("loss_time_constant_seconds"),
                     "base string loss time") != 0.25:
                 raise AdapterError("base string loss time changed")
-    elif mode == "shape":
+    elif mode in ("shape", "corpus"):
         target = FROZEN_CONFIG.get("target")
-        if target not in SHAPE_SPECS or type(value) is not dict:
+        if (mode == "shape" and target not in SHAPE_SPECS) or (
+                mode == "corpus" and target not in STRING_SPECS) or (
+                type(value) is not dict):
             raise AdapterError("shape candidate has a wrong target or values")
         index = STRING_SPECS[target]["profile_index"]
         if type(strings[index]) is not dict:
             raise AdapterError("base profile has no selected string")
-        rows = shape_parameters(target)
+        rows = (shape_parameters(target) if mode == "shape"
+                else corpus_parameter_rows(target))
         if set(value) != {row["id"] for row in rows}:
             raise AdapterError("shape candidate has a wrong parameter set")
         for row in rows:
@@ -1735,6 +2079,266 @@ def build_target(arguments):
     return arguments.target or "c2", generic[0], generic[1]
 
 
+def corpus_plan(path, target, cello_root):
+    path = regular(path, "corpus plan")
+    value = load_json(path)
+    if (set(value) != {
+            "schema", "schema_version", "target", "predeclaration_path",
+            "predeclaration_sha256", "references"} or
+            value.get("schema") != CORPUS_PLAN_SCHEMA or
+            value.get("schema_version") != 1 or
+            value.get("target") != target):
+        raise AdapterError("corpus plan header is invalid")
+    predeclaration = regular(
+        Path(value["predeclaration_path"]), "corpus predeclaration"
+    )
+    if sha256(predeclaration) != digest_text(
+            value["predeclaration_sha256"], "corpus predeclaration hash"):
+        raise AdapterError("corpus predeclaration hash changed")
+    raw_rows = value.get("references")
+    if type(raw_rows) is not list or not raw_rows:
+        raise AdapterError("corpus plan has no references")
+    expected_keys = {
+        "id", "source_id", "performance_id", "dynamic", "split", "path",
+        "fundamental_hz",
+    }
+    rows = []
+    ids = set()
+    hashes = set()
+    source_splits = {}
+    performances = set()
+    nominal = NOMINAL_OPEN_FREQUENCIES[target]
+    for index, raw in enumerate(raw_rows):
+        if type(raw) is not dict or set(raw) != expected_keys:
+            raise AdapterError("corpus reference {} is invalid".format(index))
+        tokens = {}
+        for name in ("id", "source_id", "performance_id", "dynamic"):
+            item = raw.get(name)
+            if (type(item) is not str or
+                    re.fullmatch(r"[A-Za-z0-9._-]{1,80}", item) is None):
+                raise AdapterError(
+                    "corpus reference {} has invalid {}".format(index, name)
+                )
+            tokens[name] = item
+        split = raw.get("split")
+        if split not in ("fit", "check"):
+            raise AdapterError("corpus reference has an invalid split")
+        source_split = source_splits.setdefault(tokens["source_id"], split)
+        if source_split != split:
+            raise AdapterError("one corpus source crosses fit and check")
+        identity = (tokens["source_id"], tokens["performance_id"])
+        if identity in performances:
+            raise AdapterError("corpus performance is duplicated")
+        performances.add(identity)
+        if tokens["id"] in ids:
+            raise AdapterError("corpus reference id is duplicated")
+        ids.add(tokens["id"])
+        reference = regular(Path(raw["path"]), "corpus reference")
+        if under(reference, cello_root) or under(reference, SOURCE_DIR.parents[1]):
+            raise AdapterError("corpus references must stay outside repositories")
+        file_hash = sha256(reference)
+        if file_hash in hashes:
+            raise AdapterError("corpus reference audio is duplicated")
+        hashes.add(file_hash)
+        rate, channels, frames = wave_facts(reference)
+        if (rate != 44100 or channels not in (1, 2) or frames < 1 or
+                frames > 1000000 or reference.stat().st_size > 16 * 1024 * 1024):
+            raise AdapterError(
+                "corpus reference must be a bounded mono or stereo 44.1 kHz PCM WAVE"
+            )
+        frequency = finite(raw.get("fundamental_hz"), "corpus fundamental")
+        cents = 1200.0 * math.log2(frequency / nominal)
+        if abs(cents) > 60.0:
+            raise AdapterError("corpus reference pitch exceeds 60 cents")
+        binding_id = "reference_{}_{}".format(target, tokens["id"])
+        case_id = "{}-pizz-{}-{}".format(
+            target, split, tokens["source_id"]
+        )
+        if len(binding_id) > 127 or len(case_id) > 127:
+            raise AdapterError("corpus reference identifiers are too long")
+        rows.append({
+            **tokens,
+            "split": split,
+            "path": reference,
+            "sha256": file_hash,
+            "fundamental_hz": frequency,
+            "binding_id": binding_id,
+            "case_id": case_id,
+            "rate_hz": rate,
+            "channels": channels,
+            "frames": frames,
+        })
+    sources_by_split = {
+        split: {row["source_id"] for row in rows if row["split"] == split}
+        for split in ("fit", "check")
+    }
+    if any(len(source_ids) < 2 for source_ids in sources_by_split.values()):
+        raise AdapterError("corpus fit and check each need two independent sources")
+    return path, predeclaration, sorted(rows, key=lambda row: row["id"])
+
+
+def build_corpus_bundle(arguments):
+    output = arguments.output_dir.absolute()
+    if output.exists() or output.is_symlink() or not output.parent.is_dir():
+        raise AdapterError("output directory must be new with an existing parent")
+    cello_root = directory(arguments.cello_root, "cello root")
+    if under(output, cello_root) or under(output, SOURCE_DIR.parents[1]):
+        raise AdapterError(
+            "output directory must stay outside the source repositories"
+        )
+    target = arguments.target
+    spec = STRING_SPECS[target]
+    plan_path, predeclaration, rows = corpus_plan(
+        arguments.corpus_plan, target, cello_root
+    )
+    files = source_paths(cello_root)
+    if arguments.probe_csd is not None:
+        supplied_probe = regular(arguments.probe_csd, "probe CSD")
+        if supplied_probe.resolve() != files["probe_csd"].resolve():
+            raise AdapterError(
+                "--probe-csd must name the canonical probe under cello-root"
+            )
+    files["corpus_plan"] = plan_path
+    files["corpus_predeclaration"] = predeclaration
+    tools = {
+        "csound": regular(Path(arguments.csound).resolve(), "Csound"),
+        "csound_library": regular(
+            Path(arguments.csound_library).resolve(), "Csound library"),
+        "sndfile_library": regular(
+            Path(arguments.sndfile_library).resolve(), "libsndfile library"),
+        "cmake": regular(Path(arguments.cmake).resolve(), "CMake"),
+        "ninja": regular(Path(arguments.ninja).resolve(), "Ninja"),
+        "python": regular(Path(arguments.python).resolve(), "Python"),
+        "cc": regular(Path(arguments.cc).resolve(), "C compiler"),
+    }
+    csound_build = directory(arguments.csound_build_dir, "Csound build tree")
+    csound_source = directory(arguments.csound_source_dir, "Csound source tree")
+    loaded_libraries = verify_loaded_libraries(
+        tools["csound"], {
+            "csound_library": tools["csound_library"],
+            "sndfile_library": tools["sndfile_library"],
+        }, cello_root)
+    trees = {
+        "csound_build": tree_row(csound_build / "include",
+                                 "Csound build header tree"),
+        "csound_source": tree_row(csound_source / "include",
+                                  "Csound source header tree"),
+    }
+    dependencies = dict(files)
+    experiment = build_corpus_experiment(rows, dependencies, target)
+    fit = corpus_fit_manifest(target, rows)
+    experiment_cases = rows_by_id(experiment["cases"], "corpus cases")
+    cases = {}
+    for case_id, case in experiment_cases.items():
+        source_rows = [row for row in rows if row["case_id"] == case_id]
+        renders = {json.dumps(row["render"], sort_keys=True)
+                   for row in source_rows}
+        if len(renders) != 1:
+            raise AdapterError("corpus source has inconsistent render geometry")
+        cases[case_id] = {
+            "split": case["split"],
+            "binding": case["stems"][1]["input_id"],
+            "reference_channels": case["stems"][1]["channels"],
+            "render": source_rows[0]["render"],
+        }
+    parameters = [
+        public_parameter(row) for row in corpus_parameter_rows(target)
+    ]
+    config = {
+        "mode": "corpus",
+        "adapter_id": corpus_adapter_id(target),
+        "build_type": BUILD_TYPE,
+        "target": target,
+        "profile_index": spec["profile_index"],
+        "files": file_rows(files),
+        "tools": file_rows(tools),
+        "trees": trees,
+        "csound_build_dir": str(csound_build),
+        "csound_source_dir": str(csound_source),
+        "parameters": parameters,
+        "cases": cases,
+    }
+    references = {row["binding_id"]: row["path"] for row in rows}
+    all_inputs = dict(references)
+    all_inputs.update(dependencies)
+    temporary = Path(tempfile.mkdtemp(
+        prefix=".{}-".format(output.name), dir=str(output.parent)))
+    try:
+        renderer = temporary / "renderer"
+        frozen_renderer(config, renderer)
+        experiment_path = temporary / "experiment.json"
+        fit_path = temporary / "fit.json"
+        bindings_path = temporary / "bindings.json"
+        write_json(experiment_path, experiment)
+        write_json(fit_path, fit)
+        write_json(bindings_path, {
+            "schema": "hwa-fit-bindings",
+            "schema_version": 1,
+            "bindings": [
+                {"id": name, "path": str(path), "sha256": sha256(path)}
+                for name, path in sorted(all_inputs.items())
+            ],
+        })
+        reference_rows = [{
+            "id": row["id"],
+            "binding_id": row["binding_id"],
+            "source_id": row["source_id"],
+            "performance_id": row["performance_id"],
+            "dynamic": row["dynamic"],
+            "split": row["split"],
+            "fundamental_hz": row["fundamental_hz"],
+            "sha256": row["sha256"],
+            "rate_hz": row["rate_hz"],
+            "channels": row["channels"],
+            "frames": row["frames"],
+        } for row in rows]
+        receipt = {
+            "schema": CORPUS_BUNDLE_SCHEMA,
+            "schema_version": 1,
+            "adapter_id": config["adapter_id"],
+            "build_type": BUILD_TYPE,
+            "target": target,
+            "references": reference_rows,
+            "source_count": len({row["source_id"] for row in rows}),
+            "parameters": parameters,
+            "profile_paths": [
+                ["strings", spec["profile_index"], row["profile_key"]]
+                for row in corpus_parameter_rows(target)
+            ],
+            "plan": experiment["plan"],
+            "point_count": math.prod(
+                len(row["levels"]) for row in parameters
+            ),
+            "case_count": len(cases),
+            "job_count": math.prod(
+                len(row["levels"]) for row in parameters
+            ) * len(cases),
+            "corpus_plan_sha256": sha256(plan_path),
+            "corpus_predeclaration_sha256": sha256(predeclaration),
+            "loaded_libraries": loaded_libraries,
+            "renderer_sha256": sha256(renderer),
+            "experiment_sha256": sha256(experiment_path),
+            "fit_manifest_sha256": sha256(fit_path),
+            "bindings_sha256": sha256(bindings_path),
+            "files": [
+                {"id": name, "path": str(path), "sha256": sha256(path)}
+                for name, path in sorted({**files, **tools}.items())
+            ],
+            "trees": [
+                {"id": name, **row} for name, row in sorted(trees.items())
+            ],
+        }
+        write_json(temporary / "receipt.json", receipt)
+        publish_new_directory(temporary, output, {
+            "renderer", "experiment.json", "fit.json", "bindings.json",
+            "receipt.json",
+        })
+        shutil.rmtree(str(temporary), ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(str(temporary), ignore_errors=True)
+        raise
+
+
 def build_bundle(arguments):
     shape_mode = arguments.command == "build-shape"
     output = arguments.output_dir.absolute()
@@ -1746,7 +2350,7 @@ def build_bundle(arguments):
             "output directory must stay outside the source repositories")
     target, fit_reference, check_reference = build_target(arguments)
     if shape_mode and target not in SHAPE_SPECS:
-        raise AdapterError("shape fit supports only g2 and d3")
+        raise AdapterError("shape fit target has no frozen grid")
     spec = STRING_SPECS[target]
     files = source_paths(cello_root)
     if arguments.probe_csd is not None:
@@ -1770,9 +2374,6 @@ def build_bundle(arguments):
         fit_id: regular(fit_reference, "fit reference"),
         check_id: regular(check_reference, "check reference"),
     }
-    if arguments.python.absolute() != Path("/usr/bin/python3"):
-        raise AdapterError(
-            "--python must be /usr/bin/python3 to match the renderer shebang")
     tools = {
         "csound": regular(Path(arguments.csound).resolve(), "Csound"),
         "csound_library": regular(
@@ -1997,8 +2598,6 @@ def build_joint_bundle(arguments):
     if ({name: (str(path), sha256(path)) for name, path in canonical.items()} !=
             {name: (str(path), sha256(path)) for name, path in files.items()}):
         raise AdapterError("scalar receipt paths do not name one cello source tree")
-    if tools["python"].absolute() != Path("/usr/bin/python3"):
-        raise AdapterError("frozen renderer needs /usr/bin/python3")
 
     references = {}
     reference_receipt = []
@@ -2207,6 +2806,9 @@ def parse_args():
 
     add_build_arguments(commands.add_parser("build"), STRING_SPECS)
     add_build_arguments(commands.add_parser("build-shape"), SHAPE_SPECS)
+    corpus = commands.add_parser("build-corpus")
+    add_build_arguments(corpus, STRING_SPECS)
+    corpus.add_argument("--corpus-plan", required=True, type=Path)
     joint = commands.add_parser("build-joint")
     joint.add_argument(
         "--scalar", action="append", nargs=3, metavar=("TARGET", "BUNDLE", "SELECTION"),
@@ -2236,6 +2838,10 @@ def main():
             if FROZEN_CONFIG is not None:
                 raise AdapterError("a frozen renderer cannot build a bundle")
             build_bundle(arguments)
+        elif arguments.command == "build-corpus":
+            if FROZEN_CONFIG is not None:
+                raise AdapterError("a frozen renderer cannot build a bundle")
+            build_corpus_bundle(arguments)
         elif arguments.command == "build-joint":
             if FROZEN_CONFIG is not None:
                 raise AdapterError("a frozen renderer cannot build a bundle")

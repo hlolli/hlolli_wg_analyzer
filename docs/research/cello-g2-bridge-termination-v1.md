@@ -142,9 +142,15 @@ and A3 scalar runs against the neutral schema also pass and select 1.0 s,
 | D3, 0.75 s | `754cf3ac44d962dcca31638901c1d96500780cdbe9dfc389f0daca02df4eec89` |
 | A3, 1.0 s | `8e473ddedf46f61f2c3ca7ae038878983980991ef16fb63b0823224be98f87a8` |
 
-The selected G2 values remain staged. The next gate needs an unused
-four-open-string pizzicato set and one joint render containing all seven
-candidate changes across C2, G2, D3, and A3. The
-[source search](cello-alternative-passive-audit-sources.md) found no unused,
-accessible set that meets the fixed input checks. Do not write the fixed model
-before that gate passes.
+The selected G2 values remain staged. A fresh Linux rerun reproduced point 71;
+its experiment and selection hash to
+`c94356a2da2914cd45059a848d1909d20c5bd0799cc347c222d05819c45bfddc`
+and
+`ff2a9321087f87da172784646cb2f2a5dc4e2a40ad10a56c1d28dddaedba57d7`.
+
+An authorized independent OrchideaSOL four-string set then passed the raw
+input gate. The joint candidate still failed held-out curve loss at C2, D3,
+and G2; D3 also exceeded the maximum allowed harm. The
+[completed source and result receipt](cello-third-passive-audit-source.md)
+records the exact metrics and hashes. Do not write the fixed model or use that
+audit to tune replacement values.

@@ -16,7 +16,7 @@ import wave
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = (ROOT / "adapters" / "hlolli_wg_double_bass" /
            "build_renderer.py")
-PYTHON = Path("/usr/bin/python3")
+PYTHON = Path(sys.executable).resolve()
 ANALYZER = None
 if len(sys.argv) == 2 and sys.argv[1].startswith("--analyzer="):
     ANALYZER = Path(sys.argv.pop(1).split("=", 1)[1]).resolve()
@@ -68,8 +68,8 @@ def fixture(root: Path) -> Path:
           (json.dumps(model) + "\n").encode("utf-8"))
     write(
         plugin / "tools" / "generate_model.py",
-        b"#!/usr/bin/python3 -I\n"
-        b"import argparse, json, pathlib, sys\n"
+        f"#!{PYTHON} -I\n".encode("ascii")
+        + b"import argparse, json, pathlib, sys\n"
         b"p=argparse.ArgumentParser()\n"
         b"p.add_argument('--model', required=True)\n"
         b"p.add_argument('--source', required=True)\n"
@@ -96,8 +96,8 @@ def fixture(root: Path) -> Path:
     write(runtime, b"runtime\n")
     write(
         compiler,
-        b"#!/usr/bin/python3 -I\n"
-        b"import os, pathlib, sys\n"
+        f"#!{PYTHON} -I\n".encode("ascii")
+        + b"import os, pathlib, sys\n"
         b"i=sys.argv.index('-o')\n"
         b"(pathlib.Path(os.environ['TMPDIR'])/'xcrun_db').write_bytes(b'cache')\n"
         b"source=next(pathlib.Path(value) for value in reversed(sys.argv) if value.endswith('.c'))\n"
@@ -105,8 +105,8 @@ def fixture(root: Path) -> Path:
         0o700)
     write(
         csound,
-        b"#!/usr/bin/python3 -I\n"
-        b"import json, math, pathlib, re, sys, wave\n"
+        f"#!{PYTHON} -I\n".encode("ascii")
+        + b"import json, math, pathlib, re, sys, wave\n"
         b"i=sys.argv.index('-o')\n"
         b"p=pathlib.Path(sys.argv[i+1])\n"
         b"if '-3' not in sys.argv or '-f' in sys.argv or '-K' not in sys.argv: raise SystemExit(10)\n"
@@ -381,7 +381,9 @@ class DoubleBassAdapterTests(unittest.TestCase):
             root = Path(text)
             config = fixture(root)
             value = json.loads(config.read_text(encoding="utf-8"))
-            configured_python = Path("/usr/bin/../bin/python3")
+            configured_python = (
+                PYTHON.parent / ".." / PYTHON.parent.name / PYTHON.name
+            )
             value["python_executable"] = str(configured_python)
             config.write_text(json.dumps(value), encoding="utf-8")
             renderer = root / "renderer"
@@ -393,7 +395,7 @@ class DoubleBassAdapterTests(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr)
             self.assertEqual(
                 renderer.read_bytes().splitlines()[0],
-                b"#!/usr/bin/../bin/python3 -I")
+                f"#!{configured_python} -I".encode("ascii"))
             described = subprocess.run(
                 [str(renderer), "--describe"], check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,

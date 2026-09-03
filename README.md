@@ -206,8 +206,12 @@ python3 tools/instrument_fit.py select \
 ```
 
 The score uses measured gaps, body-shape error, and passive-decay error named
-by the fit manifest. File hashes only bind the inputs and outputs to the
-receipt. They do not score the sound. `write-profile` writes a new file, asks
+by the fit manifest. A version 1 manifest may set `check_weight` to zero so
+validation remains an eligibility gate without affecting rank or tie-breaks.
+Corpus objectives may also name a `source_group`; optional source-mean caps
+then prevent a heavily sampled player or cello from dominating selection.
+File hashes only bind the inputs and outputs to the receipt. They do not score
+the sound. `write-profile` writes a new file, asks
 the adapter to validate it, and writes a receipt. It never replaces the source
 profile. A render-only adapter has empty `profile_paths`; the writer rejects
 it. Fit-manifest version 2 verifies one fixed candidate against fit,

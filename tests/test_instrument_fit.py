@@ -327,6 +327,130 @@ def select_v1_command(fixture, output):
 
 
 class InstrumentFitTests(unittest.TestCase):
+    def test_v1_can_gate_on_check_without_using_it_to_rank(self):
+        with tempfile.TemporaryDirectory() as text:
+            fixture = make_v1_fixture(Path(text))
+            manifest = json.loads(
+                fixture["manifest"].read_text(encoding="utf-8")
+            )
+            manifest["selection"]["check_weight"] = 0
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            parsed = MODULE.fit_manifest(fixture["manifest"])
+
+        self.assertEqual(parsed["selection"]["check_weight"], 0)
+        rows = [
+            {"score": 1.0, "check_loss": 2.0, "point_id": 2},
+            {"score": 1.0, "check_loss": 1.0, "point_id": 3},
+        ]
+        self.assertEqual(
+            min(rows, key=lambda row: MODULE.v1_rank_key(row, 0.0))[
+                "point_id"
+            ],
+            2,
+        )
+        self.assertEqual(
+            min(rows, key=lambda row: MODULE.v1_rank_key(row, 1.0))[
+                "point_id"
+            ],
+            3,
+        )
+
+    def test_v1_can_cap_each_objective_loss_increase(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            fixture = make_v1_fixture(
+                root, candidate_tau=0.10, max_check_loss_increase=100.0
+            )
+            manifest = json.loads(
+                fixture["manifest"].read_text(encoding="utf-8")
+            )
+            manifest["selection"]["max_objective_loss_increase"] = 0.0
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            output = root / "objective-increase-result.json"
+            completed = subprocess.run(
+                select_v1_command(fixture, output), check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            result = json.loads(output.read_text(encoding="utf-8"))
+            candidate = next(
+                row for row in result["points"] if not row["baseline"]
+            )
+            self.assertFalse(candidate["eligible"])
+            self.assertTrue(any(
+                row["loss_increase_from_baseline"] > 0.0
+                for row in candidate["evidence"]
+            ))
+
+    def test_v1_source_group_limits_require_two_groups_per_split(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            fixture = make_v1_fixture(root)
+            manifest = json.loads(
+                fixture["manifest"].read_text(encoding="utf-8")
+            )
+            rows = []
+            for objective in manifest["objectives"]:
+                for suffix in ("a", "b"):
+                    rows.append({
+                        **objective,
+                        "id": objective["id"] + "-" + suffix,
+                        "source_group": "source-" + suffix,
+                    })
+            manifest["objectives"] = rows
+            manifest["selection"].update({
+                "max_candidate_source_mean_loss": 3.0,
+                "max_source_mean_loss_increase": 0.25,
+            })
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            parsed = MODULE.fit_manifest(fixture["manifest"])
+            self.assertEqual(len(parsed["objectives"]), 4)
+            manifest["objectives"][0].pop("source_group")
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                    MODULE.FitError, "group on every objective"):
+                MODULE.fit_manifest(fixture["manifest"])
+
+    def test_v1_source_groups_are_weighted_and_rank_the_worst_tie(self):
+        objectives = [
+            {"id": "fit-a-1", "split": "fit", "source_group": "a",
+             "weight": 0.5},
+            {"id": "fit-a-2", "split": "fit", "source_group": "a",
+             "weight": 0.5},
+            {"id": "fit-b", "split": "fit", "source_group": "b",
+             "weight": 1.0},
+        ]
+        evidence = [
+            {"objective": "fit-a-1", "loss": 1.0},
+            {"objective": "fit-a-2", "loss": 3.0},
+            {"objective": "fit-b", "loss": 1.5},
+        ]
+        groups = MODULE.v1_source_group_rows(objectives, evidence)
+        self.assertEqual(groups, [
+            {"split": "fit", "source_group": "a", "loss": 2.0},
+            {"split": "fit", "source_group": "b", "loss": 1.5},
+        ])
+        rows = [
+            {"score": 1.0, "check_loss": 0.5, "point_id": 2,
+             "source_groups": [{"loss": 2.0}]},
+            {"score": 1.0, "check_loss": 0.1, "point_id": 3,
+             "source_groups": [{"loss": 1.5}]},
+        ]
+        self.assertEqual(
+            min(rows, key=lambda row: MODULE.v1_rank_key(row, 1.0))[
+                "point_id"
+            ],
+            3,
+        )
+
     def test_v1_gate_failure_writes_evidence_and_cannot_write_profile(self):
         with tempfile.TemporaryDirectory() as text:
             root = Path(text)

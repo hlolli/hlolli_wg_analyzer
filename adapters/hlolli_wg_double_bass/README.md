@@ -24,7 +24,7 @@ body, release, or gesture data.
 Run:
 
 ```sh
-/usr/bin/python3 -I adapters/hlolli_wg_double_bass/build_manifest.py validate
+python3 -I adapters/hlolli_wg_double_bass/build_manifest.py validate
 ```
 
 The checked fit and reference files contain IDs, WAVE facts, and hashes. They
@@ -36,7 +36,7 @@ Keep all recordings and output outside Git. Pass each file with its checked
 ID. The order of the repeated options does not matter.
 
 ```sh
-/usr/bin/python3 -I adapters/hlolli_wg_double_bass/build_manifest.py build \
+python3 -I adapters/hlolli_wg_double_bass/build_manifest.py build \
   --fit-reference iowa2012-pizz-e-ff-open=/path/to/fit-e.wav \
   --fit-reference iowa2012-pizz-a-mf-open=/path/to/fit-a.wav \
   --fit-reference iowa2012-pizz-d-mf-open=/path/to/fit-d.wav \

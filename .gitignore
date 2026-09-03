@@ -40,8 +40,21 @@ xcuserdata/
 *.profdata
 *.gcda
 *.gcno
+# Source recordings and derived audio are private analysis inputs.
+*.wav
+*.aif
+*.aiff
+*.bwf
+*.flac
+*.mp3
+*.m4a
+*.ogg
+*.opus
+*.webm
+*.mp4
 crash-*
 leak-*
 oom-*
 timeout-*
 slow-unit-*
+.learnings

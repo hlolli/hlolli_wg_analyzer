@@ -1,6 +1,7 @@
 # Alternative cello passive-audit sources
 
-Checked on 2026-08-31. The RWC Instruments Database supplies three cello
+Checked on 2026-08-31 and updated on 2026-09-02. The RWC Instruments
+Database supplies three cello
 maker/player variations for the passive-decay work. Its 2026 open release
 postdates the earlier source search. Variation 2 supplied the G2 fit note,
 variation 3 supplied its validation note, and variation 1 supplied the first
@@ -13,29 +14,23 @@ Do not use the variation 1 final audit to choose a parameter value.
 
 ## Fresh-audit decision after the bridge-peak pass
 
-No checked source now supplies a scientifically independent, admissible
-four-open-string audit. Do not compare the new bridge-peak candidate with a
-new recording yet.
+On 2026-09-02 an authorized official OrchideaSOL 2020 general ZIP supplied a
+scientifically independent four-open-string audit. The authorization permits
+analysis for this research but not redistribution. The archive, audio, and
+local results remain outside Git.
 
-- RWC has no unused maker/player variation. Changing dynamic within variation
-  1, 2, or 3 changes the recording but reuses a player, instrument, and likely
-  session that has already influenced this work.
-- The Internet Cello Society has a separate public four-file set. Its C2, G2,
-  and D3 files pass the raw-tail gate after an exact 8-to-16-bit format
-  conversion, but A3 fails. The source also names no player, instrument,
-  session, A4 reference, or pitch-work policy.
-- OrchideaSOL remains the best named independent set. Its exact metadata rows
-  say natural, unretuned open-string pizzicato, but the official raw audio
-  still needs an IRCAM account. Raw hashes and frame spans cannot be pinned
-  without that archive.
-- The Freesound Old Cello pack is another separate set with clear CC BY 4.0
-  terms. Its four original AIFF downloads still need a Freesound login. The
-  public MP3 previews cannot supply source hashes or lossless spans.
+The four natural, unretuned, mezzo-forte `pizzicato_l_vib` files match the
+release manifest and exact ZIP members. They are mono PCM24 at 44.1 kHz, use
+whole-file spans, fall within 15.30 cents of their open-string labels, and all
+pass `passive-decay-v4` with at least 35 dB of range and at most 2.916 dB line
+residual. The [completed source receipt](cello-third-passive-audit-source.md)
+records their archive identity, hashes, frame counts, pitch, and tail facts.
 
-An authorized OrchideaSOL archive or the four logged-in Freesound originals
-would reopen this step. Keep either set outside Git, pin every raw hash and
-whole-file frame span, and run the current input gate before exposing the
-candidate to it.
+The staged seven-value candidate was fixed before these recordings were read.
+The completed joint gate rejected it: C2, D3, and G2 exceeded the 2.0 audit
+loss cap, and D3 also exceeded the 0.25 harm cap. The OrchideaSOL set must not
+now choose replacement values. The completed source receipt records the full
+negative result and evidence hashes.
 
 ### Why another RWC dynamic is not independent
 
@@ -230,7 +225,7 @@ owners supply that statement.
 
 | Source | Current result |
 |---|---|
-| [OrchideaSOL](https://zenodo.org/records/3740399) | Its metadata gives exact natural, no-retune open-string pizzicato rows. The official 8.37 GB audio asset still redirects anonymous users to IRCAM sign-in. |
+| [OrchideaSOL](https://zenodo.org/records/3740399) | An authorized official 8.37 GB general ZIP now supplies the exact natural, no-retune open-string pizzicato rows. All four raw files pass the fixed input gate and remain non-redistributable outside Git. |
 | [FullSOL and Studio On Line](https://forum.ircam.fr/projects/detail/fullsol/) | IRCAM Forum still controls the audio download. FullSOL needs an active premium account; it is not an anonymous fallback. |
 | [University of Iowa](https://theremin.music.uiowa.edu/MIScello2012.html) | It has exact open-string pizzicato audio, but the 2012 files already form the fit split and the 2001 files already form the validation split. Reusing either is not a third audit. |
 | [Freesound Old Cello-pizzicato](https://freesound.org/people/tim.kahn/packs/2680/) | It names C2, G2, D3, and A3 pizzicato AIFF files, but original downloads still require login. Anonymous files are lossy MP3 previews, and the source gives no tuning or no-retune statement. |
@@ -388,8 +383,8 @@ one failed goal is enough to reject the vector.
 | Failed selection | `f89292ea9270786813eca9e9b7e7facf05df1fb795d6d712f6152a77ceef6449` |
 
 One loss time per string does not cover these players and dynamics. This
-failure prompted the later frequency-shaped loss and bridge-peak work. Once a
-candidate passes its fit and validation gates, the current blocker is the
-fresh audit stated at the top of this note. Do not substitute another RWC
-dynamic for that audit. OrchideaSOL remains the first choice if an authorized
-archive becomes available.
+failure prompted the later frequency-shaped loss and bridge-peak work. The
+authorized OrchideaSOL audit has now also rejected that seven-value candidate
+at C2, D3, and G2. Do not tune against the audit or substitute another RWC
+dynamic. A materially changed model needs fit and validation evidence first,
+then another untouched audit.

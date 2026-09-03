@@ -1,0 +1,106 @@
+{
+  "adapter_id": "hlolli-wg-cello-c2-frequency-loss-v1",
+  "objectives": [
+    {
+      "case": "c2-pizz-check",
+      "id": "check_c2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "reference_c2_check",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "c2-pizz-check",
+      "fundamental_hz": 65.48199107496103,
+      "harmonic_count": 8,
+      "id": "check_c2_harmonic_decay",
+      "kind": "harmonic-decay",
+      "reference_binding": "reference_c2_check",
+      "resource_id": "model.final",
+      "scale": 0.5,
+      "split": "check",
+      "weight": 1.0
+    },
+    {
+      "case": "c2-pizz-fit",
+      "id": "fit_c2_passive_decay",
+      "kind": "passive-decay",
+      "reference_binding": "reference_c2_fit",
+      "resource_id": "model.final",
+      "scale": 3.0,
+      "split": "fit",
+      "weight": 1.0
+    },
+    {
+      "case": "c2-pizz-fit",
+      "fundamental_hz": 64.91842207054125,
+      "harmonic_count": 8,
+      "id": "fit_c2_harmonic_decay",
+      "kind": "harmonic-decay",
+      "reference_binding": "reference_c2_fit",
+      "resource_id": "model.final",
+      "scale": 0.5,
+      "split": "fit",
+      "weight": 1.0
+    }
+  ],
+  "parameters": [
+    {
+      "baseline": 5386.995271806526,
+      "id": "bridge_cutoff_c_hz",
+      "maximum": 5386.995271806526,
+      "minimum": 1800.0,
+      "profile_paths": [
+        [
+          "strings",
+          0,
+          "bridge_cutoff_hz"
+        ]
+      ],
+      "unit": "hertz"
+    },
+    {
+      "baseline": 0.25,
+      "id": "loss_time_constant_c_seconds",
+      "maximum": 1.25,
+      "minimum": 0.25,
+      "profile_paths": [
+        [
+          "strings",
+          0,
+          "loss_time_constant_seconds"
+        ]
+      ],
+      "unit": "seconds"
+    },
+    {
+      "baseline": 20000.0,
+      "id": "nut_cutoff_c_hz",
+      "maximum": 20000.0,
+      "minimum": 1500.0,
+      "profile_paths": [
+        [
+          "strings",
+          0,
+          "nut_cutoff_hz"
+        ]
+      ],
+      "unit": "hertz"
+    }
+  ],
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "selection": {
+    "check_weight": 0.0,
+    "max_candidate_harmonic_maximum_error_octaves": 1.5,
+    "max_candidate_harmonic_mean_error_octaves": 0.75,
+    "max_candidate_loss": 2.0,
+    "max_candidate_worst_harm": 0.25,
+    "max_check_loss_increase": 0.15,
+    "maximum_candidate_t60_ratio": 2.0,
+    "minimum_candidate_support_ratio": 0.5,
+    "minimum_candidate_t60_ratio": 0.5
+  }
+}

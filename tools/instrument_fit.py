@@ -23,10 +23,15 @@ class FitError(ValueError):
 
 
 SELECTION_METHOD_VERSION = "instrument-fit-selection-v1"
+FIT_ONLY_SELECTION_METHOD_VERSION = "instrument-fit-fit-only-v1"
 VERIFY_CANDIDATE_METHOD_VERSION = "instrument-fit-verify-candidate-v1"
 PASSIVE_DECAY_METHOD_VERSION = "passive-decay-v4"
 PASSIVE_DECAY_SHAPE_METHOD_VERSION = "passive-decay-shape-v1"
 HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-v1"
+CHECKED_NOTE_METHOD_VERSION = "isolated-note-1"
+CHECKED_HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-1"
+T60_DB_PER_OCTAVE = 20.0 * math.log10(2.0)
+INVALID_HARMONIC_LOSS_OCTAVES = 8.0
 MAX_PASSIVE_WAVE_BYTES = 16 * 1024 * 1024
 MAX_PASSIVE_FRAMES = 1_000_000
 MAX_PASSIVE_CHANNELS = 8
@@ -235,7 +240,8 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
             }, f"objectives[{index}]")
         kind = row.get("kind")
         if kind not in ("experiment-gap", "body-envelope", "passive-decay",
-                        "passive-decay-shape", "harmonic-decay"):
+                        "passive-decay-shape", "harmonic-decay",
+                        "checked-note-harmonic-decay"):
             raise FitError(f"objectives[{index}] has an unknown kind")
         valid_splits = ("fit", "check", "audit") if version == 2 else (
             "fit", "check"
@@ -244,6 +250,9 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
             raise FitError(f"objectives[{index}] has an invalid split")
         positive(row.get("weight"), f"objectives[{index}].weight")
         positive(row.get("scale"), f"objectives[{index}].scale")
+        source_group = row.get("source_group")
+        if source_group is not None:
+            token(source_group, f"objectives[{index}].source_group")
         if kind == "experiment-gap":
             token(row.get("response"), f"objectives[{index}].response")
         else:
@@ -262,12 +271,62 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
                     raise FitError(
                         f"objectives[{index}].harmonic_count is out of range"
                     )
+            elif kind == "checked-note-harmonic-decay":
+                positive(row.get("expected_hz"),
+                         f"objectives[{index}].expected_hz")
+                digest(row.get("reference_sha256"),
+                       f"objectives[{index}].reference_sha256")
     if version == 1:
-        positive(selection.get("check_weight"), "selection.check_weight")
+        mode = selection.get("mode", "fit-check")
+        if mode not in ("fit-check", "fit-only"):
+            raise FitError("selection.mode must be fit-check or fit-only")
+        nonnegative(selection.get("check_weight"), "selection.check_weight")
         finite(selection.get("max_check_loss_increase"),
                "selection.max_check_loss_increase")
         finite(selection.get("max_candidate_worst_harm"),
                "selection.max_candidate_worst_harm")
+        objective_splits = {row["split"] for row in objectives}
+        if mode == "fit-only":
+            if (objective_splits != {"fit"} or
+                    float(selection["check_weight"]) != 0.0 or
+                    float(selection["max_check_loss_increase"]) != 0.0):
+                raise FitError(
+                    "fit-only selection needs only fit objectives and zero "
+                    "check limits"
+                )
+        elif not {"fit", "check"}.issubset(objective_splits):
+            raise FitError("fit-check selection needs fit and check objectives")
+        if "max_objective_loss_increase" in selection:
+            nonnegative(
+                selection.get("max_objective_loss_increase"),
+                "selection.max_objective_loss_increase",
+            )
+        source_group_keys = {
+            "max_candidate_source_mean_loss",
+            "max_source_mean_loss_increase",
+        }
+        source_group_present = source_group_keys.intersection(selection)
+        if source_group_present and source_group_present != source_group_keys:
+            raise FitError(
+                "selection must provide every source-group limit"
+            )
+        if source_group_present:
+            for name in sorted(source_group_keys):
+                nonnegative(selection.get(name), "selection." + name)
+            if any(row.get("source_group") is None for row in objectives):
+                raise FitError(
+                    "source-group limits need a group on every objective"
+                )
+            splits = ("fit",) if mode == "fit-only" else ("fit", "check")
+            for split in splits:
+                groups = {
+                    row["source_group"] for row in objectives
+                    if row["split"] == split
+                }
+                if len(groups) < 2:
+                    raise FitError(
+                        "source-group selection needs two groups per split"
+                    )
         absolute_keys = {
             "max_candidate_loss", "minimum_candidate_t60_ratio",
             "maximum_candidate_t60_ratio",
@@ -317,7 +376,9 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
         }
         harmonic_present = harmonic_keys.intersection(selection)
         has_harmonic = any(
-            row["kind"] == "harmonic-decay" for row in objectives
+            row["kind"] in (
+                "harmonic-decay", "checked-note-harmonic-decay"
+            ) for row in objectives
         )
         if has_harmonic and harmonic_present != harmonic_keys:
             raise FitError(
@@ -570,6 +631,52 @@ def v1_objective_passes_absolute_limits(
     )
 
 
+def v1_rank_key(
+        row: dict[str, Any], check_weight: float
+        ) -> tuple[float, float, int]:
+    """Rank v1 candidates without a hidden validation tie-break."""
+    source_groups = row.get("source_groups")
+    if type(source_groups) is list and source_groups:
+        maximum_source_loss = max(
+            float(item["loss"]) for item in source_groups
+        )
+        return float(row["score"]), maximum_source_loss, int(row["point_id"])
+    return (
+        float(row["score"]),
+        float(row["check_loss"]) if check_weight > 0.0 else 0.0,
+        int(row["point_id"]),
+    )
+
+
+def v1_source_group_rows(
+        objectives: list[dict[str, Any]], evidence: list[dict[str, Any]]
+        ) -> list[dict[str, Any]]:
+    """Return source-balanced group means for a v1 corpus manifest."""
+    objectives_by_id = by_name(objectives, "id")
+    totals: dict[tuple[str, str], list[float]] = {}
+    grouped = False
+    for item in evidence:
+        objective = objectives_by_id[item["objective"]]
+        source_group = objective.get("source_group")
+        if source_group is None:
+            continue
+        grouped = True
+        key = (objective["split"], source_group)
+        total = totals.setdefault(key, [0.0, 0.0])
+        weight = float(objective["weight"])
+        total[0] += weight * float(item["loss"])
+        total[1] += weight
+    if not grouped:
+        return []
+    if len(totals) == 0 or any(weight <= 0.0 for unused, weight in totals.values()):
+        raise FitError("source group has no objective weight")
+    return [{
+        "split": split,
+        "source_group": source_group,
+        "loss": total / weight,
+    } for (split, source_group), (total, weight) in sorted(totals.items())]
+
+
 def by_name(rows: list[dict[str, Any]], field: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -767,6 +874,169 @@ def run_body_envelope(analyzer: Path, reference: Path, model: Path) -> dict[str,
     confidence = finite(comparison.get("confidence"), "body confidence")
     return {"shape_rmse_db": rmse, "shape_correlation": correlation,
             "confidence": confidence}
+
+
+def run_checked_analyzer_json(
+        analyzer: Path, arguments: list[str], label: str) -> dict[str, Any]:
+    """Run one bounded analyzer command and parse its duplicate-free JSON."""
+    try:
+        completed = subprocess.run(
+            [str(analyzer), "--json", *arguments], check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}, timeout=120,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FitError(f"{label} timed out") from error
+    except OSError as error:
+        raise FitError(f"cannot run {label}: {error}") from error
+    if completed.returncode != 0:
+        detail = (completed.stderr.strip() or completed.stdout.strip())[-2000:]
+        raise FitError(
+            f"{label} failed" + (f": {detail}" if detail else "")
+        )
+    source = completed.stdout.encode("utf-8")
+    if len(source) > MAX_CONTROL_FILE_BYTES:
+        raise FitError(f"{label} output exceeds the byte limit")
+    return parse_json(source, analyzer)
+
+
+def checked_note_report(
+        analyzer: Path, audio: Path, expected_hz: float,
+        expected_sha256: str, field: str) -> dict[str, Any]:
+    """Require the analyzer's fixed isolated-note pitch contract."""
+    audio = regular(audio, field)
+    if sha256(audio) != expected_sha256:
+        raise FitError(f"{field} hash changed")
+    report = run_checked_analyzer_json(
+        analyzer,
+        ["isolated-note", str(audio), "--expected-hz", repr(expected_hz),
+         "--metrics", "pitch"],
+        field + " checked note",
+    )
+    pitch = report.get("pitch")
+    if (report.get("schema") != "hwa-isolated-note" or
+            report.get("schema_version") != 1 or
+            report.get("command") != "isolated-note" or
+            report.get("method") != CHECKED_NOTE_METHOD_VERSION or
+            report.get("path") != str(audio) or
+            finite(report.get("expected_hz"), field + " expected_hz") !=
+            expected_hz or
+            report.get("requested_metrics") != ["pitch"] or
+            type(pitch) is not dict or type(pitch.get("valid")) is not bool):
+        raise FitError(f"{field} checked note returned an unknown contract")
+    if sha256(audio) != expected_sha256:
+        raise FitError(f"{field} changed during checked note analysis")
+    return report
+
+
+def checked_note_harmonic_decay(
+        analyzer: Path, reference: Path, model: Path, expected_hz: float,
+        reference_sha256: str, model_sha256: str) -> dict[str, Any]:
+    """Score native checked pitch and per-harmonic T60 evidence."""
+    analyzer = regular(analyzer, "analyzer")
+    reference = regular(reference, "checked harmonic reference")
+    model = regular(model, "checked harmonic model")
+    if sha256(reference) != reference_sha256:
+        raise FitError("checked harmonic reference hash changed")
+    if sha256(model) != model_sha256:
+        raise FitError("checked harmonic model hash changed")
+    reference_note = checked_note_report(
+        analyzer, reference, expected_hz, reference_sha256,
+        "checked harmonic reference",
+    )
+    if reference_note["pitch"]["valid"] is not True:
+        raise FitError("checked harmonic reference failed the note pitch gate")
+    model_note = checked_note_report(
+        analyzer, model, expected_hz, model_sha256,
+        "checked harmonic model",
+    )
+    report = run_checked_analyzer_json(
+        analyzer,
+        ["harmonic-decay", str(reference), str(model),
+         "--expected-hz", repr(expected_hz)],
+        "checked harmonic-decay",
+    )
+    reference_profile = report.get("reference")
+    model_profile = report.get("model")
+    comparison = report.get("comparison")
+    if (report.get("schema") != "hwa-harmonic-decay" or
+            report.get("schema_version") != 1 or
+            report.get("command") != "harmonic-decay" or
+            report.get("method") != CHECKED_HARMONIC_DECAY_METHOD_VERSION or
+            finite(report.get("expected_hz"), "harmonic expected_hz") !=
+            expected_hz or
+            type(reference_profile) is not dict or
+            reference_profile.get("path") != str(reference) or
+            type(reference_profile.get("valid")) is not bool or
+            type(model_profile) is not dict or
+            model_profile.get("path") != str(model) or
+            type(model_profile.get("valid")) is not bool or
+            type(comparison) is not dict or
+            type(comparison.get("valid")) is not bool or
+            type(comparison.get("bands")) is not list):
+        raise FitError("checked harmonic-decay returned an unknown contract")
+    if reference_profile["valid"] is not True:
+        raise FitError("checked harmonic reference has no valid profile")
+
+    errors = []
+    for index, row in enumerate(comparison["bands"]):
+        if type(row) is not dict or type(row.get("valid")) is not bool:
+            raise FitError("checked harmonic-decay has an invalid band row")
+        if row["valid"]:
+            errors.append(abs(finite(
+                row.get("t60_log_error_db"),
+                f"checked harmonic-decay bands[{index}].t60_log_error_db",
+            )) / T60_DB_PER_OCTAVE)
+    shared_count = comparison.get("shared_valid_band_count")
+    if (type(shared_count) is not int or type(shared_count) is bool or
+            shared_count < 0 or shared_count != len(errors)):
+        raise FitError("checked harmonic-decay shared band count changed")
+    coverage = finite(
+        comparison.get("shared_reference_coverage"),
+        "checked harmonic-decay reference coverage",
+    )
+    comparison_valid = bool(
+        model_note["pitch"]["valid"] and model_profile["valid"] and
+        comparison["valid"] and
+        shared_count >= MIN_HARMONIC_VALID_BANDS
+    )
+    if comparison_valid:
+        rms_error = nonnegative(
+            comparison.get("t60_log_rmse_db"),
+            "checked harmonic-decay T60 RMSE",
+        ) / T60_DB_PER_OCTAVE
+        median_bias = finite(
+            comparison.get("median_t60_log_bias_db"),
+            "checked harmonic-decay median bias",
+        ) / T60_DB_PER_OCTAVE
+        mean_error = sum(errors) / len(errors)
+        maximum_error = max(errors)
+    else:
+        rms_error = INVALID_HARMONIC_LOSS_OCTAVES
+        median_bias = 0.0
+        mean_error = INVALID_HARMONIC_LOSS_OCTAVES
+        maximum_error = INVALID_HARMONIC_LOSS_OCTAVES
+    if (sha256(reference) != reference_sha256 or
+            sha256(model) != model_sha256):
+        raise FitError("checked harmonic-decay audio changed during analysis")
+    return {
+        "checked_note_valid": model_note["pitch"]["valid"],
+        "checked_harmonic_decay_valid": comparison_valid,
+        "reference_pitch_error_cents": finite(
+            reference_note["pitch"].get("cents"),
+            "checked harmonic reference pitch cents",
+        ),
+        "model_pitch_error_cents": finite(
+            model_note["pitch"].get("cents"),
+            "checked harmonic model pitch cents",
+        ),
+        "valid_harmonic_count": shared_count,
+        "shared_reference_coverage": coverage,
+        "rms_t60_error_octaves": rms_error,
+        "mean_absolute_t60_error_octaves": mean_error,
+        "maximum_absolute_t60_error_octaves": maximum_error,
+        "median_t60_bias_octaves": median_bias,
+    }
 
 
 def read_pcm_wave_payload(
@@ -1255,10 +1525,19 @@ def passive_decay_loss(kind: str, measure: dict[str, Any], scale: float) -> floa
     """Return the named passive objective without changing the v4 score."""
     if kind == "harmonic-decay":
         field = "mean_absolute_t60_error_octaves"
+    elif kind == "checked-note-harmonic-decay":
+        field = "rms_t60_error_octaves"
     else:
         field = ("combined_shape_rmse_db"
                  if kind == "passive-decay-shape" else "shape_rmse_db")
     return finite(measure[field], field) / scale
+
+
+def selection_method_version(manifest: dict[str, Any]) -> str:
+    if (manifest["schema_version"] == 1 and
+            manifest["selection"].get("mode") == "fit-only"):
+        return FIT_ONLY_SELECTION_METHOD_VERSION
+    return SELECTION_METHOD_VERSION
 
 
 def passive_method_versions(objectives: list[dict[str, Any]]) -> dict[str, str]:
@@ -1270,6 +1549,11 @@ def passive_method_versions(objectives: list[dict[str, Any]]) -> dict[str, str]:
         result["passive_decay_shape"] = PASSIVE_DECAY_SHAPE_METHOD_VERSION
     if "harmonic-decay" in kinds:
         result["harmonic_decay"] = HARMONIC_DECAY_METHOD_VERSION
+    if "checked-note-harmonic-decay" in kinds:
+        result["isolated_note"] = CHECKED_NOTE_METHOD_VERSION
+        result["checked_harmonic_decay"] = (
+            CHECKED_HARMONIC_DECAY_METHOD_VERSION
+        )
     return result
 
 
@@ -1762,6 +2046,22 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
             selector_hash, bindings, binding_hashes,
         )
 
+    required_bindings = {
+        row["reference_binding"] for row in manifest["objectives"]
+        if row["kind"] != "experiment-gap"
+    }
+    fit_only = manifest["selection"].get("mode") == "fit-only"
+    if fit_only and set(bindings) != required_bindings:
+        raise FitError("fit-only bindings differ from its fit objectives")
+    for objective in manifest["objectives"]:
+        expected_hash = objective.get("reference_sha256")
+        if expected_hash is not None:
+            binding_name = objective["reference_binding"]
+            if binding_hashes.get(binding_name) != expected_hash:
+                raise FitError(
+                    f"reference binding has the wrong hash: {binding_name}"
+                )
+
     manifest_parameters = by_name(manifest["parameters"], "id")
     experiment_parameters = by_name(experiment["parameters"], "name")
     if set(manifest_parameters) != set(experiment_parameters):
@@ -1896,6 +2196,13 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                             "maximum_absolute_t60_error_octaves": comparison[
                                 "maximum_absolute_t60_error_octaves"],
                         }
+                    elif objective["kind"] == "checked-note-harmonic-decay":
+                        expected_hz = float(objective["expected_hz"])
+                        measure = checked_note_harmonic_decay(
+                            analyzer, reference, model, expected_hz,
+                            binding_hashes[objective["reference_binding"]],
+                            model_hash,
+                        )
                     else:
                         measure = run_passive_decay(
                             reference, model,
@@ -1909,7 +2216,8 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                                  **measure})
             losses[split] += weight * loss
             weights[split] += weight
-        for split in ("fit", "check"):
+        required_splits = ("fit",) if fit_only else ("fit", "check")
+        for split in required_splits:
             if weights[split] <= 0.0:
                 raise FitError(f"fit manifest has no {split} objective")
             losses[split] /= weights[split]
@@ -1917,6 +2225,9 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                    for row in evidence):
             eligible = False
         score = losses["fit"] + float(selection["check_weight"]) * losses["check"]
+        source_groups = v1_source_group_rows(
+            manifest["objectives"], evidence
+        )
         point_rows.append({
             "point_id": point_id,
             "point_key": points[point_id]["key"],
@@ -1928,17 +2239,61 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
             "worst_harm": worst_harm,
             "eligible": eligible,
             "evidence": evidence,
+            "source_groups": source_groups,
         })
 
     baseline = next(row for row in point_rows if row["baseline"])
     max_check = (baseline["check_loss"] +
                  float(selection["max_check_loss_increase"]))
     max_harm = float(selection["max_candidate_worst_harm"])
+    baseline_evidence = by_name(baseline["evidence"], "objective")
+    maximum_objective_increase = selection.get(
+        "max_objective_loss_increase"
+    )
+    baseline_source_groups = {
+        (item["split"], item["source_group"]): item
+        for item in baseline["source_groups"]
+    }
+    maximum_source_loss = selection.get(
+        "max_candidate_source_mean_loss"
+    )
+    maximum_source_increase = selection.get(
+        "max_source_mean_loss_increase"
+    )
     for row in point_rows:
+        for item in row["evidence"]:
+            baseline_item = baseline_evidence[item["objective"]]
+            item["loss_increase_from_baseline"] = (
+                float(item["loss"]) - float(baseline_item["loss"])
+            )
+        objective_increase_passes = bool(
+            maximum_objective_increase is None or all(
+                float(item["loss_increase_from_baseline"]) <=
+                float(maximum_objective_increase)
+                for item in row["evidence"]
+            )
+        )
+        for item in row["source_groups"]:
+            key = (item["split"], item["source_group"])
+            baseline_item = baseline_source_groups.get(key)
+            if baseline_item is None:
+                raise FitError("candidate source groups differ from baseline")
+            item["loss_increase_from_baseline"] = (
+                float(item["loss"]) - float(baseline_item["loss"])
+            )
+        source_groups_pass = bool(
+            maximum_source_loss is None or all(
+                float(item["loss"]) <= float(maximum_source_loss) and
+                float(item["loss_increase_from_baseline"]) <=
+                float(maximum_source_increase)
+                for item in row["source_groups"]
+            )
+        )
         row["eligible"] = bool(
-            not row["baseline"] and row["eligible"] and
+            (fit_only or not row["baseline"]) and row["eligible"] and
             row["check_loss"] <= max_check and
-            row["worst_harm"] <= max_harm
+            row["worst_harm"] <= max_harm and
+            objective_increase_passes and source_groups_pass
         )
     eligible = [row for row in point_rows if row["eligible"]]
     result = {
@@ -1946,7 +2301,7 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
         "schema_version": 1,
         "status": "pass" if eligible else "fail",
         "method_versions": {
-            "selection": SELECTION_METHOD_VERSION,
+            "selection": selection_method_version(manifest),
             **passive_method_versions(manifest["objectives"]),
         },
         "adapter_id": manifest["adapter_id"],
@@ -1965,10 +2320,15 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
             not row["eligible"], row["score"], row["point_id"]
         )),
     }
+    if fit_only:
+        result["selection_mode"] = "fit-only"
     if eligible:
-        chosen = min(eligible, key=lambda row: (
-            row["score"], row["check_loss"], row["point_id"]
-        ))
+        chosen = min(
+            eligible,
+            key=lambda row: v1_rank_key(
+                row, float(selection["check_weight"])
+            ),
+        )
         result.update({
             "chosen_point_id": chosen["point_id"],
             "chosen_parameters": chosen["parameters"],
@@ -2353,7 +2713,7 @@ def write_profile(arguments: argparse.Namespace) -> None:
         )
         return
     required_methods = {
-        "selection": SELECTION_METHOD_VERSION,
+        "selection": selection_method_version(manifest),
         **passive_method_versions(manifest["objectives"]),
     }
     status = fit.get("status")

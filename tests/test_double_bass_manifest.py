@@ -19,7 +19,7 @@ ADAPTER = ROOT / "adapters" / "hlolli_wg_double_bass"
 BUILDER = ADAPTER / "build_manifest.py"
 FIT = ADAPTER / "fit-passive-open-v1.json"
 CONTRACT = ADAPTER / "reference-contract-v1.json"
-PYTHON = Path("/usr/bin/python3")
+PYTHON = Path(sys.executable).resolve()
 MODULE_SPEC = importlib.util.spec_from_file_location(
     "double_bass_build_manifest", BUILDER)
 assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
@@ -69,7 +69,7 @@ def wave_file(path, rate, width, frames):
 
 def fake_ffmpeg(path, nonrepeatable=False):
     path.write_text(
-        "#!/usr/bin/python3 -I\n"
+        f"#!{PYTHON} -I\n"
         "import pathlib, sys, wave\n"
         "if sys.argv[1:] == ['-version']:\n"
         " print('ffmpeg version 8.1.2-test Copyright test'); raise SystemExit(0)\n"
@@ -93,7 +93,7 @@ def fake_ffmpeg(path, nonrepeatable=False):
 
 def fake_analyzer(path):
     path.write_text(
-        "#!/usr/bin/python3 -I\n"
+        f"#!{PYTHON} -I\n"
         "import json, pathlib, sys, wave\n"
         "if sys.argv[1:] == ['--version']:\n"
         " print('hlolli-wg-analyzer 1.1.0-test'); raise SystemExit(0)\n"
