@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -406,6 +407,97 @@ int hwa_sha256_file(const char *path,
     }
     if (result != 0) {
         memset(hex, 0, 65U);
+    }
+    return result;
+}
+
+int hwa_sha256_read_file(const char *path,
+                         uint64_t max_bytes,
+                         unsigned char **data,
+                         size_t *size,
+                         char hex[65],
+                         char *error,
+                         size_t error_size)
+{
+    unsigned char digest[32];
+    unsigned char *bytes = NULL;
+    HWASha256 context;
+    HWASha256FileIdentity identity;
+    FILE *stream = NULL;
+    size_t total = 0U;
+    int result = -1;
+    if (error != NULL && error_size != 0U) error[0] = '\0';
+    if (data != NULL) *data = NULL;
+    if (size != NULL) *size = 0U;
+    if (hex != NULL) memset(hex, 0, 65U);
+    if (path == NULL || data == NULL || size == NULL || hex == NULL ||
+        max_bytes == 0U || strcmp(path, "-") == 0) {
+        hwa_set_error(error, error_size, "invalid file read and hash arguments");
+        return -1;
+    }
+    if (max_bytes > UINT64_MAX / UINT64_C(8))
+        max_bytes = UINT64_MAX / UINT64_C(8);
+    if (hwa_sha256_preflight_file(path, max_bytes, &identity,
+                                  error, error_size) != 0)
+        return -1;
+    if (identity.size > (uint64_t)SIZE_MAX) {
+        hwa_set_error(error, error_size,
+                      "file read and hash size exceeds this platform");
+        return -1;
+    }
+    stream = fopen(path, "rb");
+    if (stream == NULL) {
+        hwa_set_error(error, error_size, "cannot open hash input '%s': %s",
+                      path, strerror(errno));
+        return -1;
+    }
+    if (hwa_sha256_verify_open_file(stream, &identity,
+                                    error, error_size) != 0)
+        goto cleanup;
+    bytes = (unsigned char *)malloc(
+        identity.size == 0U ? 1U : (size_t)identity.size);
+    if (bytes == NULL) {
+        hwa_set_error(error, error_size,
+                      "cannot allocate bounded file bytes");
+        goto cleanup;
+    }
+    while (total < (size_t)identity.size) {
+        size_t remaining = (size_t)identity.size - total;
+        size_t request = remaining < 65536U ? remaining : 65536U;
+        size_t count = fread(bytes + total, 1U, request, stream);
+        total += count;
+        if (count != request) {
+            hwa_set_error(error, error_size,
+                          "cannot read hash input '%s'", path);
+            goto cleanup;
+        }
+    }
+    if (fgetc(stream) != EOF || ferror(stream) ||
+        hwa_sha256_verify_open_file(stream, &identity,
+                                    error, error_size) != 0) {
+        if (error != NULL && error_size != 0U && error[0] == '\0')
+            hwa_set_error(error, error_size,
+                          "hash input changed while it was read");
+        goto cleanup;
+    }
+    hwa_sha256_init(&context);
+    hwa_sha256_update(&context, bytes, total);
+    hwa_sha256_final(&context, digest);
+    hwa_sha256_hex(digest, hex);
+    *data = bytes;
+    *size = total;
+    bytes = NULL;
+    result = 0;
+cleanup:
+    free(bytes);
+    if (fclose(stream) != 0 && result == 0) {
+        free(*data);
+        *data = NULL;
+        *size = 0U;
+        memset(hex, 0, 65U);
+        hwa_set_error(error, error_size,
+                      "cannot close hash input '%s'", path);
+        result = -1;
     }
     return result;
 }

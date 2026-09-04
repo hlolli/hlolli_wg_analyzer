@@ -1,0 +1,43 @@
+{
+  "adapter_id": "hlolli_wg_double_bass-passive-e1-v2",
+  "objectives": [
+    {
+      "case": "iowa2012-pizz-e-string-g1-ff-left-48k-soxr",
+      "expected_hz": 48.999429497718666,
+      "id": "fit_e1_checked_note_harmonic_decay",
+      "kind": "checked-note-harmonic-decay",
+      "reference_binding": "iowa2012-pizz-e-string-g1-ff-left-48k-soxr",
+      "reference_sha256": "103d0df33df6460825b40ec160581e79d7e84c30be76be55fc6454806749f041",
+      "resource_id": "model.final",
+      "scale": 1.0,
+      "split": "fit",
+      "weight": 1.0
+    }
+  ],
+  "parameters": [
+    {
+      "baseline": 0.25,
+      "id": "string_e_loss_seconds",
+      "maximum": 30.0,
+      "minimum": 0.01,
+      "profile_paths": [
+        [
+          "strings",
+          0,
+          "loss_time_constant_seconds"
+        ]
+      ],
+      "unit": "seconds"
+    }
+  ],
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "selection": {
+    "check_weight": 0.0,
+    "max_candidate_harmonic_maximum_error_octaves": 1.5,
+    "max_candidate_harmonic_mean_error_octaves": 0.75,
+    "max_candidate_worst_harm": 0.0,
+    "max_check_loss_increase": 0.0,
+    "mode": "fit-only"
+  }
+}

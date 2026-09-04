@@ -35,6 +35,9 @@ typedef struct HWAInferenceRequest {
     const HWAInferenceInput *inputs;
     size_t input_count;
     HWAFormat source_format;
+    uint64_t max_input_file_bytes;
+    uint64_t max_input_bytes;
+    uint64_t timeout_milliseconds;
     HWAEventBundleLimits output_limits;
 } HWAInferenceRequest;
 
@@ -105,6 +108,12 @@ typedef struct HWAInferenceProvider {
     HWAInferenceDestroyFunction destroy;
 } HWAInferenceProvider;
 
+/* Check one request, including every declared input hash. */
+int hwa_inference_request_validate(const HWAInferenceProvider *provider,
+                                   const HWAInferenceRequest *request,
+                                   char *error,
+                                   size_t error_size);
+
 /*
  * Validate the bundle and every payload binding. This reads each bound byte
  * source in full to check its size and SHA-256 value.
@@ -113,6 +122,14 @@ int hwa_inference_output_validate(const HWAInferenceOutput *output,
                                   const HWAEventBundleLimits *limits,
                                   char *error,
                                   size_t error_size);
+
+/* Check an output and bind its provenance and sample clock to its request. */
+int hwa_inference_output_validate_for_request(
+    const HWAInferenceProvider *provider,
+    const HWAInferenceRequest *request,
+    const HWAInferenceOutput *output,
+    char *error,
+    size_t error_size);
 
 /* Hash one bounded byte source without treating its display name as a path. */
 int hwa_inference_byte_source_sha256(

@@ -326,6 +326,28 @@ def select_v1_command(fixture, output):
     ]
 
 
+def write_fake_checked_analyzer(path):
+    python = Path(sys.executable).resolve()
+    path.write_text(
+        "#!{} -I\n".format(python) +
+        "import json, pathlib, sys\n"
+        "a=sys.argv[1:]\n"
+        "if len(a)==7 and a[:2]==['--json','isolated-note']:\n"
+        " p=str(pathlib.Path(a[2]).absolute()); hz=float(a[4]); valid='invalid' not in pathlib.Path(p).name\n"
+        " print(json.dumps({'schema':'hwa-isolated-note','schema_version':1,'command':'isolated-note','method':'isolated-note-1','path':p,'expected_hz':hz,'requested_metrics':['pitch'],'pitch':{'valid':valid,'cents':0.25}})); raise SystemExit(0)\n"
+        "if len(a)==6 and a[:2]==['--json','harmonic-decay']:\n"
+        " r=str(pathlib.Path(a[2]).absolute()); m=str(pathlib.Path(a[3]).absolute()); hz=float(a[5]); valid='invalid' not in pathlib.Path(m).name\n"
+        " name=pathlib.Path(m).name; error=1.2 if 'candidate' in name or 'model-2-' in name else 6.0\n"
+        " bands=[{'valid':valid,'t60_log_error_db':error if valid else None} for _ in range(4)]\n"
+        " profile=lambda p,v:{'path':p,'valid':v}\n"
+        " comparison={'valid':valid,'shared_valid_band_count':4 if valid else 0,'shared_reference_coverage':1.0,'t60_log_rmse_db':error if valid else None,'median_t60_log_bias_db':error if valid else None,'bands':bands}\n"
+        " print(json.dumps({'schema':'hwa-harmonic-decay','schema_version':1,'command':'harmonic-decay','method':'harmonic-decay-1','expected_hz':hz,'reference':profile(r,True),'model':profile(m,valid),'comparison':comparison})); raise SystemExit(0)\n"
+        "raise SystemExit(9)\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+
+
 class InstrumentFitTests(unittest.TestCase):
     def test_v1_can_gate_on_check_without_using_it_to_rank(self):
         with tempfile.TemporaryDirectory() as text:
@@ -708,6 +730,54 @@ class InstrumentFitTests(unittest.TestCase):
             self.assertIn("candidate point", completed.stderr)
             self.assertFalse(invalid_output.exists())
 
+    def test_v2_checked_harmonic_candidate_keeps_pitch_and_decay_gates(self):
+        with tempfile.TemporaryDirectory(prefix="hwa v2 checked harmonic ") as text:
+            root = Path(text)
+            fixture = make_v2_fixture(root, expected_loss=0.2)
+            write_fake_checked_analyzer(fixture["analyzer"])
+            manifest = json.loads(
+                fixture["manifest"].read_text(encoding="utf-8")
+            )
+            for objective in manifest["objectives"]:
+                reference = fixture["references"][objective["split"]]
+                objective.update({
+                    "expected_hz": 220.0,
+                    "kind": "checked-note-harmonic-decay",
+                    "reference_sha256": MODULE.sha256(reference),
+                    "scale": 1.0,
+                })
+            manifest["selection"].update({
+                "max_candidate_harmonic_mean_error_octaves": 0.75,
+                "max_candidate_harmonic_maximum_error_octaves": 1.5,
+                "minimum_candidate_harmonic_count": 4,
+            })
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            output = root / "checked-harmonic-result.json"
+            completed = subprocess.run(
+                select_v2_command(fixture, output), check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["method_versions"], {
+            "selection": MODULE.VERIFY_CANDIDATE_METHOD_VERSION,
+            "isolated_note": MODULE.CHECKED_NOTE_METHOD_VERSION,
+            "checked_harmonic_decay":
+                MODULE.CHECKED_HARMONIC_DECAY_METHOD_VERSION,
+        })
+        self.assertTrue(result["gates"]["passed"])
+        for row in result["gates"]["objectives"]:
+            self.assertTrue(row["checked_note_valid"])
+            self.assertTrue(row["checked_harmonic_decay_valid"])
+            self.assertEqual(row["minimum_valid_harmonic_count"], 4)
+            self.assertEqual(
+                row["maximum_mean_absolute_t60_error_octaves"], 0.75
+            )
+            self.assertEqual(row["maximum_harmonic_error_octaves"], 1.5)
+
     def test_v2_write_profile_rechecks_gates_and_writes_v2_receipt(self):
         with tempfile.TemporaryDirectory() as text:
             root = Path(text)
@@ -801,6 +871,156 @@ class InstrumentFitTests(unittest.TestCase):
             self.assertIn("gate data", completed.stderr)
             self.assertFalse(bad_output.exists())
             self.assertFalse(bad_receipt.exists())
+
+    def test_fit_only_checked_note_harmonic_selection_uses_one_fit_binding(
+            self):
+        with tempfile.TemporaryDirectory(prefix="hwa checked fit only ") as text:
+            root = Path(text)
+            reference = root / "fit-reference.wav"
+            baseline_audio = root / "baseline-model.wav"
+            candidate_audio = root / "candidate-model.wav"
+            for path, tau in ((reference, 0.4), (baseline_audio, 0.8),
+                              (candidate_audio, 0.4)):
+                write_decay(path, tau)
+            analyzer = root / "analyzer"
+            write_fake_checked_analyzer(analyzer)
+            manifest = {
+                "schema": "hwa-instrument-fit", "schema_version": 1,
+                "adapter_id": "fit-only-checked-harmonics",
+                "parameters": [{
+                    "id": "tau", "unit": "seconds", "minimum": 0.1,
+                    "maximum": 1.0, "baseline": 0.8,
+                    "profile_paths": [["tau"]],
+                }],
+                "objectives": [{
+                    "id": "fit_harmonics",
+                    "kind": "checked-note-harmonic-decay",
+                    "case": "fit", "reference_binding": "fit_ref",
+                    "reference_sha256": MODULE.sha256(reference),
+                    "resource_id": "model.final", "expected_hz": 220.0,
+                    "split": "fit", "weight": 1.0, "scale": 1.0,
+                }],
+                "selection": {
+                    "mode": "fit-only", "check_weight": 0.0,
+                    "max_check_loss_increase": 0.0,
+                    "max_candidate_worst_harm": 0.0,
+                    "max_candidate_harmonic_mean_error_octaves": 0.75,
+                    "max_candidate_harmonic_maximum_error_octaves": 1.5,
+                },
+            }
+            experiment = {
+                "command": "experiment", "schema_version": 10,
+                "parameters": [{
+                    "id": 1, "name": "tau", "unit": "seconds",
+                    "minimum": 0.1, "maximum": 1.0, "baseline": 0.8,
+                }],
+                "cases": [{
+                    "id": 1, "name": "fit", "split": "fit", "weight": 1,
+                }],
+                "responses": [],
+                "points": [
+                    {"id": 1, "key": "a" * 64, "baseline": True},
+                    {"id": 2, "key": "b" * 64, "baseline": False},
+                ],
+                "values": [{
+                    "id": 1, "point_id": 2, "parameter_id": 1,
+                    "value": 0.4,
+                }],
+                "jobs": [
+                    {"id": 1, "key": "1" * 64,
+                     "point_id": 1, "case_id": 1},
+                    {"id": 2, "key": "2" * 64,
+                     "point_id": 2, "case_id": 1},
+                ],
+                "artifacts": [
+                    {"id": 1, "job_id": 1, "resource_id": "model.final",
+                     "artifact": {"path": baseline_audio.name,
+                                  "sha256": MODULE.sha256(baseline_audio)},
+                     "file_bytes": baseline_audio.stat().st_size,
+                     "kind": "stem"},
+                    {"id": 2, "job_id": 2, "resource_id": "model.final",
+                     "artifact": {"path": candidate_audio.name,
+                                  "sha256": MODULE.sha256(candidate_audio)},
+                     "file_bytes": candidate_audio.stat().st_size,
+                     "kind": "stem"},
+                ],
+                "candidates": [],
+            }
+            manifest_path = root / "fit.json"
+            experiment_path = root / "experiment.json"
+            profile_path = root / "profile.json"
+            output = root / "result.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            experiment_path.write_text(json.dumps(experiment), encoding="utf-8")
+            profile_path.write_text('{"tau":0.8}', encoding="utf-8")
+            passed = MODULE.select(types.SimpleNamespace(
+                manifest=manifest_path, experiment=experiment_path,
+                analyzer=analyzer, profile=profile_path,
+                bind=["fit_ref=" + str(reference)], output=output,
+            ))
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertTrue(passed)
+            self.assertEqual(result["selection_mode"], "fit-only")
+            self.assertEqual(result["chosen_point_id"], 2)
+            self.assertEqual(result["method_versions"], {
+                "selection": MODULE.FIT_ONLY_SELECTION_METHOD_VERSION,
+                "isolated_note": MODULE.CHECKED_NOTE_METHOD_VERSION,
+                "checked_harmonic_decay":
+                    MODULE.CHECKED_HARMONIC_DECAY_METHOD_VERSION,
+            })
+            chosen = next(row for row in result["points"]
+                          if row["point_id"] == 2)
+            self.assertEqual(chosen["check_loss"], 0.0)
+            self.assertTrue(
+                chosen["evidence"][0]["checked_note_valid"])
+            self.assertTrue(
+                chosen["evidence"][0]["checked_harmonic_decay_valid"])
+            self.assertLess(chosen["fit_loss"], 0.21)
+
+            invalid_model = root / "invalid-model.wav"
+            write_decay(invalid_model, 0.02)
+            invalid_evidence = MODULE.checked_note_harmonic_decay(
+                analyzer, reference, invalid_model, 220.0,
+                MODULE.sha256(analyzer), MODULE.sha256(reference),
+                MODULE.sha256(invalid_model),
+            )
+            self.assertFalse(invalid_evidence["checked_note_valid"])
+            self.assertFalse(
+                invalid_evidence["checked_harmonic_decay_valid"])
+            self.assertEqual(
+                invalid_evidence["rms_t60_error_octaves"],
+                MODULE.INVALID_HARMONIC_LOSS_OCTAVES,
+            )
+            self.assertFalse(MODULE.v1_objective_passes_absolute_limits(
+                {"loss": invalid_evidence["rms_t60_error_octaves"],
+                 **invalid_evidence},
+                manifest["selection"],
+            ))
+            with self.assertRaisesRegex(MODULE.FitError, "analyzer hash"):
+                MODULE.checked_note_harmonic_decay(
+                    analyzer, reference, candidate_audio, 220.0,
+                    "0" * 64, MODULE.sha256(reference),
+                    MODULE.sha256(candidate_audio),
+                )
+
+            manifest["objectives"][0]["reference_sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            rejected_output = root / "wrong-reference-result.json"
+            with self.assertRaisesRegex(MODULE.FitError, "wrong hash"):
+                MODULE.select(types.SimpleNamespace(
+                    manifest=manifest_path, experiment=experiment_path,
+                    analyzer=analyzer, profile=profile_path,
+                    bind=["fit_ref=" + str(reference)],
+                    output=rejected_output,
+                ))
+            self.assertFalse(rejected_output.exists())
+
+            manifest["objectives"][0]["reference_sha256"] = MODULE.sha256(
+                reference)
+            manifest["objectives"][0]["split"] = "check"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.FitError, "fit-only"):
+                MODULE.fit_manifest(manifest_path)
 
     def test_passive_decay_reader_enforces_byte_and_frame_limits(self):
         with tempfile.TemporaryDirectory() as text:

@@ -5,15 +5,16 @@ read-only analysis of WAVE audio. It can inspect one recording, compare a
 reference with a candidate, align audio, measure score-linked items, check
 saved profiles, and build ranked reports for sound-model work.
 
-The analyzer does not assume an instrument. Labels, roles, physical elements,
-and probe names come from the input data.
+The built-in signal analysis does not assume an instrument. Labels, roles,
+physical elements, and probe names come from the input data. Model-backed
+adapters may return the model's fixed label set.
 
 Current version: 1.1.0.
 
 ## Build and test
 
-You need a C11 compiler and CMake 3.20 or newer. The library and CLI have no
-third-party run-time dependency.
+You need a C11 compiler and CMake 3.20 or newer. The default library and CLI
+have no third-party run-time dependency.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -81,7 +82,15 @@ build/hlolli-wg-analyzer export candidate.wav \
 ```sh
 build/hlolli-wg-analyzer analyze-events solo.wav \
   --output solo.hwa-events
+build-onnx/hlolli-wg-analyzer infer-note-events piano.wav \
+  --model nmp.onnx --output piano.hwa-events
+build-onnx/hlolli-wg-analyzer separate-instruments quartet.wav \
+  --model htdemucs_6s_fp16weights.onnx --output quartet-stems.hwa-events
+build-onnx/hlolli-wg-analyzer infer-stem-note-events \
+  quartet-stems.hwa-events --model nmp.onnx \
+  --output quartet-notes.hwa-events
 build/hlolli-wg-analyzer validate-event-bundle solo.hwa-events
+build-onnx/hlolli-wg-analyzer --json inference-capabilities
 ```
 
 `analyze-events` finds note candidates in solo or mostly monophonic voiced
@@ -89,6 +98,37 @@ audio. It saves sample bounds, level, pitch, onset, spectrum values, and nine
 frame traces in a new directory. It does not infer rhythm, notation, parts, or
 polyphonic voices. See [Analyze events version 1](docs/analyze-events-v1.md)
 and [Event bundle version 1](docs/event-bundle-v1.md).
+
+`infer-note-events` runs the opt-in Basic Pitch ONNX adapter on a mono 22050 Hz
+WAVE file. It writes overlapping note events with exact source-sample bounds,
+nominal equal-tempered pitch-bin centres, scores, and model provenance. It
+does not measure fine tuning or infer rhythm, parts, instruments, or
+ornaments.
+
+`separate-instruments` runs the pinned HTDemucs six-stem ONNX adapter on a
+mono or stereo 44100 Hz WAVE file. It writes stereo float32 WAVE stems named
+`drums`, `bass`, `other`, `vocals`, `guitar`, and `piano`, with exact source
+sample bounds and model provenance. Decoded input samples must be finite and
+in `[-1, 1]`. The model is an estimate. In particular, the upstream six-stem
+model calls its piano output experimental, and it does not split orchestral
+families inside `other`.
+
+`infer-stem-note-events` runs Basic Pitch once on each saved stem. It keeps
+all note bounds on the original 44100 Hz clock and links each note to the
+stem and instrument region that supplied its audio. It uses one fixed
+downmix and downsample rule, then discards that work file. Stem bleed can
+duplicate notes or cause false pitched events. See [Stem note events version
+1](docs/stem-note-events-v1.md).
+
+`inference-capabilities` reports whether the compiled CLI links ONNX Runtime
+and contains each adapter. It does not find, open, or check a model file. The
+default build does not link ONNX Runtime. See [ONNX Runtime build
+option](docs/onnx-runtime-build.md).
+
+The source-separation layer uses the checked instrument-stem provider
+contract. It turns one source WAVE into clock-aligned stem payloads with
+stable IDs, labels, hashes, and provenance. See
+[Instrument stems version 1](docs/instrument-stems-v1.md).
 
 ### Align, segment, and measure
 
@@ -206,7 +246,27 @@ selector owns neither Csound nor a model profile. The
 [cello open-string adapter](adapters/hlolli_wg_cello/README.md) gives a full
 rerun command. The
 [viola passive-string adapter](adapters/hlolli_wg_viola/README.md) documents
-its four targets and checked multi-tail roster.
+its four targets and checked multi-tail roster. The
+[double-bass adapter](adapters/hlolli_wg_double_bass/README.md) replaces its
+historical four-parameter random trial with four fit-only scalar grids whose
+model artifacts are scored by the native isolated-note pitch gate and native
+harmonic-decay comparison. Its D-only successor extends that string's fit to
+the existing first-order bridge termination cutoff without adding DSP or
+changing the fixed model. Its joint paths freeze one baseline/candidate
+choice and verify native checked-note harmonic objectives through fit, check,
+and untouched audit
+splits; a failed reference preflight cannot publish a bundle or silently
+replace the declared roster. Its physical-dynamics path also checks one frozen
+twelve-file OrchideaSOL roster against declared bowed level, dynamic-spectrum,
+pitch, clipping, and contact-state gates without fitting or exposing private
+paths. The version-2 path accepts four whole 48 kHz WAVE members from one
+externally declared MTG Good-sounds source group without
+conversion. Because Good-sounds reports `string=null`, it records those E1,
+A1, D2, and G2 rows as an open-pitch transfer proxy rather than physical-string
+proof; the Iowa-specific version-1 declaration remains strict and unchanged.
+The frozen Good-sounds run passed reference preflight but rejected the
+candidate on E, A, and D; G alone passed. Its current checker also preserves
+the source's conflicting license claims instead of presenting one clean grant.
 See [Shared string-instrument modeling](docs/string-instrument-modeling.md) for
 the violin, viola, cello, and double-bass work split.
 
@@ -230,9 +290,15 @@ File hashes only bind the inputs and outputs to the receipt. They do not score
 the sound. `write-profile` writes a new file, asks
 the adapter to validate it, and writes a receipt. It never replaces the source
 profile. A render-only adapter has empty `profile_paths`; the writer rejects
-it. Fit-manifest version 2 verifies one fixed candidate against fit,
-validation, and audit goals. Audit data cannot tune that candidate. The writer
-accepts it only after all saved and recomputed gates pass.
+it. A version 1 manifest may instead declare `selection.mode` as `fit-only`; that
+mode accepts only fit objectives, exact fit bindings, and zero check weight and
+limits. Its baseline remains an eligible answer, so a search is not forced to
+change a sound parameter. The `checked-note-harmonic-decay` objective binds a
+reference SHA-256, requires native `isolated-note-1` pitch validity, and scores
+native `harmonic-decay-1` T60 evidence rather than an experiment RMS response.
+Fit-manifest version 2 verifies one fixed candidate against fit, validation,
+and audit goals. Audit data cannot tune that candidate. The writer accepts it
+only after all saved and recomputed gates pass.
 
 `check-recordings` runs the body-envelope estimator on bounded excerpts of
 real recordings. Keep private recordings outside the repository and pass each
@@ -288,13 +354,16 @@ File outputs use exclusive creation by default and reject an existing path.
 `--replace` permits replacement of a regular file after the tool writes and
 closes a same-directory temporary file.
 
-Experiment, excerpt, and report outputs must be new directories. The commands
-check a private sibling directory and publish it only after success. They do
-not support `--replace`.
+Experiment, excerpt, report, `analyze-events`, `infer-note-events`,
+`separate-instruments`, and `infer-stem-note-events` outputs must be new
+directories. They do not support `--replace`. Event-bundle writers create
+the final directory and remove the paths they made after a handled write or
+check failure. A stopped process or storage failure can leave a partial new
+directory.
 
 The CLI rejects outputs that alias protected inputs, including hard links.
 POSIX builds also reject output symlinks. Commands that build saved artifacts
-hash their explicit inputs and check them again before they publish output.
+hash their explicit inputs and check them again while they write output.
 These checks handle common path mistakes and input changes, but they do not
 protect against an active local attacker racing file-system operations.
 
@@ -380,3 +449,8 @@ See `docs/development.md` for the source layout and compatibility rules.
 Copyright (c) 2026 Hlöðver Sigurðsson.
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE).
+The Basic Pitch decoder port retains Spotify's Apache-2.0 license and notice
+under [third_party/basic-pitch](third_party/basic-pitch).
+The HTDemucs model code and its ONNX conversion retain their MIT notices under
+[third_party/demucs](third_party/demucs) and
+[third_party/demucs-onnx](third_party/demucs-onnx).

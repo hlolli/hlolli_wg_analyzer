@@ -223,9 +223,24 @@ not be redistributed.
 
 ## Current passive-loss result
 
-The 2026-09-03 generic-corpus run admits 28 open-string takes across four
-independent cellos/players/sessions and balances source identities rather than
-raw file count. G2, D3, and A3 pass. They select:
+The 2026-09-04 rerun binds the production displacement initializer and
+published cello-string impedances to the unchanged 28-take, four-source corpus,
+weights, gates, and parameter grids. D3 passes 12 points. C2, G2, and A3 each
+have zero eligible points because one admitted RWC objective retains only two
+valid model/reference harmonic overlaps; the frozen minimum is three. All 960
+render contracts and hashes, 66 focused analyzer tests, and 11 cello tests
+pass. The provenance-repaired result SHA-256 is
+`36fa24974d5913f91e78717ab4a5112a10265ae6565b14249131258875eed496`;
+repair receipt SHA-256 is
+`3700216c8e520539ed9dbab8322846ab03f6cf6f3adf60970b3cfbc435863fb8`.
+No profile or candidate was written and the audit remains sealed. Any follow-up
+that can select release time, pluck position, termination, or a wider loss
+range needs owner review and a new predeclaration.
+
+The 2026-09-03 pre-physical-excitation generic-corpus run admitted the same 28
+open-string takes and balanced source identities rather than raw file count.
+Its G2, D3, and A3 passes are historical and no longer authorize profiles under
+the changed excitation spectrum. They selected:
 
 - G2: 18 kHz bridge cutoff, 200 Hz-wide 293 Hz bridge-loss peak, 0.02 peak
   loss, and 3.0 s broadband loss time;
@@ -233,11 +248,14 @@ raw file count. G2, D3, and A3 pass. They select:
   loss time; and
 - A3: 12 kHz bridge and nut cutoffs with 1.0 s loss time.
 
-C2 fails both its original and expanded existing-control grids. The best
-follow-up has acceptable means for all four source identities but overlaps only
-two of three valid harmonics on the RWC variation-3 mezzo reference: its
-fundamental is too short while harmonics 3 and 8 are already too long. No
-four-string candidate or audit run is therefore valid yet. The
+C2 fails both existing-control grids and an authorized 96-point bridge
+high-shelf follow-up. The shelf improves upper-partial decay and lowers the
+best generic score from 3.648 to 3.394, but the decisive source still has only
+two harmonic overlaps. All five source-conditioned model fundamentals are
+about 46 to 66 dB below their reference peaks. That is a generic
+excitation/spectral-balance blocker, not a reason to keep widening passive-loss
+grids. No C2 profile, four-string candidate, or
+audit run is therefore valid yet. The
 [generic-corpus report](../../docs/research/cello-generic-passive-corpus-v1.md)
 records intake, weighting, grids, results, and receipts.
 
@@ -247,8 +265,10 @@ The earlier G2 result used 2.5 s loss and a 100 Hz peak; its
 [G2 report](../../docs/research/cello-g2-bridge-termination-v1.md) gives the
 per-partial results and receipts.
 
-The fixed profile still contains 0.25 s passive loss and zero peak loss for
-every string. The independent OrchideaSOL joint audit rejected the staged
+The fixed profile still contains 0.25 s passive loss, zero peak loss, and zero
+high-shelf loss for every string. Its schema hash changed, but the four C2
+source-conditioned neutral renders remain byte-identical. The independent
+OrchideaSOL joint audit rejected the staged
 seven-value candidate: C2, D3, and G2 exceeded the 2.0 curve-loss cap, and D3
 also exceeded the 0.25 harm cap. Aggregate fit, validation, audit, and total
 scores improved, but per-goal failures block a profile write. The
@@ -263,10 +283,10 @@ limits, RWC source split, and failed final audit. The original v3 run used:
 - fit selector: `e4476bdfde0f44546cbae7b251f2784e257c72ab548e6057396b621e31a96c98`;
 - generic probe: `ac17b30bdddecaf23b4883b924a1af9ed7f6b01f0df47984853ff171db19ad48`.
 
-The current source-balanced selector has SHA-256
-`cc30b374c4cd29452ba374ff062e81e28e086b82a6af8b4be8aa1c27695b3392`.
-The current adapter, including the frozen C2/A3 follow-up grids, has SHA-256
-`7f0290069dc87536f81e011a1354f6914431f5d230bd70617f3c456be2f5e48b`.
+The selector used by the high-shelf run has SHA-256
+`a49c7560a7f9494ec3a0a189c6392fbbb22401475e36dceb0c3fff267d1b0801`.
+Its frozen adapter has SHA-256
+`1b626121bca0b81b9104369d11ed87965fd30845ad69e047198f75a4146dbe82`.
 The earlier loss-only G2 grid had 19 points through 3.0 seconds and selected
 1.50 seconds. The later RWC variation-1 audit failed at D3 and G2. The rejected
 joint receipt hashes are
@@ -317,3 +337,16 @@ The bundle receipt holds the host tool, library, header-tree, input, renderer,
 manifest, and binding hashes. Apple system libraries and other transitive
 Csound libraries remain host trust inputs; the receipt does not claim to hash
 the whole operating system.
+
+## Physical excitation law
+
+The follow-up [physical-dynamics report](../../docs/research/cello-physical-dynamics-v1.md)
+replaces the proposed empirical C2 excitation sweep. Published string equations
+show that ordinary pizzicato must begin from nonzero displacement and zero
+velocity; the imported finite junction pulse was the wrong initial condition.
+A no-recording private probe restores 21.296 dB of C2 fundamental and verifies
+exact `20 log10(force ratio)` scaling. The 2026-09-04 production engine now
+uses a repeatable, band-limited displacement initial condition and the paper's
+measured cello-string impedances. The sealed development rerun above falsifies
+a complete four-string candidate without redesigning or ranking the physical
+law from microphone dBFS levels.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -22,6 +23,22 @@ if len(sys.argv) == 2 and sys.argv[1].startswith("--analyzer="):
     ANALYZER = Path(sys.argv.pop(1).split("=", 1)[1]).resolve()
 
 CASE_SPECS = (
+    ("iowa2012-pizz-e-string-g1-ff-left-48k-soxr", "fit", 48000,
+     1, 48.999429497718666),
+    ("iowa2012-pizz-a-ff-open-left-48k-soxr", "fit", 48000,
+     2, 55.0),
+    ("iowa2012-pizz-d-ff-open-left-48k-soxr", "fit", 48000,
+     3, 73.41619197935188),
+    ("iowa2012-pizz-g-ff-open-left-48k-soxr", "fit", 48000,
+     4, 97.99885899543733),
+    ("iowa2012-pizz-e-string-g1-ff-left-48k-soxr-diagnostic-check",
+     "check", 48000, 1, 48.999429497718666),
+    ("iowa2012-pizz-a-ff-open-left-48k-soxr-diagnostic-check",
+     "check", 48000, 2, 55.0),
+    ("iowa2012-pizz-d-ff-open-left-48k-soxr-diagnostic-check",
+     "check", 48000, 3, 73.41619197935188),
+    ("iowa2012-pizz-g-ff-open-left-48k-soxr-diagnostic-check",
+     "check", 48000, 4, 97.99885899543733),
     ("iowa2012-pizz-e-ff-open", "fit", 48000,
      1, 41.20344461410875),
     ("iowa2012-pizz-a-mf-open", "fit", 48000, 2, 55.0),
@@ -61,7 +78,10 @@ def fixture(root: Path) -> Path:
     model = {
         "valid": True,
         "strings": [
-            {"loss_time_constant_seconds": 0.25} for _ in range(4)
+            {
+                "bridge_cutoff_hz": 7000.0,
+                "loss_time_constant_seconds": 0.25,
+            } for _ in range(4)
         ],
     }
     write(plugin / "model" / "double_bass-v1.json",
@@ -79,9 +99,10 @@ def fixture(root: Path) -> Path:
         b" sys.stderr.write('x'*20000+'VALIDATION-END')\n"
         b" raise SystemExit(7)\n"
         b"rows=v.get('strings',[])\n"
-        b"values=[row['loss_time_constant_seconds'] for row in rows] if len(rows)==4 else []\n"
+        b"losses=[row['loss_time_constant_seconds'] for row in rows] if len(rows)==4 else []\n"
+        b"cutoffs=[row['bridge_cutoff_hz'] for row in rows] if len(rows)==4 else []\n"
         b"source=pathlib.Path(a.source)\n"
-        b"source.write_text(source.read_text()+'\\n/*FAKE_MODEL_VALUES='+json.dumps(values,separators=(',',':'))+'*/\\n')\n")
+        b"source.write_text(source.read_text()+'\\n/*FAKE_MODEL_VALUES='+json.dumps(losses,separators=(',',':'))+'*/\\n/*FAKE_BRIDGE_CUTOFFS='+json.dumps(cutoffs,separators=(',',':'))+'*/\\n')\n")
     includes = root / "Csound headers"
     write(includes / "csdl.h", b"csdl\n")
     write(includes / "csoundCore.h", b"core\n")
@@ -111,20 +132,24 @@ def fixture(root: Path) -> Path:
         b"p=pathlib.Path(sys.argv[i+1])\n"
         b"if '-3' not in sys.argv or '-f' in sys.argv or '-K' not in sys.argv: raise SystemExit(10)\n"
         b"text=pathlib.Path(sys.argv[-1]).read_text()\n"
+        b"(pathlib.Path(sys.argv[0]).parent/'last.csd').write_text(text)\n"
         b"module=pathlib.Path(next(value.split('=',1)[1] for value in sys.argv if value.startswith('--opcode-lib='))).read_text()\n"
         b"values=json.loads(re.search(r'FAKE_MODEL_VALUES=(\\[[^]]*\\])',module).group(1))\n"
+        b"cutoffs=json.loads(re.search(r'FAKE_BRIDGE_CUTOFFS=(\\[[^]]*\\])',module).group(1))\n"
+        b"if sum(value != 0.25 for value in values)==1 and '  kGate = 1\\n' not in text: raise SystemExit(11)\n"
         b"line=next(value for value in text.splitlines() if 'hlolli_wg_double_bass kGate,' in value)\n"
         b"controls=[value.strip() for value in line.split('kGate,',1)[1].split(',')]\n"
         b"frequency=float(controls[0]); force=float(controls[1]); speed=float(controls[2]); position=float(controls[3]); articulation=int(controls[6]); string=int(controls[9])\n"
-        b"expected={1:41.20344461410875,2:55.0,3:73.41619197935188,4:97.99885899543733}\n"
-        b"valid=string in expected and abs(frequency-expected[string])<1e-12 and force==0.75\n"
+        b"expected={1:(41.20344461410875,48.999429497718666),2:(55.0,),3:(73.41619197935188,),4:(97.99885899543733,)}\n"
+        b"valid=string in expected and any(abs(frequency-value)<1e-12 for value in expected[string]) and force==0.75\n"
         b"if not valid or speed!=0.8 or position!=0.12 or articulation!=5: raise SystemExit(9)\n"
         b"rate=int(re.search(r'^sr = ([0-9]+)$',text,re.MULTILINE).group(1))\n"
         b"if rate not in (44100,48000): raise SystemExit(8)\n"
-        b"duration=float(re.search(r'i \\\"Bass\\\" 0 ([0-9.eE+-]+)',text).group(1))\n"
+        b"event=re.search(r'i \\\"Bass\\\" ([0-9.eE+-]+) ([0-9.eE+-]+)',text)\n"
+        b"duration=float(event.group(1))+float(event.group(2))\n"
         b"frames=round(duration*rate)\n"
         b"frames=((frames+31)//32)*32\n"
-        b"prefix=[round(value*10000) for value in values]+[string*1000,round(frequency*10)]\n"
+        b"prefix=[round(value*10000) for value in values]+[string*1000,round(frequency*10),round(cutoffs[2])]\n"
         b"with wave.open(str(p),'wb') as w:\n"
         b" w.setnchannels(1); w.setsampwidth(3); w.setframerate(rate)\n"
         b" w.writeframes(b''.join(int(prefix[n] if n<len(prefix) else round(8000*math.sin(2*math.pi*frequency*n/rate))).to_bytes(3,'little',signed=True) for n in range(frames)))\n",
@@ -150,6 +175,80 @@ def fixture(root: Path) -> Path:
     path = root / "local config.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
+
+
+def add_joint_candidate_config(config: Path) -> None:
+    value = json.loads(config.read_text(encoding="utf-8"))
+    profile_path = (
+        Path(value["plugin_root"]) / "model" / "double_bass-v1.json"
+    )
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    changes = [
+        {
+            "after": 0.5, "before": 0.25, "maximum": 30.0,
+            "minimum": 0.01, "parameter": "string_e_loss_seconds",
+            "path": ["strings", 0, "loss_time_constant_seconds"],
+            "source_fit_result_sha256": "1" * 64, "unit": "seconds",
+        },
+        {
+            "after": 1.5, "before": 0.25, "maximum": 30.0,
+            "minimum": 0.01, "parameter": "string_a_loss_seconds",
+            "path": ["strings", 1, "loss_time_constant_seconds"],
+            "source_fit_result_sha256": "2" * 64, "unit": "seconds",
+        },
+        {
+            "after": 1500.0, "before": 7000.0, "maximum": 7086.471,
+            "minimum": 1000.0, "parameter": "string_d_bridge_cutoff_hz",
+            "path": ["strings", 2, "bridge_cutoff_hz"],
+            "source_fit_result_sha256": "3" * 64, "unit": "hertz",
+        },
+        {
+            "after": 3.0, "before": 0.25, "maximum": 3.0,
+            "minimum": 0.25, "parameter": "string_d_loss_seconds",
+            "path": ["strings", 2, "loss_time_constant_seconds"],
+            "source_fit_result_sha256": "3" * 64, "unit": "seconds",
+        },
+        {
+            "after": 0.5, "before": 0.25, "maximum": 30.0,
+            "minimum": 0.01, "parameter": "string_g_loss_seconds",
+            "path": ["strings", 3, "loss_time_constant_seconds"],
+            "source_fit_result_sha256": "4" * 64, "unit": "seconds",
+        },
+    ]
+    for row in changes:
+        target = profile
+        for part in row["path"][:-1]:
+            target = target[part]
+        target[row["path"][-1]] = row["after"]
+    candidate_source = (
+        json.dumps(profile, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    cases = {}
+    specs = (
+        ("e", 1, 48.999429497718666),
+        ("a", 2, 55.0),
+        ("d", 3, 73.41619197935188),
+        ("g", 4, 97.99885899543733),
+    )
+    for letter, string_index, frequency in specs:
+        for split in ("fit", "check"):
+            name = f"joint-{letter}-{split}"
+            cases[name] = {
+                "articulation": 5, "binding_id": name,
+                "binding_sha256": "0" * 64, "force": 0.75,
+                "frequency_hz": frequency, "joint": True,
+                "position": 0.12, "sample_rate": 48000, "speed": 0.8,
+                "split": split, "string": string_index,
+            }
+    value["joint_candidate"] = {
+        "adapter_id":
+            "hlolli_wg_double_bass-passive-joint-validation-v1",
+        "candidate_profile_sha256": hashlib.sha256(
+            candidate_source
+        ).hexdigest(),
+        "cases": cases, "changes": changes,
+    }
+    config.write_text(json.dumps(value), encoding="utf-8")
 
 
 def wave_file(path: Path, frames: int = 12000,
@@ -648,10 +747,16 @@ class DoubleBassAdapterTests(unittest.TestCase):
                     output.mkdir()
                     model = output / "model.wav"
                     request = root / f"request-{index}.json"
-                    request.write_text(json.dumps(render_request(
+                    request_value = render_request(
                         reference, model, case_id=case_id, split=split,
                         rate_hz=rate_hz,
-                    )), encoding="utf-8")
+                    )
+                    if case_id.endswith("-diagnostic-check"):
+                        request_value["inputs"][0]["binding_id"] = (
+                            case_id.removesuffix("-diagnostic-check")
+                        )
+                    request.write_text(
+                        json.dumps(request_value), encoding="utf-8")
                     completed = subprocess.run(
                         [str(renderer), "--hwa-experiment-job", str(request),
                          "--output-dir", str(output)],
@@ -803,6 +908,276 @@ class DoubleBassAdapterTests(unittest.TestCase):
                     for offset in range(0, 12, 3)
                 )
             self.assertEqual(first, (2300, 2100, 2200, 2400))
+
+    def test_v2_fit_job_changes_only_its_named_string_and_keeps_gate_high(
+            self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hwa bass v2 scalar ") as text:
+            root = Path(text)
+            config = fixture(root)
+            renderer = root / "renderer"
+            built = subprocess.run(
+                [str(PYTHON), "-I", str(BUILDER), "build",
+                 "--config", str(config), "--output", str(renderer)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={})
+            self.assertEqual(built.returncode, 0, built.stderr)
+            reference = root / "reference.wav"
+            wave_file(reference)
+            output = root / "job"
+            output.mkdir()
+            model = output / "model.wav"
+            request_value = render_request(reference, model)
+            request_value["parameters"] = [{
+                "id": "string_e_loss_seconds",
+                "unit": "seconds",
+                "value": 0.23,
+            }]
+            request = root / "request.json"
+            request.write_text(json.dumps(request_value), encoding="utf-8")
+            completed = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(request),
+                 "--output-dir", str(output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=output)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            with wave.open(str(model), "rb") as stream:
+                data = stream.readframes(4)
+            values = tuple(
+                int.from_bytes(data[offset:offset + 3], "little", signed=True)
+                for offset in range(0, 12, 3)
+            )
+            self.assertEqual(values, (2300, 2500, 2500, 2500))
+            csd = (root / "tools with spaces" / "last.csd").read_text(
+                encoding="utf-8")
+            self.assertIn("  kGate = 1\n", csd)
+            event = next(line for line in csd.splitlines()
+                         if line.startswith('i "Bass" '))
+            self.assertGreater(float(event.split()[2]), 0.0)
+
+            check_output = root / "check-job"
+            check_output.mkdir()
+            check_model = check_output / "model.wav"
+            check_value = render_request(
+                reference, check_model,
+                case_id=(
+                    "iowa2012-pizz-e-string-g1-ff-left-48k-soxr-"
+                    "diagnostic-check"
+                ),
+                split="check",
+            )
+            check_value["inputs"][0]["binding_id"] = (
+                "iowa2012-pizz-e-string-g1-ff-left-48k-soxr"
+            )
+            check_value["parameters"] = [{
+                "id": "string_e_loss_seconds",
+                "unit": "seconds",
+                "value": 0.23,
+            }]
+            check_request = root / "check-request.json"
+            check_request.write_text(
+                json.dumps(check_value), encoding="utf-8")
+            checked = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(check_request),
+                 "--output-dir", str(check_output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=check_output)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertTrue(check_model.is_file())
+            csd = (root / "tools with spaces" / "last.csd").read_text(
+                encoding="utf-8")
+            self.assertIn("  kGate = 1\n", csd)
+            event = next(line for line in csd.splitlines()
+                         if line.startswith('i "Bass" '))
+            self.assertGreater(float(event.split()[2]), 0.0)
+
+            wrong_output = root / "wrong-job"
+            wrong_output.mkdir()
+            wrong_model = wrong_output / "model.wav"
+            wrong_value = render_request(reference, wrong_model)
+            wrong_value["parameters"] = [{
+                "id": "string_a_loss_seconds",
+                "unit": "seconds",
+                "value": 0.23,
+            }]
+            wrong_request = root / "wrong-request.json"
+            wrong_request.write_text(json.dumps(wrong_value), encoding="utf-8")
+            rejected = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(wrong_request),
+                 "--output-dir", str(wrong_output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=wrong_output)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("wrong parameter set", rejected.stderr)
+            self.assertFalse(wrong_model.exists())
+
+    def test_d_frequency_job_changes_only_d_loss_and_bridge_cutoff(
+            self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hwa bass d frequency ") as text:
+            root = Path(text)
+            config = fixture(root)
+            renderer = root / "renderer"
+            built = subprocess.run(
+                [str(PYTHON), "-I", str(BUILDER), "build",
+                 "--config", str(config), "--output", str(renderer)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={})
+            self.assertEqual(built.returncode, 0, built.stderr)
+            reference = root / "reference.wav"
+            wave_file(reference)
+            output = root / "job"
+            output.mkdir()
+            model = output / "model.wav"
+            case_id = "iowa2012-pizz-d-ff-open-left-48k-soxr"
+            request_value = render_request(
+                reference, model, case_id=case_id, split="fit",
+            )
+            request_value["parameters"] = [
+                {
+                    "id": "string_d_loss_seconds",
+                    "unit": "seconds",
+                    "value": 2.0,
+                },
+                {
+                    "id": "string_d_bridge_cutoff_hz",
+                    "unit": "hertz",
+                    "value": 1500.0,
+                },
+            ]
+            request = root / "request.json"
+            request.write_text(json.dumps(request_value), encoding="utf-8")
+            completed = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(request),
+                 "--output-dir", str(output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=output)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            with wave.open(str(model), "rb") as stream:
+                data = stream.readframes(7)
+            values = tuple(
+                int.from_bytes(data[offset:offset + 3], "little", signed=True)
+                for offset in range(0, 21, 3)
+            )
+            self.assertEqual(
+                values, (2500, 2500, 20000, 2500, 3000, 734, 1500))
+            csd = (root / "tools with spaces" / "last.csd").read_text(
+                encoding="utf-8")
+            self.assertIn("  kGate = 1\n", csd)
+
+            for name, change in (
+                    ("wrong unit", lambda value: value["parameters"][1].update(
+                        unit="seconds")),
+                    ("wrong case", lambda value: value.update(
+                        case_id="iowa2012-pizz-a-ff-open-left-48k-soxr"))):
+                with self.subTest(name=name):
+                    rejected_output = root / name.replace(" ", "-")
+                    rejected_output.mkdir()
+                    rejected_model = rejected_output / "model.wav"
+                    rejected_value = render_request(
+                        reference, rejected_model,
+                        case_id=case_id, split="fit",
+                    )
+                    rejected_value["parameters"] = [dict(row)
+                                                     for row in request_value[
+                                                         "parameters"]]
+                    change(rejected_value)
+                    rejected_request = root / (name.replace(" ", "-") +
+                                               ".json")
+                    rejected_request.write_text(
+                        json.dumps(rejected_value), encoding="utf-8")
+                    rejected = subprocess.run(
+                        [str(renderer), "--hwa-experiment-job",
+                         str(rejected_request), "--output-dir",
+                         str(rejected_output)],
+                        check=False, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, text=True, env={},
+                        cwd=rejected_output)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(rejected_model.exists())
+
+    def test_joint_candidate_changes_only_the_five_declared_values(
+            self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hwa bass joint ") as text:
+            root = Path(text)
+            config = fixture(root)
+            reference = root / "reference.wav"
+            wave_file(reference)
+            add_joint_candidate_config(config)
+            value = json.loads(config.read_text(encoding="utf-8"))
+            for case in value["joint_candidate"]["cases"].values():
+                case["binding_sha256"] = file_hash(reference)
+            config.write_text(json.dumps(value), encoding="utf-8")
+            v1_renderer = root / "v1-renderer"
+            built = subprocess.run(
+                [str(PYTHON), "-I", str(BUILDER), "build",
+                 "--config", str(config), "--output", str(v1_renderer)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={})
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            value["joint_candidate"]["adapter_id"] = (
+                "hlolli_wg_double_bass-passive-joint-validation-v2"
+            )
+            config.write_text(json.dumps(value), encoding="utf-8")
+            renderer = root / "v2-renderer"
+            built = subprocess.run(
+                [str(PYTHON), "-I", str(BUILDER), "build",
+                 "--config", str(config), "--output", str(renderer)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={})
+            self.assertEqual(built.returncode, 0, built.stderr)
+
+            output = root / "joint-output"
+            output.mkdir()
+            model = output / "model.wav"
+            request_value = render_request(
+                reference, model, case_id="joint-e-fit", split="fit",
+            )
+            request_value["inputs"][0]["binding_id"] = "joint-e-fit"
+            request_value["parameters"] = [{
+                "id": "joint_candidate", "unit": "choice", "value": 1.0,
+            }]
+            request = root / "joint-request.json"
+            request.write_text(json.dumps(request_value), encoding="utf-8")
+            completed = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(request),
+                 "--output-dir", str(output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=output)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            with wave.open(str(model), "rb") as stream:
+                data = stream.readframes(7)
+            values = tuple(
+                int.from_bytes(data[offset:offset + 3], "little", signed=True)
+                for offset in range(0, 21, 3)
+            )
+            self.assertEqual(
+                values, (5000, 15000, 30000, 5000, 1000, 490, 1500)
+            )
+
+            rejected_output = root / "rejected-joint"
+            rejected_output.mkdir()
+            rejected_model = rejected_output / "model.wav"
+            rejected_value = render_request(
+                reference, rejected_model,
+                case_id="joint-e-fit", split="fit",
+            )
+            rejected_value["inputs"][0]["binding_id"] = "joint-e-fit"
+            rejected_value["parameters"] = [{
+                "id": "joint_candidate", "unit": "choice", "value": 0.5,
+            }]
+            rejected_request = root / "rejected-joint.json"
+            rejected_request.write_text(
+                json.dumps(rejected_value), encoding="utf-8"
+            )
+            rejected = subprocess.run(
+                [str(renderer), "--hwa-experiment-job",
+                 str(rejected_request), "--output-dir",
+                 str(rejected_output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={},
+                cwd=rejected_output)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(rejected_model.exists())
 
     def test_renderer_rejects_case_and_output_authority_changes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hwa bass authority ") as text:

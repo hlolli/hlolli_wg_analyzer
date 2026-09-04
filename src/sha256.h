@@ -25,4 +25,13 @@ int hwa_sha256_file(const char *path,
                     char *error,
                     size_t error_size);
 
+/* Read one bounded regular file and hash the exact returned bytes. */
+int hwa_sha256_read_file(const char *path,
+                         uint64_t max_bytes,
+                         unsigned char **data,
+                         size_t *size,
+                         char hex[65],
+                         char *error,
+                         size_t error_size);
+
 #endif

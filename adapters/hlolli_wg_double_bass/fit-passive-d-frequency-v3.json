@@ -1,0 +1,57 @@
+{
+  "adapter_id": "hlolli_wg_double_bass-passive-d2-frequency-v3",
+  "objectives": [
+    {
+      "case": "iowa2012-pizz-d-ff-open-left-48k-soxr",
+      "expected_hz": 73.41619197935188,
+      "id": "fit_d2_checked_note_harmonic_decay",
+      "kind": "checked-note-harmonic-decay",
+      "reference_binding": "iowa2012-pizz-d-ff-open-left-48k-soxr",
+      "reference_sha256": "9e44ff5e642cb9f3a2b6aafbc61d3d9011af6389279dc12685cc675edd1315f3",
+      "resource_id": "model.final",
+      "scale": 1.0,
+      "split": "fit",
+      "weight": 1.0
+    }
+  ],
+  "parameters": [
+    {
+      "baseline": 7086.471045764144,
+      "id": "string_d_bridge_cutoff_hz",
+      "maximum": 7086.471045764144,
+      "minimum": 1000.0,
+      "profile_paths": [
+        [
+          "strings",
+          2,
+          "bridge_cutoff_hz"
+        ]
+      ],
+      "unit": "hertz"
+    },
+    {
+      "baseline": 0.25,
+      "id": "string_d_loss_seconds",
+      "maximum": 3.0,
+      "minimum": 0.25,
+      "profile_paths": [
+        [
+          "strings",
+          2,
+          "loss_time_constant_seconds"
+        ]
+      ],
+      "unit": "seconds"
+    }
+  ],
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "selection": {
+    "check_weight": 0.0,
+    "max_candidate_harmonic_maximum_error_octaves": 1.5,
+    "max_candidate_harmonic_mean_error_octaves": 0.75,
+    "max_candidate_worst_harm": 0.0,
+    "max_check_loss_increase": 0.0,
+    "mode": "fit-only"
+  }
+}

@@ -1,3 +1,7 @@
+#if defined(_WIN32) && !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0600
+#endif
+
 #if !defined(_WIN32)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -22,6 +26,7 @@
 #include <direct.h>
 #include <io.h>
 #include <sys/stat.h>
+#include <windows.h>
 #define HWA_EVENT_MKDIR(path) _mkdir(path)
 #define HWA_EVENT_RMDIR(path) _rmdir(path)
 #define HWA_EVENT_UNLINK(path) _unlink(path)
@@ -91,6 +96,279 @@ static int hwa_event_join(char path[HWA_EVENT_PATH_LIMIT],
     if (path == NULL || directory == NULL || name == NULL) return -1;
     length = snprintf(path, HWA_EVENT_PATH_LIMIT, "%s/%s", directory, name);
     return length < 0 || (size_t)length >= HWA_EVENT_PATH_LIMIT ? -1 : 0;
+}
+
+static int hwa_event_output_component_valid(const char *name)
+{
+    return name != NULL && name[0] != '\0' && strcmp(name, ".") != 0 &&
+           strcmp(name, "..") != 0 && strchr(name, '/') == NULL &&
+           strchr(name, '\\') == NULL;
+}
+
+#if defined(_WIN32)
+static void hwa_event_windows_separators(char *path)
+{
+    size_t index;
+    for (index = 0U; path[index] != '\0'; ++index)
+        if (path[index] == '/') path[index] = '\\';
+}
+
+typedef struct HWAEventDirectoryIdentity {
+    DWORD volume;
+    DWORD file_high;
+    DWORD file_low;
+} HWAEventDirectoryIdentity;
+
+static int hwa_event_directory_identity(
+    const char *path,
+    HWAEventDirectoryIdentity *identity,
+    char *resolved)
+{
+    BY_HANDLE_FILE_INFORMATION information;
+    HANDLE handle;
+    DWORD length = 0U;
+    int result = -1;
+    if (path == NULL || path[0] == '\0' || identity == NULL) return -1;
+    handle = CreateFileA(
+        path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    if (!GetFileInformationByHandle(handle, &information) ||
+        (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U)
+        goto cleanup;
+    if (resolved != NULL) {
+        length = GetFinalPathNameByHandleA(
+            handle, resolved, (DWORD)HWA_EVENT_PATH_LIMIT,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (length == 0U || length >= (DWORD)HWA_EVENT_PATH_LIMIT)
+            goto cleanup;
+        hwa_event_windows_separators(resolved);
+    }
+    identity->volume = information.dwVolumeSerialNumber;
+    identity->file_high = information.nFileIndexHigh;
+    identity->file_low = information.nFileIndexLow;
+    result = 0;
+cleanup:
+    (void)CloseHandle(handle);
+    return result;
+}
+
+static int hwa_event_directory_identity_equal(
+    const HWAEventDirectoryIdentity *left,
+    const HWAEventDirectoryIdentity *right)
+{
+    return left->volume == right->volume &&
+           left->file_high == right->file_high &&
+           left->file_low == right->file_low;
+}
+
+static size_t hwa_event_windows_root_size(const char *path)
+{
+    const char *server_end;
+    const char *share_end;
+    size_t size = strlen(path);
+    if (size >= 7U && strncmp(path, "\\\\?\\", 4U) == 0 &&
+        path[5] == ':' && path[6] == '\\')
+        return 7U;
+    if (size >= 8U && _strnicmp(path, "\\\\?\\UNC\\", 8U) == 0) {
+        server_end = strchr(path + 8U, '\\');
+        if (server_end == NULL || server_end[1] == '\0') return 0U;
+        share_end = strchr(server_end + 1U, '\\');
+        return share_end == NULL ? size : (size_t)(share_end - path);
+    }
+    if (size >= 3U && path[1] == ':' && path[2] == '\\') return 3U;
+    if (size >= 5U && path[0] == '\\' && path[1] == '\\') {
+        server_end = strchr(path + 2U, '\\');
+        if (server_end == NULL || server_end[1] == '\0') return 0U;
+        share_end = strchr(server_end + 1U, '\\');
+        return share_end == NULL ? size : (size_t)(share_end - path);
+    }
+    return 0U;
+}
+
+/* Shorten a final DOS path to its parent without crossing its volume root. */
+static int hwa_event_windows_parent(char path[HWA_EVENT_PATH_LIMIT])
+{
+    char *slash;
+    size_t root_size = hwa_event_windows_root_size(path);
+    size_t size = strlen(path);
+    size_t slash_offset;
+    if (root_size == 0U) return -1;
+    while (size > root_size && path[size - 1U] == '\\')
+        path[--size] = '\0';
+    if (size <= root_size) return 0;
+    slash = strrchr(path, '\\');
+    if (slash == NULL) return -1;
+    slash_offset = (size_t)(slash - path);
+    size = slash_offset <= root_size ? root_size : slash_offset;
+    path[size] = '\0';
+    return 1;
+}
+
+static int hwa_event_output_start_directory(
+    const char *path, char resolved[HWA_EVENT_PATH_LIMIT])
+{
+    char lexical[HWA_EVENT_PATH_LIMIT];
+    char *slash;
+    const char *name;
+    HWAEventDirectoryIdentity ignored;
+    size_t root_size;
+    size_t size;
+    size_t slash_offset;
+    if (path == NULL ||
+        _fullpath(lexical, path, HWA_EVENT_PATH_LIMIT) == NULL)
+        return -1;
+    hwa_event_windows_separators(lexical);
+    root_size = hwa_event_windows_root_size(lexical);
+    size = strlen(lexical);
+    if (root_size == 0U) return -1;
+    while (size > root_size && lexical[size - 1U] == '\\')
+        lexical[--size] = '\0';
+    slash = strrchr(lexical, '\\');
+    name = slash == NULL ? lexical : slash + 1U;
+    if (slash == NULL || !hwa_event_output_component_valid(name))
+        return -1;
+    if (hwa_event_directory_identity(lexical, &ignored, resolved) == 0)
+        return 0;
+    slash_offset = (size_t)(slash - lexical);
+    if (slash_offset < root_size - 1U) return -1;
+    lexical[slash_offset < root_size ? root_size : slash_offset] = '\0';
+    return hwa_event_directory_identity(lexical, &ignored, resolved);
+}
+
+#else
+
+typedef struct HWAEventDirectoryIdentity {
+    dev_t device;
+    ino_t file;
+} HWAEventDirectoryIdentity;
+
+static int hwa_event_directory_identity(
+    const char *path,
+    HWAEventDirectoryIdentity *identity,
+    char *resolved)
+{
+    struct stat status;
+    if (path == NULL || path[0] == '\0' || identity == NULL ||
+        stat(path, &status) != 0 || !S_ISDIR(status.st_mode))
+        return -1;
+    if (resolved != NULL && realpath(path, resolved) == NULL) return -1;
+    identity->device = status.st_dev;
+    identity->file = status.st_ino;
+    return 0;
+}
+
+static int hwa_event_directory_identity_equal(
+    const HWAEventDirectoryIdentity *left,
+    const HWAEventDirectoryIdentity *right)
+{
+    return left->device == right->device && left->file == right->file;
+}
+
+static int hwa_event_posix_parent(char path[HWA_EVENT_PATH_LIMIT])
+{
+    char *slash;
+    size_t size = strlen(path);
+    while (size > 1U && path[size - 1U] == '/') path[--size] = '\0';
+    if (size == 1U && path[0] == '/') return 0;
+    slash = strrchr(path, '/');
+    if (slash == NULL) return -1;
+    if (slash == path) {
+        path[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return 1;
+}
+
+static int hwa_event_output_start_directory(
+    const char *path, char resolved[HWA_EVENT_PATH_LIMIT])
+{
+    char lexical[HWA_EVENT_PATH_LIMIT];
+    char *slash;
+    const char *name;
+    char parent[HWA_EVENT_PATH_LIMIT];
+    HWAEventDirectoryIdentity ignored;
+    size_t parent_size;
+    size_t size;
+    int written;
+    if (path == NULL || path[0] == '\0') return -1;
+    written = snprintf(lexical, sizeof(lexical), "%s", path);
+    if (written < 0 || (size_t)written >= sizeof(lexical)) return -1;
+    size = (size_t)written;
+    while (size > 1U && lexical[size - 1U] == '/')
+        lexical[--size] = '\0';
+    slash = strrchr(lexical, '/');
+    name = slash == NULL ? lexical : slash + 1U;
+    if (!hwa_event_output_component_valid(name)) return -1;
+    if (hwa_event_directory_identity(lexical, &ignored, resolved) == 0)
+        return 0;
+    if (slash == NULL) {
+        memcpy(parent, ".", 2U);
+    } else {
+        parent_size = slash == lexical ? 1U : (size_t)(slash - lexical);
+        if (parent_size >= sizeof(parent)) return -1;
+        memcpy(parent, lexical, parent_size);
+        parent[parent_size] = '\0';
+    }
+    return hwa_event_directory_identity(parent, &ignored, resolved);
+}
+#endif
+
+/* Return one when output is the source directory or lies below it. */
+static int hwa_event_output_inside_source(const char *output,
+                                          const char *source)
+{
+    HWAEventDirectoryIdentity current_identity;
+    HWAEventDirectoryIdentity source_identity;
+    char current[HWA_EVENT_PATH_LIMIT];
+    int parent_result;
+    if (source == NULL || source[0] == '\0') return 0;
+    if (hwa_event_directory_identity(source, &source_identity, NULL) != 0 ||
+        hwa_event_output_start_directory(output, current) != 0)
+        return -1;
+    for (;;) {
+        if (hwa_event_directory_identity(
+                current, &current_identity, NULL) != 0)
+            return -1;
+        if (hwa_event_directory_identity_equal(
+                &current_identity, &source_identity))
+            return 1;
+#if defined(_WIN32)
+        parent_result = hwa_event_windows_parent(current);
+#else
+        parent_result = hwa_event_posix_parent(current);
+#endif
+        if (parent_result <= 0) return parent_result;
+    }
+}
+
+int hwa_event_bundle_output_path_validate(
+    const char *output_directory,
+    const char *source_directory,
+    char *error,
+    size_t error_size)
+{
+    int inside;
+    if (error != NULL && error_size != 0U) error[0] = '\0';
+    if (output_directory == NULL || output_directory[0] == '\0' ||
+        source_directory == NULL || source_directory[0] == '\0') {
+        hwa_set_error(error, error_size,
+                      "invalid event bundle source or output path");
+        return -1;
+    }
+    inside = hwa_event_output_inside_source(
+        output_directory, source_directory);
+    if (inside != 0) {
+        hwa_set_error(
+            error, error_size,
+            inside > 0
+                ? "event bundle output is inside its source bundle"
+                : "cannot resolve event bundle source and output paths");
+        return -1;
+    }
+    return 0;
 }
 
 static int hwa_event_relative_path(const char *path, const char *prefix)
@@ -4238,11 +4516,11 @@ static int hwa_event_work_add_string(uint64_t *total,
                : hwa_event_work_add(total, strlen(text) + 1U, 1U, maximum);
 }
 
-static int hwa_event_bundle_measure_work(const HWAEventBundle *bundle,
-                                         const HWAEventBundleLimits *limits,
-                                         uint64_t *result,
-                                         char *error,
-                                         size_t error_size)
+int hwa_event_bundle_measure_work(const HWAEventBundle *bundle,
+                                  const HWAEventBundleLimits *limits,
+                                  uint64_t *result,
+                                  char *error,
+                                  size_t error_size)
 {
     uint64_t total = 0U;
     size_t index;
@@ -4484,6 +4762,12 @@ static int hwa_event_bundle_write_common(
     }
     if (hwa_event_bundle_validate(bundle, limits, error, error_size) != 0)
         return -1;
+    if (bundle->directory != NULL && bundle->directory[0] != '\0') {
+        if (hwa_event_bundle_output_path_validate(
+                output_directory, bundle->directory,
+                error, error_size) != 0)
+            return -1;
+    }
     if (HWA_EVENT_MKDIR(output_directory) != 0) {
         hwa_set_error(error, error_size,
                       errno == EEXIST ? "event bundle output already exists"

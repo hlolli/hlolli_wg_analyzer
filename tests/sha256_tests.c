@@ -180,6 +180,8 @@ static void test_file_hash(const char *path)
         "b00361a396177a9cb410ff61f20015ad";
     char hex[65];
     char error[256];
+    unsigned char *bytes = NULL;
+    size_t byte_count = 0U;
 
     CHECK(write_bytes(path, payload, sizeof(payload) - 1U),
           "could not write SHA file fixture");
@@ -192,6 +194,20 @@ static void test_file_hash(const char *path)
     CHECK(hwa_sha256_file("-", 3U, hex, error, sizeof(error)) != 0 &&
               strstr(error, "named input") != NULL,
           "standard input passed named-file hashing: %s", error);
+    CHECK(hwa_sha256_read_file(
+              path, 3U, &bytes, &byte_count, hex,
+              error, sizeof(error)) == 0 &&
+              byte_count == 3U && memcmp(bytes, payload, 3U) == 0 &&
+              strcmp(hex, expected) == 0,
+          "bounded file read and hash failed: %s", error);
+    free(bytes);
+    bytes = (unsigned char *)1;
+    byte_count = 99U;
+    CHECK(hwa_sha256_read_file(
+              path, 2U, &bytes, &byte_count, hex,
+              error, sizeof(error)) != 0 &&
+              bytes == NULL && byte_count == 0U,
+          "bounded file read ignored its cap: %s", error);
 }
 
 #if !defined(_WIN32)

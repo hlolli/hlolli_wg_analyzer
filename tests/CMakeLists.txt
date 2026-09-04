@@ -64,6 +64,289 @@ add_test(
 set_tests_properties(unit.inference-provider PROPERTIES TIMEOUT 30)
 
 add_executable(
+  hlolli_wg_analyzer_inference_clock_tests
+  inference_clock_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_inference_clock_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_inference_clock_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_inference_clock_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_inference_clock_tests)
+add_test(
+  NAME unit.inference-clock
+  COMMAND hlolli_wg_analyzer_inference_clock_tests)
+set_tests_properties(unit.inference-clock PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_inference_provenance_tests
+  inference_provenance_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_inference_provenance_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_inference_provenance_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_inference_provenance_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_inference_provenance_tests)
+add_test(
+  NAME unit.inference-provenance
+  COMMAND hlolli_wg_analyzer_inference_provenance_tests)
+set_tests_properties(unit.inference-provenance PROPERTIES TIMEOUT 30)
+
+add_test(
+  NAME cli.inference-capabilities-text
+  COMMAND hlolli_wg_analyzer inference-capabilities)
+set_tests_properties(
+  cli.inference-capabilities-text PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "Instrument stem task: HTDemucs six-stem adapter (available|not available)"
+  TIMEOUT 30)
+
+add_test(
+  NAME cli.inference-capabilities-json
+  COMMAND hlolli_wg_analyzer --json inference-capabilities)
+if(HLOLLI_WG_ANALYZER_ENABLE_ONNX)
+  set(HWA_STEM_CAPABILITY_AVAILABLE "true")
+else()
+  set(HWA_STEM_CAPABILITY_AVAILABLE "false")
+endif()
+set_tests_properties(
+  cli.inference-capabilities-json PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"schema\":\"hwa-inference-capabilities\".*\"contract\":\"org.hlolli.polyphonic-note-events-v1\".*\"contract\":\"org.hlolli.instrument-stems-v1\".*\"available\":${HWA_STEM_CAPABILITY_AVAILABLE}"
+  TIMEOUT 30)
+unset(HWA_STEM_CAPABILITY_AVAILABLE)
+
+add_test(
+  NAME cli.inference-capabilities-reject-analysis-option
+  COMMAND hlolli_wg_analyzer --frame-size 256 inference-capabilities)
+set_tests_properties(
+  cli.inference-capabilities-reject-analysis-option PROPERTIES
+  WILL_FAIL TRUE
+  TIMEOUT 30)
+
+if(NOT HLOLLI_WG_ANALYZER_ENABLE_ONNX)
+  add_test(
+    NAME cli.infer-note-events-requires-onnx
+    COMMAND hlolli_wg_analyzer infer-note-events missing.wav
+      --model missing.onnx --output missing.hwa-events)
+  set_tests_properties(
+    cli.infer-note-events-requires-onnx PROPERTIES
+    WILL_FAIL TRUE
+    TIMEOUT 30)
+  add_test(
+    NAME cli.separate-instruments-requires-onnx
+    COMMAND hlolli_wg_analyzer separate-instruments missing.wav
+      --model missing.onnx --output missing.hwa-events)
+  set_tests_properties(
+    cli.separate-instruments-requires-onnx PROPERTIES
+    WILL_FAIL TRUE
+    TIMEOUT 30)
+  add_test(
+    NAME cli.infer-stem-note-events-requires-onnx
+    COMMAND hlolli_wg_analyzer infer-stem-note-events missing.hwa-events
+      --model missing.onnx --output derived.hwa-events)
+  set_tests_properties(
+    cli.infer-stem-note-events-requires-onnx PROPERTIES
+    WILL_FAIL TRUE
+    TIMEOUT 30)
+endif()
+
+add_executable(
+  hlolli_wg_analyzer_inference_onnx_tests
+  inference_onnx_tests.c
+  ../src/inference_onnx.c)
+target_include_directories(
+  hlolli_wg_analyzer_inference_onnx_tests PRIVATE . ../src)
+target_compile_definitions(
+  hlolli_wg_analyzer_inference_onnx_tests PRIVATE HWA_HAVE_ONNX_RUNTIME=1)
+target_compile_features(
+  hlolli_wg_analyzer_inference_onnx_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_inference_onnx_tests)
+add_test(
+  NAME unit.inference-onnx-capability
+  COMMAND hlolli_wg_analyzer_inference_onnx_tests)
+set_tests_properties(unit.inference-onnx-capability PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_basic_pitch_tests
+  basic_pitch_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_basic_pitch_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_basic_pitch_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_basic_pitch_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_basic_pitch_tests)
+add_test(
+  NAME unit.basic-pitch-decoder
+  COMMAND hlolli_wg_analyzer_basic_pitch_tests)
+set_tests_properties(unit.basic-pitch-decoder PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_basic_pitch_provider_tests
+  basic_pitch_provider_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_basic_pitch_provider_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_basic_pitch_provider_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_basic_pitch_provider_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_basic_pitch_provider_tests)
+add_test(
+  NAME unit.basic-pitch-provider
+  COMMAND hlolli_wg_analyzer_basic_pitch_provider_tests)
+set_tests_properties(unit.basic-pitch-provider PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_basic_pitch_audio_provider_tests
+  basic_pitch_audio_provider_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_basic_pitch_audio_provider_tests
+  PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_basic_pitch_audio_provider_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_basic_pitch_audio_provider_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_basic_pitch_audio_provider_tests)
+add_test(
+  NAME unit.basic-pitch-audio-provider
+  COMMAND hlolli_wg_analyzer_basic_pitch_audio_provider_tests)
+set_tests_properties(unit.basic-pitch-audio-provider PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_stem_note_derivation_tests
+  stem_note_derivation_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_stem_note_derivation_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_stem_note_derivation_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_stem_note_derivation_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_stem_note_derivation_tests)
+add_test(
+  NAME unit.stem-note-derivation
+  COMMAND hlolli_wg_analyzer_stem_note_derivation_tests)
+set_tests_properties(unit.stem-note-derivation PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_instrument_stem_provider_tests
+  instrument_stem_provider_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_instrument_stem_provider_tests
+  PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_instrument_stem_provider_tests
+  PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_instrument_stem_provider_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_instrument_stem_provider_tests)
+add_test(
+  NAME unit.instrument-stem-provider
+  COMMAND hlolli_wg_analyzer_instrument_stem_provider_tests)
+set_tests_properties(unit.instrument-stem-provider PROPERTIES TIMEOUT 30)
+
+add_executable(
+  hlolli_wg_analyzer_htdemucs_tests
+  htdemucs_tests.c)
+target_include_directories(
+  hlolli_wg_analyzer_htdemucs_tests PRIVATE ../src ../include)
+target_link_libraries(
+  hlolli_wg_analyzer_htdemucs_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(
+  hlolli_wg_analyzer_htdemucs_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_htdemucs_tests)
+add_test(
+  NAME unit.htdemucs-adapter
+  COMMAND hlolli_wg_analyzer_htdemucs_tests)
+set_tests_properties(unit.htdemucs-adapter PROPERTIES TIMEOUT 60)
+
+if(HLOLLI_WG_ANALYZER_BASIC_PITCH_TEST_MODEL)
+  add_executable(
+    hlolli_wg_analyzer_basic_pitch_onnx_cli_tests
+    basic_pitch_onnx_cli_tests.c)
+  target_include_directories(
+    hlolli_wg_analyzer_basic_pitch_onnx_cli_tests PRIVATE ../src ../include)
+  target_link_libraries(
+    hlolli_wg_analyzer_basic_pitch_onnx_cli_tests
+    PRIVATE hlolli_wg_analyzer_core)
+  target_compile_definitions(
+    hlolli_wg_analyzer_basic_pitch_onnx_cli_tests PRIVATE
+    "HWA_BASIC_PITCH_TEST_MODEL_SHA256=\"${HWA_BASIC_PITCH_REFERENCE_MODEL_SHA256}\"")
+  target_compile_features(
+    hlolli_wg_analyzer_basic_pitch_onnx_cli_tests PRIVATE c_std_11)
+  hwa_set_warnings(hlolli_wg_analyzer_basic_pitch_onnx_cli_tests)
+  add_test(
+    NAME integration.basic-pitch-onnx
+    COMMAND hlolli_wg_analyzer_basic_pitch_onnx_cli_tests
+            $<TARGET_FILE:hlolli_wg_analyzer>
+            "${HWA_BASIC_PITCH_TEST_MODEL_PATH}")
+  set_tests_properties(
+    integration.basic-pitch-onnx PROPERTIES
+    LABELS "integration;onnx"
+    REQUIRED_FILES "${HWA_BASIC_PITCH_TEST_MODEL_PATH}"
+    RUN_SERIAL TRUE
+    TIMEOUT 180)
+
+  add_executable(
+    hlolli_wg_analyzer_stem_note_onnx_cli_tests
+    stem_note_onnx_cli_tests.c)
+  target_include_directories(
+    hlolli_wg_analyzer_stem_note_onnx_cli_tests PRIVATE ../src ../include)
+  target_link_libraries(
+    hlolli_wg_analyzer_stem_note_onnx_cli_tests
+    PRIVATE hlolli_wg_analyzer_core)
+  target_compile_definitions(
+    hlolli_wg_analyzer_stem_note_onnx_cli_tests PRIVATE
+    "HWA_BASIC_PITCH_TEST_MODEL_SHA256=\"${HWA_BASIC_PITCH_REFERENCE_MODEL_SHA256}\"")
+  target_compile_features(
+    hlolli_wg_analyzer_stem_note_onnx_cli_tests PRIVATE c_std_11)
+  hwa_set_warnings(hlolli_wg_analyzer_stem_note_onnx_cli_tests)
+  add_test(
+    NAME integration.stem-note-onnx
+    COMMAND hlolli_wg_analyzer_stem_note_onnx_cli_tests
+            $<TARGET_FILE:hlolli_wg_analyzer>
+            "${HWA_BASIC_PITCH_TEST_MODEL_PATH}")
+  set_tests_properties(
+    integration.stem-note-onnx PROPERTIES
+    LABELS "integration;onnx"
+    REQUIRED_FILES "${HWA_BASIC_PITCH_TEST_MODEL_PATH}"
+    RUN_SERIAL TRUE
+    TIMEOUT 240)
+endif()
+
+if(HLOLLI_WG_ANALYZER_HTDEMUCS_TEST_MODEL)
+  add_executable(
+    hlolli_wg_analyzer_htdemucs_onnx_cli_tests
+    htdemucs_onnx_cli_tests.c)
+  target_include_directories(
+    hlolli_wg_analyzer_htdemucs_onnx_cli_tests PRIVATE ../src ../include)
+  target_link_libraries(
+    hlolli_wg_analyzer_htdemucs_onnx_cli_tests
+    PRIVATE hlolli_wg_analyzer_core)
+  target_compile_definitions(
+    hlolli_wg_analyzer_htdemucs_onnx_cli_tests PRIVATE
+    "HWA_HTDEMUCS_TEST_MODEL_SHA256=\"${HWA_HTDEMUCS_REFERENCE_MODEL_SHA256}\"")
+  target_compile_features(
+    hlolli_wg_analyzer_htdemucs_onnx_cli_tests PRIVATE c_std_11)
+  hwa_set_warnings(hlolli_wg_analyzer_htdemucs_onnx_cli_tests)
+  add_test(
+    NAME integration.htdemucs-onnx
+    COMMAND hlolli_wg_analyzer_htdemucs_onnx_cli_tests
+            $<TARGET_FILE:hlolli_wg_analyzer>
+            "${HWA_HTDEMUCS_TEST_MODEL_PATH}")
+  set_tests_properties(
+    integration.htdemucs-onnx PROPERTIES
+    LABELS "integration;onnx"
+    REQUIRED_FILES "${HWA_HTDEMUCS_TEST_MODEL_PATH}"
+    RUN_SERIAL TRUE
+    TIMEOUT 300)
+endif()
+
+add_executable(
   hlolli_wg_analyzer_event_analysis_tests
   event_analysis_tests.c)
 target_include_directories(
@@ -1194,6 +1477,15 @@ if(HWA_PYTHON3_EXECUTABLE)
     set_tests_properties(unit.double-bass-manifest PROPERTIES TIMEOUT 60)
 
     add_test(
+      NAME unit.double-bass-recording-session
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_double_bass_recording_session.py)
+    set_tests_properties(
+      unit.double-bass-recording-session PROPERTIES TIMEOUT 60)
+
+    add_test(
       NAME unit.double-bass-adapter
       COMMAND
         ${HWA_PYTHON3_EXECUTABLE}
@@ -1201,5 +1493,14 @@ if(HWA_PYTHON3_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_double_bass_adapter.py
         --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
     set_tests_properties(unit.double-bass-adapter PROPERTIES TIMEOUT 120)
+
+    add_test(
+      NAME unit.double-bass-physical-dynamics
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_double_bass_physical_dynamics.py)
+    set_tests_properties(
+      unit.double-bass-physical-dynamics PROPERTIES TIMEOUT 60)
   endif()
 endif()

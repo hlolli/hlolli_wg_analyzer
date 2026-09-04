@@ -233,16 +233,19 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
         if name in objective_ids:
             raise FitError(f"duplicate objective: {name}")
         objective_ids.add(name)
-        if version == 2:
-            exact_keys(row, {
-                "id", "kind", "case", "reference_binding", "resource_id",
-                "split", "weight", "scale",
-            }, f"objectives[{index}]")
         kind = row.get("kind")
         if kind not in ("experiment-gap", "body-envelope", "passive-decay",
                         "passive-decay-shape", "harmonic-decay",
                         "checked-note-harmonic-decay"):
             raise FitError(f"objectives[{index}] has an unknown kind")
+        if version == 2:
+            objective_keys = {
+                "id", "kind", "case", "reference_binding", "resource_id",
+                "split", "weight", "scale",
+            }
+            if kind == "checked-note-harmonic-decay":
+                objective_keys.update({"expected_hz", "reference_sha256"})
+            exact_keys(row, objective_keys, f"objectives[{index}]")
         valid_splits = ("fit", "check", "audit") if version == 2 else (
             "fit", "check"
         )
@@ -401,12 +404,22 @@ def validate_verify_candidate_manifest(
     objectives = manifest["objectives"]
     selection = manifest["selection"]
     candidate = manifest.get("candidate")
-    exact_keys(selection, {
+    selection_keys = {
         "mode", "score_weights", "max_score_increase",
         "max_candidate_worst_harm", "max_expected_loss_increase", "limits",
         "minimum_candidate_t60_ratio", "maximum_candidate_t60_ratio",
         "minimum_candidate_support_ratio",
-    }, "selection")
+    }
+    has_checked_harmonic = any(
+        row["kind"] == "checked-note-harmonic-decay" for row in objectives
+    )
+    if has_checked_harmonic:
+        selection_keys.update({
+            "max_candidate_harmonic_mean_error_octaves",
+            "max_candidate_harmonic_maximum_error_octaves",
+            "minimum_candidate_harmonic_count",
+        })
+    exact_keys(selection, selection_keys, "selection")
     if selection.get("mode") != "verify-candidate":
         raise FitError("selection.mode must be verify-candidate")
     score_weights = selection.get("score_weights")
@@ -431,6 +444,23 @@ def validate_verify_candidate_manifest(
         raise FitError("selection candidate T60 ratio range is empty")
     positive(selection.get("minimum_candidate_support_ratio"),
              "selection.minimum_candidate_support_ratio")
+    if has_checked_harmonic:
+        nonnegative(
+            selection.get("max_candidate_harmonic_mean_error_octaves"),
+            "selection.max_candidate_harmonic_mean_error_octaves",
+        )
+        nonnegative(
+            selection.get("max_candidate_harmonic_maximum_error_octaves"),
+            "selection.max_candidate_harmonic_maximum_error_octaves",
+        )
+        minimum_harmonics = selection.get("minimum_candidate_harmonic_count")
+        if (type(minimum_harmonics) is not int or
+                type(minimum_harmonics) is bool or
+                minimum_harmonics < MIN_HARMONIC_VALID_BANDS or
+                minimum_harmonics > MAX_HARMONIC_BANDS):
+            raise FitError(
+                "selection.minimum_candidate_harmonic_count is out of range"
+            )
     limits = selection.get("limits")
     if type(limits) is not list or len(limits) != 3:
         raise FitError("selection.limits must name fit, check, and audit")
@@ -455,10 +485,12 @@ def validate_verify_candidate_manifest(
     objective_splits = {row["split"] for row in objectives}
     if objective_splits != {"fit", "check", "audit"}:
         raise FitError("verify-candidate needs fit, check, and audit objectives")
-    if any(row["kind"] not in ("passive-decay", "passive-decay-shape")
-           for row in objectives):
+    if any(row["kind"] not in (
+            "passive-decay", "passive-decay-shape",
+            "checked-note-harmonic-decay",
+    ) for row in objectives):
         raise FitError(
-            "verify-candidate only supports passive-decay objectives"
+            "verify-candidate only supports checked passive-decay objectives"
         )
 
     if type(candidate) is not dict:
@@ -501,36 +533,57 @@ def validate_verify_candidate_manifest(
         raise FitError("candidate expected loss has an unknown objective")
 
     changes = candidate.get("profile_changes")
-    expected_changes = [
-        ("loss_time_constant_c_seconds",
+    cello_changes = {
+        4: [
+            ("loss_time_constant_c_seconds",
+             ["strings", 0, "loss_time_constant_seconds"]),
+            ("loss_time_constant_g_seconds",
+             ["strings", 1, "loss_time_constant_seconds"]),
+            ("loss_time_constant_d_seconds",
+             ["strings", 2, "loss_time_constant_seconds"]),
+            ("loss_time_constant_a_seconds",
+             ["strings", 3, "loss_time_constant_seconds"]),
+        ],
+        7: [
+            ("loss_time_constant_c_seconds",
+             ["strings", 0, "loss_time_constant_seconds"]),
+            ("bridge_cutoff_g_hz", ["strings", 1, "bridge_cutoff_hz"]),
+            ("bridge_loss_peak_bandwidth_g_hz",
+             ["strings", 1, "bridge_loss_peak_bandwidth_hz"]),
+            ("bridge_loss_peak_g_fraction",
+             ["strings", 1, "bridge_loss_peak_fraction"]),
+            ("loss_time_constant_g_seconds",
+             ["strings", 1, "loss_time_constant_seconds"]),
+            ("loss_time_constant_d_seconds",
+             ["strings", 2, "loss_time_constant_seconds"]),
+            ("loss_time_constant_a_seconds",
+             ["strings", 3, "loss_time_constant_seconds"]),
+        ],
+    }
+    double_bass_changes = [
+        ("string_e_loss_seconds",
          ["strings", 0, "loss_time_constant_seconds"]),
-        ("bridge_cutoff_g_hz", ["strings", 1, "bridge_cutoff_hz"]),
-        ("bridge_loss_peak_bandwidth_g_hz",
-         ["strings", 1, "bridge_loss_peak_bandwidth_hz"]),
-        ("bridge_loss_peak_g_fraction",
-         ["strings", 1, "bridge_loss_peak_fraction"]),
-        ("loss_time_constant_g_seconds",
+        ("string_a_loss_seconds",
          ["strings", 1, "loss_time_constant_seconds"]),
-        ("loss_time_constant_d_seconds",
+        ("string_d_bridge_cutoff_hz", ["strings", 2, "bridge_cutoff_hz"]),
+        ("string_d_loss_seconds",
          ["strings", 2, "loss_time_constant_seconds"]),
-        ("loss_time_constant_a_seconds",
+        ("string_g_loss_seconds",
          ["strings", 3, "loss_time_constant_seconds"]),
     ]
-    legacy_changes = [
-        ("loss_time_constant_c_seconds",
-         ["strings", 0, "loss_time_constant_seconds"]),
-        ("loss_time_constant_g_seconds",
-         ["strings", 1, "loss_time_constant_seconds"]),
-        ("loss_time_constant_d_seconds",
-         ["strings", 2, "loss_time_constant_seconds"]),
-        ("loss_time_constant_a_seconds",
-         ["strings", 3, "loss_time_constant_seconds"]),
-    ]
-    if type(changes) is not list or len(changes) not in (4, 7):
+    if manifest["adapter_id"] in {
+            "hlolli_wg_double_bass-passive-joint-validation-v1",
+            "hlolli_wg_double_bass-passive-joint-validation-v2",
+    }:
+        expected_rows = double_bass_changes
+    elif type(changes) is list:
+        expected_rows = cello_changes.get(len(changes), [])
+    else:
+        expected_rows = []
+    if type(changes) is not list or len(changes) != len(expected_rows):
         raise FitError(
             "candidate.profile_changes must contain one checked change set"
         )
-    expected_rows = legacy_changes if len(changes) == 4 else expected_changes
     seen_paths: set[str] = set()
     seen_change_parameters: set[str] = set()
     sources_by_string: dict[int, str] = {}
@@ -931,11 +984,14 @@ def checked_note_report(
 
 def checked_note_harmonic_decay(
         analyzer: Path, reference: Path, model: Path, expected_hz: float,
-        reference_sha256: str, model_sha256: str) -> dict[str, Any]:
+        analyzer_sha256: str, reference_sha256: str,
+        model_sha256: str) -> dict[str, Any]:
     """Score native checked pitch and per-harmonic T60 evidence."""
     analyzer = regular(analyzer, "analyzer")
     reference = regular(reference, "checked harmonic reference")
     model = regular(model, "checked harmonic model")
+    if sha256(analyzer) != analyzer_sha256:
+        raise FitError("checked harmonic analyzer hash changed")
     if sha256(reference) != reference_sha256:
         raise FitError("checked harmonic reference hash changed")
     if sha256(model) != model_sha256:
@@ -1016,6 +1072,8 @@ def checked_note_harmonic_decay(
         median_bias = 0.0
         mean_error = INVALID_HARMONIC_LOSS_OCTAVES
         maximum_error = INVALID_HARMONIC_LOSS_OCTAVES
+    if sha256(analyzer) != analyzer_sha256:
+        raise FitError("checked harmonic analyzer changed during analysis")
     if (sha256(reference) != reference_sha256 or
             sha256(model) != model_sha256):
         raise FitError("checked harmonic-decay audio changed during analysis")
@@ -1724,40 +1782,92 @@ def candidate_gate_data(
         increase = candidate_loss - base_loss
         maximum = float(limits[split]["max_objective_loss_increase"])
         absolute_maximum = float(limits[split]["max_candidate_loss"])
-        reference_t60 = positive(
-            candidate_evidence[name]["reference_t60_seconds"],
-            "candidate reference T60")
-        model_t60 = positive(
-            candidate_evidence[name]["model_t60_seconds"],
-            "candidate model T60")
-        reference_support = positive(
-            candidate_evidence[name]["reference_support_seconds"],
-            "candidate reference support")
-        model_support = positive(
-            candidate_evidence[name]["model_support_seconds"],
-            "candidate model support")
-        t60_ratio = model_t60 / reference_t60
-        support_ratio = model_support / reference_support
-        minimum_t60 = float(selection["minimum_candidate_t60_ratio"])
-        maximum_t60 = float(selection["maximum_candidate_t60_ratio"])
-        minimum_support = float(selection["minimum_candidate_support_ratio"])
         objective_increases.append(increase)
-        objective_gates.append({
+        common_gate = {
             "objective": name, "split": split,
             "baseline_loss": base_loss, "candidate_loss": candidate_loss,
             "loss_increase": increase,
             "maximum_loss_increase": maximum,
             "maximum_candidate_loss": absolute_maximum,
-            "candidate_t60_ratio": t60_ratio,
-            "minimum_candidate_t60_ratio": minimum_t60,
-            "maximum_candidate_t60_ratio": maximum_t60,
-            "candidate_support_ratio": support_ratio,
-            "minimum_candidate_support_ratio": minimum_support,
-            "passed": (increase <= maximum and
-                       candidate_loss <= absolute_maximum and
-                       minimum_t60 <= t60_ratio <= maximum_t60 and
-                       support_ratio >= minimum_support),
-        })
+        }
+        if objective["kind"] == "checked-note-harmonic-decay":
+            evidence = candidate_evidence[name]
+            mean_error = nonnegative(
+                evidence["mean_absolute_t60_error_octaves"],
+                "candidate harmonic mean error",
+            )
+            maximum_error = nonnegative(
+                evidence["maximum_absolute_t60_error_octaves"],
+                "candidate harmonic maximum error",
+            )
+            valid_count = evidence["valid_harmonic_count"]
+            if (type(valid_count) is not int or type(valid_count) is bool or
+                    valid_count < 0):
+                raise FitError("candidate valid harmonic count is invalid")
+            mean_limit = float(selection[
+                "max_candidate_harmonic_mean_error_octaves"
+            ])
+            harmonic_limit = float(selection[
+                "max_candidate_harmonic_maximum_error_octaves"
+            ])
+            minimum_harmonics = int(
+                selection["minimum_candidate_harmonic_count"]
+            )
+            objective_gates.append({
+                **common_gate,
+                "checked_note_valid": evidence["checked_note_valid"],
+                "checked_harmonic_decay_valid": evidence[
+                    "checked_harmonic_decay_valid"
+                ],
+                "valid_harmonic_count": valid_count,
+                "minimum_valid_harmonic_count": minimum_harmonics,
+                "mean_absolute_t60_error_octaves": mean_error,
+                "maximum_mean_absolute_t60_error_octaves": mean_limit,
+                "maximum_absolute_t60_error_octaves": maximum_error,
+                "maximum_harmonic_error_octaves": harmonic_limit,
+                "passed": bool(
+                    increase <= maximum and
+                    candidate_loss <= absolute_maximum and
+                    evidence["checked_note_valid"] and
+                    evidence["checked_harmonic_decay_valid"] and
+                    valid_count >= minimum_harmonics and
+                    mean_error <= mean_limit and
+                    maximum_error <= harmonic_limit
+                ),
+            })
+        else:
+            evidence = candidate_evidence[name]
+            reference_t60 = positive(
+                evidence["reference_t60_seconds"],
+                "candidate reference T60")
+            model_t60 = positive(
+                evidence["model_t60_seconds"],
+                "candidate model T60")
+            reference_support = positive(
+                evidence["reference_support_seconds"],
+                "candidate reference support")
+            model_support = positive(
+                evidence["model_support_seconds"],
+                "candidate model support")
+            t60_ratio = model_t60 / reference_t60
+            support_ratio = model_support / reference_support
+            minimum_t60 = float(selection["minimum_candidate_t60_ratio"])
+            maximum_t60 = float(selection["maximum_candidate_t60_ratio"])
+            minimum_support = float(selection[
+                "minimum_candidate_support_ratio"
+            ])
+            objective_gates.append({
+                **common_gate,
+                "candidate_t60_ratio": t60_ratio,
+                "minimum_candidate_t60_ratio": minimum_t60,
+                "maximum_candidate_t60_ratio": maximum_t60,
+                "candidate_support_ratio": support_ratio,
+                "minimum_candidate_support_ratio": minimum_support,
+                "passed": (increase <= maximum and
+                           candidate_loss <= absolute_maximum and
+                           minimum_t60 <= t60_ratio <= maximum_t60 and
+                           support_ratio >= minimum_support),
+            })
     expected_gates = []
     maximum_expected = float(selection["max_expected_loss_increase"])
     for name in sorted(manifest["candidate"]["expected_objective_losses"]):
@@ -1805,7 +1915,8 @@ def candidate_gate_data(
 def verify_candidate_points(
         manifest: dict[str, Any], experiment: dict[str, Any], bundle_root: Path,
         bindings: dict[str, Path], binding_hashes: dict[str, str],
-        baseline_id: int, candidate_id: int,
+        analyzer: Path, analyzer_hash: str, baseline_id: int,
+        candidate_id: int,
         point_values: dict[int, dict[str, float]]) -> list[dict[str, Any]]:
     required_bindings = {row["reference_binding"] for row in manifest["objectives"]}
     if set(bindings) != required_bindings:
@@ -1909,10 +2020,23 @@ def verify_candidate_points(
                 model_hash = digest(artifact_value.get("sha256"),
                                     "experiment artifact sha256")
                 binding_id = objective["reference_binding"]
-                measure = run_passive_decay(
-                    bindings[binding_id], model, binding_hashes[binding_id],
-                    model_hash,
-                )
+                if objective["kind"] == "checked-note-harmonic-decay":
+                    if (binding_hashes[binding_id] !=
+                            objective["reference_sha256"]):
+                        raise FitError(
+                            "checked harmonic reference has the wrong hash: " +
+                            binding_id
+                        )
+                    measure = checked_note_harmonic_decay(
+                        analyzer, bindings[binding_id], model,
+                        float(objective["expected_hz"]), analyzer_hash,
+                        binding_hashes[binding_id], model_hash,
+                    )
+                else:
+                    measure = run_passive_decay(
+                        bindings[binding_id], model,
+                        binding_hashes[binding_id], model_hash,
+                    )
                 audio_cache[cache_key] = measure
             loss = passive_decay_loss(
                 objective["kind"], measure, float(objective["scale"])
@@ -1961,7 +2085,7 @@ def select_verified_candidate(
     verify_candidate_profile_changes(manifest, profile)
     points = verify_candidate_points(
         manifest, experiment, bundle_root, bindings, binding_hashes,
-        baseline_id, candidate_id, point_values,
+        analyzer, analyzer_hash, baseline_id, candidate_id, point_values,
     )
     baseline = next(row for row in points if row["baseline"])
     candidate = next(row for row in points if not row["baseline"])
@@ -2200,6 +2324,7 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                         expected_hz = float(objective["expected_hz"])
                         measure = checked_note_harmonic_decay(
                             analyzer, reference, model, expected_hz,
+                            analyzer_hash,
                             binding_hashes[objective["reference_binding"]],
                             model_hash,
                         )
@@ -2427,18 +2552,54 @@ def validated_verify_result_point(
                 scale != float(objective["scale"])):
             raise FitError("fit result evidence contract changed")
         loss = nonnegative(item.get("loss"), "fit result evidence loss")
-        measured_field = ("combined_shape_rmse_db"
-                          if objective["kind"] == "passive-decay-shape"
-                          else "shape_rmse_db")
-        measured = nonnegative(
-            item.get(measured_field),
-            "fit result evidence " + measured_field,
-        )
+        if objective["kind"] == "checked-note-harmonic-decay":
+            exact_keys(item, {
+                "objective", "split", "weight", "scale", "loss",
+                "checked_note_valid", "checked_harmonic_decay_valid",
+                "reference_pitch_error_cents", "model_pitch_error_cents",
+                "valid_harmonic_count", "shared_reference_coverage",
+                "rms_t60_error_octaves",
+                "mean_absolute_t60_error_octaves",
+                "maximum_absolute_t60_error_octaves",
+                "median_t60_bias_octaves",
+            }, "fit result checked harmonic evidence")
+            for name in ("checked_note_valid",
+                         "checked_harmonic_decay_valid"):
+                if type(item[name]) is not bool:
+                    raise FitError(
+                        "fit result checked harmonic validity changed"
+                    )
+            count = item["valid_harmonic_count"]
+            if (type(count) is not int or type(count) is bool or count < 0):
+                raise FitError(
+                    "fit result valid harmonic count changed"
+                )
+            measured = nonnegative(
+                item.get("rms_t60_error_octaves"),
+                "fit result evidence rms_t60_error_octaves",
+            )
+            for name in (
+                    "reference_pitch_error_cents", "model_pitch_error_cents",
+                    "shared_reference_coverage",
+                    "mean_absolute_t60_error_octaves",
+                    "maximum_absolute_t60_error_octaves",
+                    "median_t60_bias_octaves"):
+                finite(item[name], f"fit result evidence {name}")
+        else:
+            measured_field = (
+                "combined_shape_rmse_db"
+                if objective["kind"] == "passive-decay-shape"
+                else "shape_rmse_db"
+            )
+            measured = nonnegative(
+                item.get(measured_field),
+                "fit result evidence " + measured_field,
+            )
+            for name, value in item.items():
+                if name not in ("objective", "split"):
+                    finite(value, f"fit result evidence {name}")
         if loss != measured / scale:
             raise FitError("fit result evidence loss changed")
-        for name, value in item.items():
-            if name not in ("objective", "split"):
-                finite(value, f"fit result evidence {name}")
         split = objective["split"]
         totals[split] += weight * loss
         weights[split] += weight

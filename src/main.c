@@ -7,8 +7,11 @@
 #include "hlolli_wg_analyzer.h"
 #include "alignment_file.h"
 #include "alignment_report.h"
+#include "basic_pitch_audio_provider.h"
+#include "basic_pitch_provider.h"
 #include "body_envelope_report.h"
 #include "event_analysis.h"
+#include "event_bundle.h"
 #include "experiment.h"
 #include "experiment_process.h"
 #include "experiment_report.h"
@@ -16,6 +19,13 @@
 #include "gap_report.h"
 #include "gap_report_output.h"
 #include "harmonic_decay_report.h"
+#include "inference_basic_pitch_onnx.h"
+#include "inference_htdemucs_onnx.h"
+#include "inference_onnx.h"
+#include "inference_provider.h"
+#include "htdemucs.h"
+#include "internal.h"
+#include "instrument_stem_provider.h"
 #include "item_file.h"
 #include "item_report.h"
 #include "isolated_note_report.h"
@@ -30,6 +40,7 @@
 #include "run_file.h"
 #include "run_report.h"
 #include "sha256.h"
+#include "stem_note_derivation.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -50,6 +61,7 @@ typedef enum HWAExportKind {
 } HWAExportKind;
 
 #define HWA_CLI_MAX_BINDINGS 4096U
+#define HWA_CLI_EVENT_PATH_LIMIT 4096U
 
 typedef struct HWACli {
     HWAAnalysisOptions options;
@@ -75,8 +87,14 @@ typedef struct HWACli {
     const char *room_ir_path;
     const char *renderer_path;
     const char *resume_path;
+    const char *model_path;
+    const char *expected_model_sha256;
     const char *physical_bindings[HWA_CLI_MAX_BINDINGS];
     size_t physical_binding_count;
+    HWABasicPitchDecoderOptions basic_pitch_options;
+    uint64_t max_model_bytes;
+    uint64_t inference_timeout_milliseconds;
+    size_t max_note_events;
     HWAExportKind export_kind;
     int json;
     int replace;
@@ -103,6 +121,8 @@ typedef struct HWACli {
     int isolated_note_expected_set;
     int isolated_note_metrics_set;
     int harmonic_decay_expected_set;
+    int inference_option_set;
+    int basic_pitch_option_set;
     int allow_run;
 } HWACli;
 
@@ -151,6 +171,15 @@ static void hwa_print_usage(FILE *stream)
         "DIRECTORY.hwa-events\n"
         "  hlolli-wg-analyzer [ANALYSIS OPTIONS] analyze-events INPUT.wav "
         "--output NEW.hwa-events\n"
+        "  hlolli-wg-analyzer infer-note-events INPUT.wav --model MODEL.onnx "
+        "--output NEW.hwa-events\n"
+        "  hlolli-wg-analyzer separate-instruments INPUT.wav "
+        "--model MODEL.onnx --output NEW.hwa-events\n"
+        "  hlolli-wg-analyzer infer-stem-note-events STEMS.hwa-events "
+        "--model MODEL.onnx --output NEW.hwa-events\n"
+        "  hlolli-wg-analyzer [--json] inference-capabilities\n");
+    (void)fprintf(
+        stream,
         "\n"
         "Commands that accept standard input use -. Segment and saved-artifact "
         "commands require named files.\n"
@@ -169,6 +198,8 @@ static void hwa_print_usage(FILE *stream)
         "  --room-ir PATH              Add explicit room evidence.\n"
         "  --renderer PATH             Name the experiment renderer.\n"
         "  --resume-from DIRECTORY     Reuse matching checked experiment jobs.\n"
+        "  --model PATH                ONNX model for the inference command.\n"
+        "  --expect-model-sha256 HEX   Require these exact model bytes.\n"
         "  --allow-run                 Permit the named renderer to run.\n"
         "\n"
         "Channels and frames:\n"
@@ -191,6 +222,13 @@ static void hwa_print_usage(FILE *stream)
         "  --expected-hz HZ            Expected note fundamental.\n"
         "  --metrics LIST              Isolated-note metrics to check.\n"
         "  --max-note-evaluations N    Maximum note-analysis checks.\n"
+        "  --onset-threshold RATIO     Basic Pitch onset cut (default 0.5).\n"
+        "  --frame-threshold RATIO     Basic Pitch frame cut (default 0.3).\n"
+        "  --minimum-note-frames N     Basic Pitch minimum (default 11).\n"
+        "  --energy-tolerance-frames N Basic Pitch release gap (default 11).\n"
+        "  --max-note-events N         Maximum inferred notes.\n"
+        "  --max-model-bytes N         Maximum ONNX bytes (hard cap INT_MAX).\n"
+        "  --inference-timeout-ms N    Provider work deadline (default 600000).\n"
         "\n");
     (void)fprintf(
         stream,
@@ -558,6 +596,49 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->harmonic_decay_options.max_evaluations =
             cli->isolated_note_options.max_evaluations;
         cli->isolated_note_option_set = 1;
+    } else if (strcmp(option, "--onset-threshold") == 0) {
+        if (hwa_parse_double(
+                value, &cli->basic_pitch_options.onset_threshold) != 0 ||
+            cli->basic_pitch_options.onset_threshold < 0.0 ||
+            cli->basic_pitch_options.onset_threshold > 1.0)
+            return -1;
+        cli->basic_pitch_option_set = 1;
+    } else if (strcmp(option, "--frame-threshold") == 0) {
+        if (hwa_parse_double(
+                value, &cli->basic_pitch_options.frame_threshold) != 0 ||
+            cli->basic_pitch_options.frame_threshold < 0.0 ||
+            cli->basic_pitch_options.frame_threshold > 1.0)
+            return -1;
+        cli->basic_pitch_option_set = 1;
+    } else if (strcmp(option, "--minimum-note-frames") == 0) {
+        if (hwa_parse_size(
+                value, &cli->basic_pitch_options.minimum_note_frames) != 0 ||
+            cli->basic_pitch_options.minimum_note_frames == 0U)
+            return -1;
+        cli->basic_pitch_option_set = 1;
+    } else if (strcmp(option, "--energy-tolerance-frames") == 0) {
+        if (hwa_parse_size(
+                value,
+                &cli->basic_pitch_options.energy_tolerance_frames) != 0 ||
+            cli->basic_pitch_options.energy_tolerance_frames == 0U)
+            return -1;
+        cli->basic_pitch_option_set = 1;
+    } else if (strcmp(option, "--max-note-events") == 0) {
+        if (hwa_parse_size(value, &cli->max_note_events) != 0 ||
+            cli->max_note_events == 0U)
+            return -1;
+        cli->basic_pitch_option_set = 1;
+    } else if (strcmp(option, "--max-model-bytes") == 0) {
+        if (hwa_parse_u64(value, &cli->max_model_bytes) != 0 ||
+            cli->max_model_bytes == 0U)
+            return -1;
+        cli->inference_option_set = 1;
+    } else if (strcmp(option, "--inference-timeout-ms") == 0) {
+        if (hwa_parse_u64(
+                value, &cli->inference_timeout_milliseconds) != 0 ||
+            cli->inference_timeout_milliseconds == 0U)
+            return -1;
+        cli->inference_option_set = 1;
     } else if (strcmp(option, "--max-transforms") == 0) {
         if (hwa_parse_size(value, &cli->options.max_transforms) != 0 ||
             cli->options.max_transforms == 0U) {
@@ -592,6 +673,12 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->analysis_only_option_set = 1;
     } else if (strcmp(option, "--output") == 0) {
         cli->output_path = value;
+    } else if (strcmp(option, "--model") == 0) {
+        cli->model_path = value;
+        cli->inference_option_set = 1;
+    } else if (strcmp(option, "--expect-model-sha256") == 0) {
+        cli->expected_model_sha256 = value;
+        cli->inference_option_set = 1;
     } else if (strcmp(option, "--score") == 0) {
         cli->score_path = value;
     } else if (strcmp(option, "--alignment") == 0) {
@@ -1369,6 +1456,10 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
     hwa_gap_report_options_default(&cli->gap_report_options);
     hwa_isolated_note_options_default(&cli->isolated_note_options);
     hwa_harmonic_decay_options_default(&cli->harmonic_decay_options);
+    hwa_basic_pitch_decoder_options_default(&cli->basic_pitch_options);
+    cli->max_model_bytes = UINT64_C(268435456);
+    cli->inference_timeout_milliseconds = UINT64_C(600000);
+    cli->max_note_events = 1000000U;
     for (argument = 1; argument < argc; ++argument) {
         const char *current = argv[argument];
 
@@ -3000,13 +3091,17 @@ static int hwa_run_validate_event_bundle(const HWACli *cli)
         cli->resume_path != NULL || cli->allow_run ||
         cli->physical_binding_count != 0U ||
         cli->analysis_clock_option_set || cli->analysis_only_option_set ||
-        cli->analysis_resource_option_set || cli->decode_block_option_set ||
+        cli->analysis_resource_option_set ||
+        cli->analysis_spectral_resource_option_set ||
+        cli->frame_size_option_set || cli->hop_size_option_set ||
+        cli->silence_option_set || cli->decode_block_option_set ||
         cli->max_bytes_option_set || cli->input_frame_limit_set ||
         cli->alignment_option_set || cli->segmentation_option_set ||
         cli->measurement_option_set || cli->comparison_option_set ||
         cli->physical_option_set || cli->production_option_set ||
         cli->run_option_set || cli->experiment_option_set ||
         cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->isolated_note_expected_set || cli->isolated_note_metrics_set ||
         cli->harmonic_decay_expected_set) {
         return -1;
     }
@@ -3076,6 +3171,709 @@ static int hwa_run_analyze_events(const HWACli *cli)
     return 0;
 }
 
+static int hwa_run_infer_note_events(const HWACli *cli)
+{
+    HWAWavReader reader;
+    HWAByteSource source;
+    HWAInferenceInput input;
+    HWAInferenceRequest request;
+    HWAInferenceProvider provider;
+    HWABasicPitchRunner runner;
+    HWAInferencePollState state = HWA_INFERENCE_PENDING;
+    const HWAInferenceOutput *output = NULL;
+    void *task = NULL;
+    char *settings_json = NULL;
+    char source_sha256[HWA_SHA256_HEX_SIZE];
+    char model_sha256[HWA_SHA256_HEX_SIZE];
+    char error[HWA_ERROR_SIZE] = {0};
+    int reader_open = 0;
+    int provider_open = 0;
+    int result = 1;
+    memset(&reader, 0, sizeof(reader));
+    memset(&source, 0, sizeof(source));
+    memset(&input, 0, sizeof(input));
+    memset(&request, 0, sizeof(request));
+    memset(&provider, 0, sizeof(provider));
+    memset(&runner, 0, sizeof(runner));
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "infer-note-events") != 0 ||
+        cli->model_path == NULL || cli->model_path[0] == '\0' ||
+        cli->output_path == NULL || cli->output_path[0] == '\0' ||
+        strcmp(cli->positionals[1], "-") == 0 ||
+        strcmp(cli->model_path, "-") == 0 ||
+        strcmp(cli->output_path, "-") == 0 || cli->json || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL ||
+        cli->resume_path != NULL || cli->allow_run ||
+        cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_spectral_resource_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set || cli->decode_block_option_set)
+        return -1;
+    if (hwa_basic_pitch_decoder_options_validate(
+            &cli->basic_pitch_options, error, sizeof(error)) != 0)
+        return -1;
+    if (!hwa_inference_basic_pitch_onnx_available()) {
+        (void)fputs(
+            "hlolli-wg-analyzer: ONNX Runtime support is not compiled\n",
+            stderr);
+        return 1;
+    }
+    if (hwa_wav_reader_open(
+            &reader, cli->positionals[1], cli->options.max_input_bytes,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        goto cleanup;
+    }
+    reader_open = 1;
+    if (reader.format.sample_rate_hz != HWA_BASIC_PITCH_SAMPLE_RATE ||
+        reader.format.channels != 1U) {
+        (void)fputs(
+            "hlolli-wg-analyzer: Basic Pitch v1 needs mono 22050 Hz WAVE input\n",
+            stderr);
+        goto cleanup;
+    }
+    if (reader.format.frames > cli->options.max_input_frames) {
+        (void)fputs(
+            "hlolli-wg-analyzer: Basic Pitch input exceeds the frame limit\n",
+            stderr);
+        goto cleanup;
+    }
+    source = reader.source;
+    source.name = cli->positionals[1];
+    if (hwa_inference_byte_source_sha256(
+            &source, cli->options.max_input_bytes, source_sha256,
+            error, sizeof(error)) != 0 ||
+        hwa_basic_pitch_task_settings_build(
+            &cli->basic_pitch_options, &settings_json,
+            error, sizeof(error)) != 0 ||
+        hwa_inference_basic_pitch_onnx_runner_open(
+            cli->model_path, cli->expected_model_sha256,
+            cli->max_model_bytes, &runner, model_sha256,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error : "cannot open inference inputs");
+        goto cleanup;
+    }
+    if (hwa_basic_pitch_provider_init(
+            &provider, model_sha256, HWA_BASIC_PITCH_ADAPTER_SHA256,
+            &cli->basic_pitch_options, cli->options.max_work_bytes,
+            &runner, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open Basic Pitch provider");
+        goto cleanup;
+    }
+    provider_open = 1;
+    memset(&runner, 0, sizeof(runner));
+    input.id = "source";
+    input.role = "source-recording";
+    input.media_type = "audio/wav";
+    input.sha256 = source_sha256;
+    input.bytes = source;
+    request.task = HWA_BASIC_PITCH_TASK_NAME;
+    request.settings_json = settings_json;
+    request.expected_provider_name = provider.name;
+    request.expected_provider_version = provider.version;
+    request.expected_model_sha256 = provider.model_sha256;
+    request.seed = UINT64_C(0);
+    request.source_recording_id = UINT64_C(1);
+    request.source_input_id = input.id;
+    request.inputs = &input;
+    request.input_count = 1U;
+    request.source_format = reader.format;
+    request.max_input_file_bytes = cli->options.max_input_bytes;
+    request.max_input_bytes = cli->options.max_input_bytes;
+    request.timeout_milliseconds = cli->inference_timeout_milliseconds;
+    hwa_event_bundle_limits_default(&request.output_limits);
+    request.output_limits.max_events = cli->max_note_events;
+    request.output_limits.max_values = cli->max_note_events;
+    request.output_limits.max_work_bytes = cli->options.max_work_bytes;
+    if (provider.start(
+            provider.context, &request, &task,
+            error, sizeof(error)) != 0 || task == NULL ||
+        provider.poll(
+            provider.context, task, &state, &output,
+            error, sizeof(error)) != 0 ||
+        state != HWA_INFERENCE_READY || output == NULL ||
+        hwa_inference_output_validate_for_request(
+            &provider, &request, output, error, sizeof(error)) != 0 ||
+        hwa_inference_output_write(
+            cli->output_path, output, &request.output_limits,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "Basic Pitch inference failed");
+        goto cleanup;
+    }
+    result = 0;
+cleanup:
+    if (task != NULL && provider.task_free != NULL)
+        provider.task_free(provider.context, task);
+    if (provider_open) hwa_inference_provider_destroy(&provider);
+    if (runner.context != NULL && runner.destroy != NULL)
+        runner.destroy(runner.context);
+    if (reader_open) hwa_wav_reader_close(&reader);
+    free(settings_json);
+    return result;
+}
+
+static int hwa_run_separate_instruments(const HWACli *cli)
+{
+    HWAWavReader reader;
+    HWAByteSource source;
+    HWAInferenceInput input;
+    HWAInferenceRequest request;
+    HWAInferenceProvider provider;
+    HWAHTDemucsModelRunner model_runner;
+    HWAInstrumentStemRunner stem_runner;
+    HWAInferencePollState state = HWA_INFERENCE_PENDING;
+    const HWAInferenceOutput *output = NULL;
+    void *task = NULL;
+    char source_sha256[HWA_SHA256_HEX_SIZE];
+    char model_sha256[HWA_SHA256_HEX_SIZE];
+    char error[HWA_ERROR_SIZE] = {0};
+    int reader_open = 0;
+    int provider_open = 0;
+    int result = 1;
+    memset(&reader, 0, sizeof(reader));
+    memset(&source, 0, sizeof(source));
+    memset(&input, 0, sizeof(input));
+    memset(&request, 0, sizeof(request));
+    memset(&provider, 0, sizeof(provider));
+    memset(&model_runner, 0, sizeof(model_runner));
+    memset(&stem_runner, 0, sizeof(stem_runner));
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "separate-instruments") != 0 ||
+        cli->model_path == NULL || cli->model_path[0] == '\0' ||
+        cli->output_path == NULL || cli->output_path[0] == '\0' ||
+        strcmp(cli->positionals[1], "-") == 0 ||
+        strcmp(cli->model_path, "-") == 0 ||
+        strcmp(cli->output_path, "-") == 0 || cli->json || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL ||
+        cli->resume_path != NULL || cli->allow_run ||
+        cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_spectral_resource_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set || cli->decode_block_option_set)
+        return -1;
+    if (!hwa_inference_htdemucs_onnx_available()) {
+        (void)fputs(
+            "hlolli-wg-analyzer: ONNX Runtime support is not compiled\n",
+            stderr);
+        return 1;
+    }
+    if (hwa_wav_reader_open(
+            &reader, cli->positionals[1], cli->options.max_input_bytes,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        goto cleanup;
+    }
+    reader_open = 1;
+    if (reader.format.sample_rate_hz != HWA_HTDEMUCS_SAMPLE_RATE ||
+        (reader.format.channels != 1U && reader.format.channels != 2U)) {
+        (void)fputs(
+            "hlolli-wg-analyzer: HTDemucs v1 needs mono or stereo "
+            "44100 Hz WAVE input\n",
+            stderr);
+        goto cleanup;
+    }
+    if (reader.format.frames > cli->options.max_input_frames) {
+        (void)fputs(
+            "hlolli-wg-analyzer: HTDemucs input exceeds the frame limit\n",
+            stderr);
+        goto cleanup;
+    }
+    source = reader.source;
+    source.name = cli->positionals[1];
+    if (hwa_inference_byte_source_sha256(
+            &source, cli->options.max_input_bytes, source_sha256,
+            error, sizeof(error)) != 0 ||
+        hwa_inference_htdemucs_onnx_runner_open(
+            cli->model_path, cli->expected_model_sha256,
+            cli->max_model_bytes, &model_runner, model_sha256,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open separation inputs");
+        goto cleanup;
+    }
+    if (hwa_htdemucs_instrument_runner_init(
+            &stem_runner, cli->options.max_work_bytes, &model_runner,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open HTDemucs adapter");
+        goto cleanup;
+    }
+    memset(&model_runner, 0, sizeof(model_runner));
+    if (hwa_instrument_stem_provider_init(
+            &provider, model_sha256, HWA_HTDEMUCS_ADAPTER_SHA256,
+            cli->options.max_work_bytes, &stem_runner,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open instrument stem provider");
+        goto cleanup;
+    }
+    provider_open = 1;
+    memset(&stem_runner, 0, sizeof(stem_runner));
+    input.id = "source";
+    input.role = "source-recording";
+    input.media_type = "audio/wav";
+    input.sha256 = source_sha256;
+    input.bytes = source;
+    request.task = HWA_INSTRUMENT_STEM_TASK_NAME;
+    request.settings_json = "{}";
+    request.expected_provider_name = provider.name;
+    request.expected_provider_version = provider.version;
+    request.expected_model_sha256 = provider.model_sha256;
+    request.seed = UINT64_C(0);
+    request.source_recording_id = UINT64_C(1);
+    request.source_input_id = input.id;
+    request.inputs = &input;
+    request.input_count = 1U;
+    request.source_format = reader.format;
+    request.max_input_file_bytes = cli->options.max_input_bytes;
+    request.max_input_bytes = cli->options.max_input_bytes;
+    request.timeout_milliseconds = cli->inference_timeout_milliseconds;
+    hwa_event_bundle_limits_default(&request.output_limits);
+    request.output_limits.max_audio_files = HWA_HTDEMUCS_STEM_COUNT + 1U;
+    request.output_limits.max_events = HWA_HTDEMUCS_STEM_COUNT;
+    request.output_limits.max_values = HWA_HTDEMUCS_STEM_COUNT;
+    request.output_limits.max_traces = 1U;
+    request.output_limits.max_trace_refs = 1U;
+    request.output_limits.max_providers = 1U;
+    request.output_limits.max_warnings = 1U;
+    request.output_limits.max_work_bytes = cli->options.max_work_bytes;
+    if (provider.start(
+            provider.context, &request, &task,
+            error, sizeof(error)) != 0 || task == NULL ||
+        provider.poll(
+            provider.context, task, &state, &output,
+            error, sizeof(error)) != 0 ||
+        state != HWA_INFERENCE_READY || output == NULL ||
+        hwa_inference_output_validate_for_request(
+            &provider, &request, output, error, sizeof(error)) != 0 ||
+        hwa_inference_output_write(
+            cli->output_path, output, &request.output_limits,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "instrument separation failed");
+        goto cleanup;
+    }
+    result = 0;
+cleanup:
+    if (task != NULL && provider.task_free != NULL)
+        provider.task_free(provider.context, task);
+    if (provider_open) hwa_inference_provider_destroy(&provider);
+    if (stem_runner.context != NULL && stem_runner.destroy != NULL)
+        stem_runner.destroy(stem_runner.context);
+    if (model_runner.context != NULL && model_runner.destroy != NULL)
+        model_runner.destroy(model_runner.context);
+    if (reader_open) hwa_wav_reader_close(&reader);
+    return result;
+}
+
+static int hwa_cli_event_format_equal(const HWAFormat *left,
+                                      const HWAFormat *right)
+{
+    return left != NULL && right != NULL &&
+           left->container == right->container &&
+           left->encoding == right->encoding &&
+           left->channels == right->channels &&
+           left->sample_rate_hz == right->sample_rate_hz &&
+           left->bits_per_sample == right->bits_per_sample &&
+           left->valid_bits_per_sample == right->valid_bits_per_sample &&
+           left->block_align == right->block_align &&
+           left->channel_mask == right->channel_mask &&
+           left->frames == right->frames &&
+           left->data_bytes == right->data_bytes &&
+           left->duration_seconds == right->duration_seconds;
+}
+
+static int hwa_cli_event_payload_path(const char *directory,
+                                      const char *relative_path,
+                                      char path[HWA_CLI_EVENT_PATH_LIMIT])
+{
+    int length;
+    if (directory == NULL || directory[0] == '\0' ||
+        relative_path == NULL || relative_path[0] == '\0' || path == NULL)
+        return -1;
+    length = snprintf(path, HWA_CLI_EVENT_PATH_LIMIT, "%s/%s",
+                      directory, relative_path);
+    return length < 0 || (size_t)length >= HWA_CLI_EVENT_PATH_LIMIT
+               ? -1 : 0;
+}
+
+typedef struct HWACliStemPathSource HWACliStemPathSource;
+
+typedef struct HWACliStemSourcePool {
+    HWAWavReader reader;
+    const HWACliStemPathSource *active;
+    uint64_t max_input_bytes;
+    int reader_open;
+} HWACliStemSourcePool;
+
+struct HWACliStemPathSource {
+    HWACliStemSourcePool *pool;
+    const char *directory;
+    const char *relative_path;
+    uint64_t expected_size;
+};
+
+static int hwa_cli_stem_source_read_at(void *context,
+                                       uint64_t offset,
+                                       unsigned char *destination,
+                                       size_t size)
+{
+    HWACliStemPathSource *source = (HWACliStemPathSource *)context;
+    HWACliStemSourcePool *pool;
+    char path[HWA_CLI_EVENT_PATH_LIMIT];
+    char ignored[HWA_ERROR_SIZE] = {0};
+    if (source == NULL || source->pool == NULL || destination == NULL ||
+        offset > source->expected_size ||
+        (uint64_t)size > source->expected_size - offset)
+        return -1;
+    pool = source->pool;
+    if (pool->active != source) {
+        if (pool->reader_open) {
+            hwa_wav_reader_close(&pool->reader);
+            pool->reader_open = 0;
+            pool->active = NULL;
+        }
+        if (hwa_cli_event_payload_path(
+                source->directory, source->relative_path, path) != 0 ||
+            hwa_wav_reader_open(
+                &pool->reader, path, pool->max_input_bytes,
+                ignored, sizeof(ignored)) != 0)
+            return -1;
+        pool->reader_open = 1;
+        if (pool->reader.source.size != source->expected_size) {
+            hwa_wav_reader_close(&pool->reader);
+            pool->reader_open = 0;
+            return -1;
+        }
+        pool->active = source;
+    }
+    return pool->reader.source.read_at(
+        pool->reader.source.context, offset, destination, size);
+}
+
+static int hwa_run_infer_stem_note_events(const HWACli *cli)
+{
+    HWAEventBundle stem_bundle;
+    HWAEventBundleLimits limits;
+    HWAStemNoteDerivationOptions derivation_options;
+    HWAStemNoteDerivation *derivation = NULL;
+    HWAStemNoteAudioSource *sources = NULL;
+    HWACliStemPathSource *path_sources = NULL;
+    HWACliStemSourcePool source_pool;
+    HWABasicPitchRunner runner;
+    HWAInferenceProvider basic_pitch_provider;
+    HWAInferenceProvider audio_note_provider;
+    char *settings_json = NULL;
+    char model_sha256[HWA_SHA256_HEX_SIZE];
+    char error[HWA_ERROR_SIZE] = {0};
+    size_t stem_count = 0U;
+    size_t audio_index;
+    int basic_pitch_open = 0;
+    int audio_note_open = 0;
+    int result = 1;
+    memset(&stem_bundle, 0, sizeof(stem_bundle));
+    memset(&runner, 0, sizeof(runner));
+    memset(&source_pool, 0, sizeof(source_pool));
+    memset(&basic_pitch_provider, 0, sizeof(basic_pitch_provider));
+    memset(&audio_note_provider, 0, sizeof(audio_note_provider));
+    if (cli->positional_count != 2U ||
+        strcmp(cli->positionals[0], "infer-stem-note-events") != 0 ||
+        cli->model_path == NULL || cli->model_path[0] == '\0' ||
+        cli->output_path == NULL || cli->output_path[0] == '\0' ||
+        strcmp(cli->positionals[1], "-") == 0 ||
+        strcmp(cli->model_path, "-") == 0 ||
+        strcmp(cli->output_path, "-") == 0 ||
+        strcmp(cli->positionals[1], cli->output_path) == 0 ||
+        cli->json || cli->replace || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_spectral_resource_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set || cli->decode_block_option_set)
+        return -1;
+    if (hwa_basic_pitch_decoder_options_validate(
+            &cli->basic_pitch_options, error, sizeof(error)) != 0)
+        return -1;
+    if (!hwa_inference_basic_pitch_onnx_available()) {
+        (void)fputs(
+            "hlolli-wg-analyzer: ONNX Runtime support is not compiled\n",
+            stderr);
+        return 1;
+    }
+    if (hwa_event_bundle_output_path_validate(
+            cli->output_path, cli->positionals[1],
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        return 1;
+    }
+    hwa_event_bundle_limits_default(&limits);
+    if (limits.max_payload_file_bytes > cli->options.max_input_bytes)
+        limits.max_payload_file_bytes = cli->options.max_input_bytes;
+    limits.max_work_bytes = cli->options.max_work_bytes;
+    if (hwa_event_bundle_read(
+            cli->positionals[1], &limits, &stem_bundle,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot read instrument stems");
+        goto cleanup;
+    }
+    for (audio_index = 0U; audio_index < stem_bundle.audio_count;
+         ++audio_index) {
+        const HWAEventAudio *audio = &stem_bundle.audio[audio_index];
+        if (audio->kind == HWA_EVENT_SOURCE_RECORDING &&
+            audio->format.frames > cli->options.max_input_frames) {
+            (void)fputs(
+                "hlolli-wg-analyzer: stem source exceeds the frame limit\n",
+                stderr);
+            goto cleanup;
+        }
+        if (audio->kind == HWA_EVENT_INSTRUMENT_STEM) stem_count++;
+    }
+    if (stem_count == 0U || stem_count > SIZE_MAX / sizeof(*sources) ||
+        stem_count > SIZE_MAX / sizeof(*path_sources)) {
+        (void)fputs(
+            "hlolli-wg-analyzer: instrument stem count is invalid\n",
+            stderr);
+        goto cleanup;
+    }
+    sources = (HWAStemNoteAudioSource *)calloc(
+        stem_count, sizeof(*sources));
+    path_sources = (HWACliStemPathSource *)calloc(
+        stem_count, sizeof(*path_sources));
+    if (sources == NULL || path_sources == NULL) {
+        (void)fputs(
+            "hlolli-wg-analyzer: cannot allocate stem input rows\n", stderr);
+        goto cleanup;
+    }
+    source_pool.max_input_bytes = cli->options.max_input_bytes;
+    stem_count = 0U;
+    for (audio_index = 0U; audio_index < stem_bundle.audio_count;
+         ++audio_index) {
+        const HWAEventAudio *audio = &stem_bundle.audio[audio_index];
+        HWAWavReader reader;
+        if (audio->kind != HWA_EVENT_INSTRUMENT_STEM) continue;
+        memset(&reader, 0, sizeof(reader));
+        path_sources[stem_count].pool = &source_pool;
+        path_sources[stem_count].directory = cli->positionals[1];
+        path_sources[stem_count].relative_path = audio->relative_path;
+        path_sources[stem_count].expected_size = audio->file_bytes;
+        sources[stem_count].audio_id = audio->id;
+        sources[stem_count].bytes.context = &path_sources[stem_count];
+        sources[stem_count].bytes.name = audio->relative_path;
+        sources[stem_count].bytes.size = audio->file_bytes;
+        sources[stem_count].bytes.read_at = hwa_cli_stem_source_read_at;
+        if (hwa_wav_reader_open_source(
+                &reader, &sources[stem_count].bytes,
+                cli->options.max_input_bytes, error, sizeof(error)) != 0) {
+            (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                          error[0] != '\0' ? error
+                                            : "invalid stem payload path");
+            goto cleanup;
+        }
+        if (!hwa_cli_event_format_equal(
+                &reader.format, &audio->format) ||
+            audio->format.encoding != HWA_ENCODING_IEEE_FLOAT ||
+            audio->format.channels != 2U ||
+            audio->format.sample_rate_hz != 44100U ||
+            audio->format.bits_per_sample != 32U ||
+            audio->format.valid_bits_per_sample != 32U ||
+            audio->format.block_align != 8U ||
+            audio->format.frames > cli->options.max_input_frames) {
+            (void)fputs(
+                "hlolli-wg-analyzer: stem note inference needs stereo "
+                "float32 44100 Hz stems within the frame limit\n",
+                stderr);
+            hwa_wav_reader_close(&reader);
+            goto cleanup;
+        }
+        hwa_wav_reader_close(&reader);
+        stem_count++;
+    }
+    if (hwa_basic_pitch_task_settings_build(
+            &cli->basic_pitch_options, &settings_json,
+            error, sizeof(error)) != 0 ||
+        hwa_inference_basic_pitch_onnx_runner_open(
+            cli->model_path, cli->expected_model_sha256,
+            cli->max_model_bytes, &runner, model_sha256,
+            error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open note inference inputs");
+        goto cleanup;
+    }
+    if (hwa_basic_pitch_provider_init(
+            &basic_pitch_provider, model_sha256,
+            HWA_BASIC_PITCH_ADAPTER_SHA256,
+            &cli->basic_pitch_options, cli->options.max_work_bytes,
+            &runner, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open Basic Pitch provider");
+        goto cleanup;
+    }
+    basic_pitch_open = 1;
+    memset(&runner, 0, sizeof(runner));
+    if (hwa_basic_pitch_audio_provider_init(
+            &audio_note_provider, &basic_pitch_provider,
+            HWA_BASIC_PITCH_AUDIO_ADAPTER_SHA256,
+            cli->options.max_work_bytes, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "cannot open raw-audio note provider");
+        goto cleanup;
+    }
+    audio_note_open = 1;
+    hwa_stem_note_derivation_options_default(&derivation_options);
+    derivation_options.note_task = HWA_BASIC_PITCH_AUDIO_TASK_NAME;
+    derivation_options.note_settings_json = settings_json;
+    derivation_options.max_input_file_bytes = cli->options.max_input_bytes;
+    derivation_options.max_input_bytes = cli->options.max_input_bytes;
+    derivation_options.timeout_milliseconds =
+        cli->inference_timeout_milliseconds;
+    derivation_options.max_note_events = cli->max_note_events;
+    derivation_options.output_limits = limits;
+    if (hwa_stem_note_derivation_run(
+            &stem_bundle, sources, stem_count, &audio_note_provider,
+            &derivation_options, &derivation,
+            error, sizeof(error)) != 0 || derivation == NULL ||
+        hwa_inference_output_write(
+            cli->output_path,
+            hwa_stem_note_derivation_output(derivation),
+            &limits, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error
+                                        : "stem note inference failed");
+        goto cleanup;
+    }
+    result = 0;
+cleanup:
+    hwa_stem_note_derivation_free(derivation);
+    if (audio_note_open)
+        hwa_inference_provider_destroy(&audio_note_provider);
+    if (basic_pitch_open)
+        hwa_inference_provider_destroy(&basic_pitch_provider);
+    if (runner.context != NULL && runner.destroy != NULL)
+        runner.destroy(runner.context);
+    if (source_pool.reader_open)
+        hwa_wav_reader_close(&source_pool.reader);
+    free(path_sources);
+    free(sources);
+    hwa_event_bundle_free(&stem_bundle);
+    free(settings_json);
+    return result;
+}
+
+static int hwa_run_inference_capabilities(const HWACli *cli)
+{
+    const char *onnx_version = hwa_inference_onnx_runtime_version();
+    int onnx_available = hwa_inference_onnx_available();
+    int htdemucs_available = hwa_inference_htdemucs_onnx_available();
+    if (cli->positional_count != 1U ||
+        strcmp(cli->positionals[0], "inference-capabilities") != 0 ||
+        cli->output_path != NULL || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL ||
+        cli->resume_path != NULL || cli->allow_run ||
+        cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_resource_option_set || cli->decode_block_option_set ||
+        cli->max_bytes_option_set || cli->input_frame_limit_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set) {
+        return -1;
+    }
+    if (cli->json) {
+        if (fputs("{\"schema\":\"hwa-inference-capabilities\","
+                  "\"schema_version\":1,"
+                  "\"built_in_event_analysis\":true,"
+                  "\"onnx_runtime\":{\"compiled\":",
+                  stdout) == EOF ||
+            fputs(onnx_available ? "true,\"version\":"
+                                 : "false,\"version\":null",
+                  stdout) == EOF ||
+            (onnx_available && hwa_json_write_string(stdout, onnx_version) != 0) ||
+            fputs("},\"polyphonic_note_task\":{"
+                  "\"contract\":\"org.hlolli.polyphonic-note-events-v1\","
+                  "\"provider\":\"org.hlolli.basic-pitch-onnx\","
+                  "\"implemented\":true,\"available\":",
+                  stdout) == EOF) {
+            return 1;
+        }
+        if (fputs(onnx_available ? "true" : "false", stdout) == EOF ||
+            fputs("},\"instrument_stem_task\":{"
+                  "\"contract\":\"" HWA_INSTRUMENT_STEM_TASK_NAME "\","
+                  "\"provider\":\"" HWA_INSTRUMENT_STEM_PROVIDER_NAME "\","
+                  "\"implemented\":true,\"available\":",
+                  stdout) == EOF ||
+            fputs(htdemucs_available ? "true" : "false", stdout) == EOF ||
+            fputs("},\"stem_note_workflow\":{"
+                  "\"contract\":\"org.hlolli.stem-note-events-v1\","
+                  "\"provider\":\"" HWA_BASIC_PITCH_AUDIO_PROVIDER_NAME
+                  "\",\"implemented\":true,\"available\":",
+                  stdout) == EOF ||
+            fputs(onnx_available ? "true" : "false", stdout) == EOF ||
+            fputs("}}\n", stdout) == EOF)
+            return 1;
+    } else if (fprintf(
+                   stdout,
+                   "Inference capabilities\n"
+                   "Built-in event analysis: available\n"
+                   "ONNX Runtime: %s%s%s%s\n"
+                   "Polyphonic note task: Basic Pitch adapter %s\n"
+                   "Instrument stem task: HTDemucs six-stem adapter %s\n"
+                   "Stem note workflow: Basic Pitch per-stem adapter %s\n",
+                   onnx_available ? "available" : "not compiled",
+                   onnx_available ? " (" : "",
+                   onnx_available ? onnx_version : "",
+                   onnx_available ? ")" : "",
+                   onnx_available ? "available" : "not available",
+                   htdemucs_available ? "available" : "not available",
+                   onnx_available ? "available" : "not available") < 0) {
+        return 1;
+    }
+    return hwa_finish_stream(stdout, "standard output") == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     HWACli cli;
@@ -3097,7 +3895,16 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "isolated-note") != 0 &&
+    if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
+        strcmp(cli.positionals[0], "separate-instruments") != 0 &&
+        strcmp(cli.positionals[0], "infer-stem-note-events") != 0 &&
+        cli.inference_option_set) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
+        strcmp(cli.positionals[0], "infer-stem-note-events") != 0 &&
+        cli.basic_pitch_option_set) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "isolated-note") != 0 &&
         strcmp(cli.positionals[0], "harmonic-decay") != 0 &&
         cli.isolated_note_option_set) {
         result = -1;
@@ -3149,6 +3956,14 @@ int main(int argc, char **argv)
         result = hwa_run_validate_event_bundle(&cli);
     } else if (strcmp(cli.positionals[0], "analyze-events") == 0) {
         result = hwa_run_analyze_events(&cli);
+    } else if (strcmp(cli.positionals[0], "infer-note-events") == 0) {
+        result = hwa_run_infer_note_events(&cli);
+    } else if (strcmp(cli.positionals[0], "separate-instruments") == 0) {
+        result = hwa_run_separate_instruments(&cli);
+    } else if (strcmp(cli.positionals[0], "infer-stem-note-events") == 0) {
+        result = hwa_run_infer_stem_note_events(&cli);
+    } else if (strcmp(cli.positionals[0], "inference-capabilities") == 0) {
+        result = hwa_run_inference_capabilities(&cli);
     } else {
         result = -1;
     }

@@ -19,12 +19,36 @@ CTest names use these prefixes:
 - `unit.` for library, saved-file, and report checks
 - `cli.` for end-to-end command checks
 - `regression.` for fixed malformed-input cases
+- `integration.` for checks that need caller-supplied programs or models
 - `benchmark.` for benchmark contract checks
 - `fuzz.` for bounded seed-corpus runs
 - `wasm.` for the WASI module and import check
 
 Use `ctest --test-dir build-strict -N` to list the tests. Use `-R` to run a
 matching group.
+
+## ONNX model tests
+
+The Basic Pitch, per-stem note, and HTDemucs model tests stay off unless the
+caller supplies the pinned model files at configure time:
+
+```sh
+cmake -S . -B build-onnx \
+  -DBUILD_TESTING=ON \
+  -DHLOLLI_WG_ANALYZER_STRICT=ON \
+  -DHLOLLI_WG_ANALYZER_ENABLE_ONNX=ON \
+  -DONNXRuntime_ROOT=/path/to/onnxruntime \
+  -DHLOLLI_WG_ANALYZER_BASIC_PITCH_TEST_MODEL=/path/to/nmp.onnx \
+  -DHLOLLI_WG_ANALYZER_HTDEMUCS_TEST_MODEL=/path/to/htdemucs_6s_fp16weights.onnx
+cmake --build build-onnx --parallel
+ctest --test-dir build-onnx --output-on-failure -L onnx
+```
+
+CMake checks both model hashes before it builds the tests. The tests never
+download a model or copy one into the source tree. The per-stem note test
+builds a small checked stem bundle and runs the real Basic Pitch graph. The
+HTDemucs test runs in series because the ONNX session can use about 1.1 GB of
+memory.
 
 ## Installed clients
 

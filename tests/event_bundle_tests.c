@@ -1,9 +1,14 @@
+#if defined(_WIN32) && !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0600
+#endif
+
 #if !defined(_WIN32)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #endif
 
+#include "event_bundle.h"
 #include "hlolli_wg_analyzer.h"
 
 #include <errno.h>
@@ -16,6 +21,7 @@
 #include <direct.h>
 #include <io.h>
 #include <process.h>
+#include <windows.h>
 #define TEST_PID _getpid
 #define TEST_RMDIR _rmdir
 #define TEST_UNLINK _unlink
@@ -70,6 +76,247 @@ static int make_unused_path(char path[PATH_MAX])
     return 0;
 }
 
+static int make_directory(const char *path)
+{
+#if defined(_WIN32)
+    return _mkdir(path);
+#else
+    return mkdir(path, 0700);
+#endif
+}
+
+static int make_directory_alias(const char *source, const char *alias)
+{
+#if defined(_WIN32)
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2U
+#endif
+    DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY |
+                  SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (CreateSymbolicLinkA(alias, source, flags) != 0) return 1;
+    if (GetLastError() == ERROR_INVALID_PARAMETER)
+        return CreateSymbolicLinkA(
+                   alias, source, SYMBOLIC_LINK_FLAG_DIRECTORY) != 0;
+    return 0;
+#else
+    return symlink(source, alias) == 0;
+#endif
+}
+
+static int remove_directory_alias(const char *path)
+{
+#if defined(_WIN32)
+    return _rmdir(path);
+#else
+    return unlink(path);
+#endif
+}
+
+static int same_directory(const char *left, const char *right)
+{
+#if defined(_WIN32)
+    BY_HANDLE_FILE_INFORMATION left_info;
+    BY_HANDLE_FILE_INFORMATION right_info;
+    HANDLE left_handle = CreateFileA(
+        left, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE right_handle = CreateFileA(
+        right, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    int same = 0;
+    if (left_handle != INVALID_HANDLE_VALUE &&
+        right_handle != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandle(left_handle, &left_info) &&
+        GetFileInformationByHandle(right_handle, &right_info)) {
+        same = left_info.dwVolumeSerialNumber ==
+                   right_info.dwVolumeSerialNumber &&
+               left_info.nFileIndexHigh == right_info.nFileIndexHigh &&
+               left_info.nFileIndexLow == right_info.nFileIndexLow;
+    }
+    if (right_handle != INVALID_HANDLE_VALUE) (void)CloseHandle(right_handle);
+    if (left_handle != INVALID_HANDLE_VALUE) (void)CloseHandle(left_handle);
+    return same;
+#else
+    struct stat left_status;
+    struct stat right_status;
+    return stat(left, &left_status) == 0 &&
+           stat(right, &right_status) == 0 &&
+           S_ISDIR(left_status.st_mode) &&
+           S_ISDIR(right_status.st_mode) &&
+           left_status.st_dev == right_status.st_dev &&
+           left_status.st_ino == right_status.st_ino;
+#endif
+}
+
+static int make_case_variant(const char *path, char variant[PATH_MAX])
+{
+    size_t index;
+    int written = snprintf(variant, PATH_MAX, "%s", path);
+    if (written < 0 || written >= PATH_MAX) return 0;
+    for (index = strlen(variant); index > 0U; --index) {
+        unsigned char value = (unsigned char)variant[index - 1U];
+        if (value >= (unsigned char)'a' && value <= (unsigned char)'z') {
+            variant[index - 1U] = (char)(value - (unsigned char)'a' +
+                                        (unsigned char)'A');
+            return 1;
+        }
+        if (variant[index - 1U] == '/' || variant[index - 1U] == '\\')
+            break;
+    }
+    return 0;
+}
+
+static void test_output_path_case_alias_is_rejected(void)
+{
+    char source[PATH_MAX];
+    char case_alias[PATH_MAX];
+    char output[PATH_MAX];
+    char error[HWA_ERROR_SIZE] = {0};
+    int written;
+
+    CHECK(make_unused_path(source),
+          "cannot reserve case source directory path");
+    if (failures != 0) return;
+    CHECK(make_directory(source) == 0,
+          "cannot make case source directory");
+    if (failures != 0) return;
+    CHECK(make_case_variant(source, case_alias),
+          "cannot form a case source alias");
+    if (failures == 0 && same_directory(source, case_alias)) {
+        written = snprintf(output, sizeof(output),
+                           "%s/derived", case_alias);
+        CHECK(written > 0 && (size_t)written < sizeof(output),
+              "case-aliased output path is too long");
+        if (failures == 0) {
+            CHECK(hwa_event_bundle_output_path_validate(
+                      output, source, error, sizeof(error)) != 0 &&
+                      strstr(error, "inside its source bundle") != NULL,
+                  "case alias bypassed source containment: %s", error);
+        }
+    } else if (failures == 0) {
+        (void)fprintf(stderr,
+                      "SKIP event bundle case alias test: "
+                      "volume is case-sensitive\n");
+    }
+    CHECK(TEST_RMDIR(source) == 0,
+          "cannot remove case source directory");
+}
+
+static void test_output_path_trailing_separator(void)
+{
+    char source[PATH_MAX];
+    char sibling[PATH_MAX];
+    char sibling_with_separator[PATH_MAX];
+    char descendant_with_separator[PATH_MAX];
+    char error[HWA_ERROR_SIZE] = {0};
+    int written;
+
+    CHECK(make_unused_path(source),
+          "cannot reserve trailing-separator source path");
+    if (failures != 0) return;
+    CHECK(make_directory(source) == 0,
+          "cannot make trailing-separator source directory");
+    if (failures != 0) return;
+    CHECK(make_unused_path(sibling),
+          "cannot reserve trailing-separator sibling path");
+    if (failures != 0) {
+        (void)TEST_RMDIR(source);
+        return;
+    }
+    written = snprintf(sibling_with_separator,
+                       sizeof(sibling_with_separator), "%s/", sibling);
+    CHECK(written > 0 && (size_t)written < sizeof(sibling_with_separator),
+          "sibling path with trailing separator is too long");
+    written = snprintf(descendant_with_separator,
+                       sizeof(descendant_with_separator),
+                       "%s/derived/", source);
+    CHECK(written > 0 &&
+              (size_t)written < sizeof(descendant_with_separator),
+          "descendant path with trailing separator is too long");
+    if (failures == 0) {
+        CHECK(hwa_event_bundle_output_path_validate(
+                  sibling_with_separator, source,
+                  error, sizeof(error)) == 0,
+              "trailing separator rejected a sibling output: %s", error);
+        error[0] = '\0';
+        CHECK(hwa_event_bundle_output_path_validate(
+                  descendant_with_separator, source,
+                  error, sizeof(error)) != 0 &&
+                  strstr(error, "inside its source bundle") != NULL,
+              "trailing separator bypassed source containment: %s", error);
+    }
+    CHECK(TEST_RMDIR(source) == 0,
+          "cannot remove trailing-separator source directory");
+}
+
+static void test_output_path_alias_is_rejected(void)
+{
+    char source[PATH_MAX];
+    char alias[PATH_MAX];
+    char output_via_source[PATH_MAX];
+    char output_via_alias[PATH_MAX];
+    char error[HWA_ERROR_SIZE] = {0};
+    int written;
+
+    CHECK(make_unused_path(source), "cannot reserve source directory path");
+    if (failures != 0) return;
+    CHECK(make_directory(source) == 0, "cannot make source directory");
+    if (failures != 0) return;
+    CHECK(make_unused_path(alias), "cannot reserve alias directory path");
+    if (failures != 0) {
+        (void)TEST_RMDIR(source);
+        return;
+    }
+    CHECK(hwa_event_bundle_output_path_validate(
+              alias, source, error, sizeof(error)) == 0,
+          "source containment rejected a sibling output: %s", error);
+    if (failures != 0) {
+        (void)TEST_RMDIR(source);
+        return;
+    }
+    if (!make_directory_alias(source, alias)) {
+#if defined(_WIN32)
+        (void)fprintf(stderr,
+                      "SKIP event bundle reparse alias test: "
+                      "host cannot make a directory link\n");
+        (void)TEST_RMDIR(source);
+        return;
+#else
+        CHECK(0, "cannot make source directory alias");
+        (void)TEST_RMDIR(source);
+        return;
+#endif
+    }
+
+    written = snprintf(output_via_alias, sizeof(output_via_alias),
+                       "%s/derived", alias);
+    CHECK(written > 0 && (size_t)written < sizeof(output_via_alias),
+          "aliased output path is too long");
+    written = snprintf(output_via_source, sizeof(output_via_source),
+                       "%s/derived", source);
+    CHECK(written > 0 && (size_t)written < sizeof(output_via_source),
+          "source output path is too long");
+    if (failures == 0) {
+        CHECK(hwa_event_bundle_output_path_validate(
+                  output_via_alias, source, error, sizeof(error)) != 0 &&
+                  strstr(error, "inside its source bundle") != NULL,
+              "output directory alias bypassed source containment: %s",
+              error);
+        error[0] = '\0';
+        CHECK(hwa_event_bundle_output_path_validate(
+                  output_via_source, alias, error, sizeof(error)) != 0 &&
+                  strstr(error, "inside its source bundle") != NULL,
+              "source directory alias bypassed output containment: %s",
+              error);
+    }
+
+    CHECK(remove_directory_alias(alias) == 0,
+          "cannot remove source directory alias");
+    CHECK(TEST_RMDIR(source) == 0, "cannot remove source directory");
+}
+
 static void remove_bundle(const char *directory)
 {
     static const char *const names[] = {
@@ -105,6 +352,7 @@ static void test_round_trip_preserves_exact_event(void)
     HWAEventBundle source;
     HWAEventBundle loaded;
     char directory[PATH_MAX];
+    char descendant[PATH_MAX];
     char error[HWA_ERROR_SIZE] = {0};
     double exact_pitch = 440.00000000000006;
 
@@ -174,6 +422,17 @@ static void test_round_trip_preserves_exact_event(void)
     CHECK(hwa_event_bundle_read(directory, &limits, &loaded,
                                 error, sizeof(error)) == 0,
           "cannot read event bundle: %s", error);
+    if (snprintf(descendant, sizeof(descendant), "%s/derived", directory) > 0) {
+        error[0] = '\0';
+        CHECK(hwa_event_bundle_write(
+                  descendant, &loaded, NULL, 0U, &limits,
+                  error, sizeof(error)) != 0 &&
+                  strstr(error, "inside its source bundle") != NULL,
+              "writer accepted an output inside its source bundle: %s",
+              error);
+    } else {
+        CHECK(0, "cannot form descendant bundle path");
+    }
     if (loaded.audio_count == 1U && loaded.event_count == 1U &&
         loaded.events[0].value_count == 1U) {
         CHECK(loaded.audio[0].format.sample_rate_hz == 48000U,
@@ -662,6 +921,9 @@ static void test_large_event_set_round_trip(void)
 
 int main(void)
 {
+    test_output_path_alias_is_rejected();
+    test_output_path_case_alias_is_rejected();
+    test_output_path_trailing_separator();
     test_round_trip_preserves_exact_event();
     test_invalid_audio_format_enums_are_rejected();
     test_child_event_must_fit_parent();

@@ -201,6 +201,9 @@ static void test_request_init(HWAInferenceRequest *request,
     request->source_format.frames = UINT64_C(192);
     request->source_format.data_bytes = UINT64_C(384);
     request->source_format.duration_seconds = 0.004;
+    request->max_input_file_bytes = UINT64_C(1048576);
+    request->max_input_bytes = UINT64_C(2097152);
+    request->timeout_milliseconds = UINT64_C(1000);
 }
 
 static int test_provider_init(HWAInferenceProvider *provider)
@@ -215,6 +218,262 @@ static int test_provider_init(HWAInferenceProvider *provider)
         return 0;
     }
     return 1;
+}
+
+static void test_request_validator_checks_shape_limits_and_hashes(void)
+{
+    static const char wrong_sha256[] =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    TestBytes bytes;
+    HWAInferenceInput inputs[2];
+    HWAInferenceRequest request;
+    HWAInferenceProvider provider;
+    unsigned char corrupt_source[sizeof(test_source_data)];
+    char corrupt_sha256[HWA_SHA256_HEX_SIZE];
+    char error[HWA_ERROR_SIZE] = {0};
+
+    test_request_init(&request, &bytes, inputs);
+    if (!test_provider_init(&provider)) return;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) == 0,
+          "valid inference request failed validation: %s", error);
+
+    request.timeout_milliseconds = 0U;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a zero timeout");
+    request.timeout_milliseconds = UINT64_C(1000);
+
+    request.max_input_file_bytes =
+        (uint64_t)sizeof(test_source_data) - 1U;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator ignored its per-file input cap");
+    request.max_input_file_bytes = (uint64_t)sizeof(test_source_data);
+
+    request.source_format.channel_mask = 1U;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator ignored a WAVE format mismatch");
+    CHECK(strstr(error, "format") != NULL,
+          "WAVE format mismatch gave the wrong error: %s", error);
+    request.source_format.channel_mask = 0U;
+
+    memcpy(corrupt_source, test_source_data, sizeof(corrupt_source));
+    corrupt_source[0] = (unsigned char)'X';
+    bytes.data = corrupt_source;
+    CHECK(hwa_inference_byte_source_sha256(
+              &inputs[0].bytes, request.max_input_file_bytes,
+              corrupt_sha256, error, sizeof(error)) == 0,
+          "cannot hash corrupt WAVE fixture: %s", error);
+    inputs[0].sha256 = corrupt_sha256;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a corrupt WAVE with a correct hash");
+    CHECK(strstr(error, "WAVE") != NULL,
+          "corrupt WAVE gave the wrong error: %s", error);
+    bytes.data = test_source_data;
+    inputs[0].sha256 = test_source_sha256;
+
+    inputs[1] = inputs[0];
+    inputs[1].id = "score";
+    inputs[1].role = "score-context";
+    inputs[1].media_type = "application/vnd.recordare.musicxml+xml";
+    inputs[1].bytes.name = "context.musicxml";
+    request.input_count = 2U;
+    request.max_input_bytes =
+        (uint64_t)(2U * sizeof(test_source_data)) - 1U;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator ignored its total input cap");
+
+    request.max_input_bytes = (uint64_t)(2U * sizeof(test_source_data));
+    inputs[1].sha256 = wrong_sha256;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator ignored a context input hash mismatch");
+    CHECK(strstr(error, "hash") != NULL,
+          "input hash mismatch gave the wrong error: %s", error);
+    inputs[1].sha256 = test_source_sha256;
+
+    inputs[1].role = "source-recording";
+    inputs[1].media_type = "audio/wav";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a second source recording");
+    CHECK(strstr(error, "source") != NULL,
+          "second source recording gave the wrong error: %s", error);
+
+    hwa_inference_provider_destroy(&provider);
+}
+
+static void test_request_validator_checks_settings_format_and_callbacks(void)
+{
+    TestBytes bytes;
+    HWAInferenceInput inputs[2];
+    HWAInferenceRequest request;
+    HWAInferenceProvider provider;
+    HWAInferencePollFunction poll;
+    char invalid_utf8[] = {'b', 'a', 'd', (char)0xff, '\0'};
+    char error[HWA_ERROR_SIZE] = {0};
+
+    test_request_init(&request, &bytes, inputs);
+    if (!test_provider_init(&provider)) return;
+    request.settings_json =
+        " {\"enabled\":true,\"values\":[null,-1.25e+2,\"ok\"]} ";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) == 0,
+          "request validator rejected a valid settings object: %s", error);
+    request.settings_json = "{\"enabled\":}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted malformed settings JSON");
+    request.settings_json = "[]";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted non-object settings JSON");
+    request.settings_json = "{\"value\":\"\xff\"}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted invalid UTF-8 settings");
+    request.settings_json = "{\"value\":\"\\u0000\"}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a null Unicode escape");
+    request.settings_json = "{\"value\":\"\\ud800\"}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a lone high surrogate");
+    request.settings_json = "{\"value\":\"\\udc00\"}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted a lone low surrogate");
+    request.settings_json = "{\"value\":\"\\ud83d\\ude00\"}";
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) == 0,
+          "request validator rejected a surrogate pair: %s", error);
+
+    request.settings_json = "{}";
+    inputs[0].bytes.name = invalid_utf8;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted an invalid UTF-8 input name");
+    inputs[0].bytes.name = "fixed source.wav";
+
+    provider.name = invalid_utf8;
+    request.expected_provider_name = invalid_utf8;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted an invalid UTF-8 provider name");
+    provider.name = "org.hlolli.fixed-inference";
+    request.expected_provider_name = "org.hlolli.fixed-inference";
+
+    request.source_format.duration_seconds = 0.005;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted inconsistent source duration");
+    request.source_format.duration_seconds = 0.004;
+
+    poll = provider.poll;
+    provider.poll = NULL;
+    CHECK(hwa_inference_request_validate(&provider, &request,
+                                         error, sizeof(error)) != 0,
+          "request validator accepted an incomplete provider descriptor");
+    provider.poll = poll;
+    hwa_inference_provider_destroy(&provider);
+}
+
+static void test_output_validator_binds_request_identity(void)
+{
+    TestBytes bytes;
+    HWAInferenceInput inputs[2];
+    HWAInferenceRequest request;
+    HWAInferenceProvider provider;
+    HWAInferencePollState state = HWA_INFERENCE_PENDING;
+    const HWAInferenceOutput *ready = NULL;
+    HWAInferenceOutput output;
+    HWAEventBundle bundle;
+    HWAEventProvider providers[2];
+    HWAEventAudio audio[2];
+    HWAPerformanceEvent event;
+    HWAEventValue value;
+    void *task = NULL;
+    char error[HWA_ERROR_SIZE] = {0};
+
+    test_request_init(&request, &bytes, inputs);
+    if (!test_provider_init(&provider)) return;
+    CHECK(provider.start(provider.context, &request, &task,
+                         error, sizeof(error)) == 0 && task != NULL,
+          "could not start request-binding fixture: %s", error);
+    if (task == NULL) goto cleanup;
+    CHECK(provider.poll(provider.context, task, &state, &ready,
+                        error, sizeof(error)) == 0 &&
+              state == HWA_INFERENCE_PENDING && ready == NULL,
+          "request-binding fixture did not report pending");
+    CHECK(provider.poll(provider.context, task, &state, &ready,
+                        error, sizeof(error)) == 0 &&
+              state == HWA_INFERENCE_READY && ready != NULL,
+          "request-binding fixture did not report ready: %s", error);
+    if (ready == NULL || ready->bundle == NULL) goto cleanup;
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, ready, error, sizeof(error)) == 0,
+          "valid request-bound output failed validation: %s", error);
+
+    output = *ready;
+    bundle = *ready->bundle;
+    output.bundle = &bundle;
+    audio[0] = ready->bundle->audio[0];
+    audio[0].name = (char *)"another.wav";
+    bundle.audio = audio;
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, &output, error, sizeof(error)) != 0,
+          "request-bound validator accepted another source name");
+
+    bundle = *ready->bundle;
+    audio[0] = ready->bundle->audio[0];
+    audio[0].format.channel_mask = 1U;
+    bundle.audio = audio;
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, &output, error, sizeof(error)) != 0,
+          "request-bound validator ignored a source format field");
+
+    bundle = *ready->bundle;
+    audio[0] = ready->bundle->audio[0];
+    audio[1] = ready->bundle->audio[0];
+    audio[1].id = UINT64_C(8);
+    audio[1].name = (char *)"second.wav";
+    bundle.audio = audio;
+    bundle.audio_count = 2U;
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, &output, error, sizeof(error)) != 0,
+          "request-bound validator accepted a second source clock");
+
+    bundle = *ready->bundle;
+    providers[0] = ready->bundle->providers[0];
+    providers[1] = ready->bundle->providers[0];
+    providers[1].id = UINT64_C(2);
+    providers[1].name = (char *)"org.hlolli.other-inference";
+    bundle.providers = providers;
+    bundle.provider_count = 2U;
+    event = ready->bundle->events[0];
+    value = ready->bundle->events[0].values[0];
+    value.provider_id = UINT64_C(2);
+    event.values = &value;
+    bundle.events = &event;
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, &output, error, sizeof(error)) != 0,
+          "request-bound validator accepted another inference provider");
+
+    providers[1].name = providers[0].name;
+    value.provider_id = UINT64_C(1);
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, &output, error, sizeof(error)) != 0,
+          "request-bound validator accepted duplicate provider identity");
+
+cleanup:
+    provider.task_free(provider.context, task);
+    hwa_inference_provider_destroy(&provider);
 }
 
 static void test_fixed_provider_returns_one_exact_note(void)
@@ -270,9 +529,10 @@ static void test_fixed_provider_returns_one_exact_note(void)
     bundle = output->bundle;
     CHECK(bundle != NULL, "fixed provider returned no event bundle");
     if (bundle == NULL) goto cleanup;
-    CHECK(hwa_inference_output_validate(output, &request.output_limits,
-                                        error, sizeof(error)) == 0,
-          "fixed provider returned an invalid output: %s", error);
+    CHECK(hwa_inference_output_validate_for_request(
+              &provider, &request, output, error, sizeof(error)) == 0,
+          "fixed provider returned an invalid request-bound output: %s",
+          error);
     CHECK(bundle->provider_count == 1U && bundle->audio_count == 1U &&
               bundle->event_count == 1U && bundle->trace_count == 0U &&
               bundle->warning_count == 0U,
@@ -367,7 +627,7 @@ static void test_fixed_provider_rejects_result_outside_bundle_limits(void)
     hwa_inference_provider_destroy(&provider);
 }
 
-static void test_fixed_provider_defers_saved_byte_limits(void)
+static void test_request_validator_rejects_zero_output_limits(void)
 {
     TestBytes bytes;
     HWAInferenceInput inputs[2];
@@ -382,8 +642,10 @@ static void test_fixed_provider_defers_saved_byte_limits(void)
     request.output_limits.max_bundle_bytes = 0U;
     if (!test_provider_init(&provider)) return;
     CHECK(provider.start(provider.context, &request, &task,
-                         error, sizeof(error)) == 0 && task != NULL,
-          "fixed provider guessed saved JSON byte sizes: %s", error);
+                         error, sizeof(error)) != 0 && task == NULL,
+          "fixed provider accepted zero output byte limits");
+    CHECK(strstr(error, "limit") != NULL,
+          "zero output byte limits gave the wrong error: %s", error);
     provider.task_free(provider.context, task);
     hwa_inference_provider_destroy(&provider);
 }
@@ -502,7 +764,7 @@ static void test_fixed_provider_rejects_duplicate_input_ids(void)
                          error, sizeof(error)) != 0,
           "fixed provider accepted duplicate input IDs");
     CHECK(task == NULL, "duplicate input IDs returned a task");
-    CHECK(strstr(error, "invalid fixed inference request") != NULL,
+    CHECK(strstr(error, "duplicate") != NULL,
           "duplicate input IDs gave the wrong error: %s", error);
     provider.task_free(provider.context, task);
     hwa_inference_provider_destroy(&provider);
@@ -529,7 +791,7 @@ static void test_fixed_provider_enforces_input_count_bounds(void)
                          error, sizeof(error)) != 0,
           "fixed provider accepted zero inputs");
     CHECK(task == NULL, "zero inputs returned a task");
-    CHECK(strstr(error, "invalid fixed inference request") != NULL,
+    CHECK(strstr(error, "shape") != NULL,
           "zero inputs gave the wrong error: %s", error);
     provider.task_free(provider.context, task);
     hwa_inference_provider_destroy(&provider);
@@ -578,7 +840,7 @@ static void test_fixed_provider_enforces_input_count_bounds(void)
                          error, sizeof(error)) != 0,
           "fixed provider accepted %zu inputs", excessive_count);
     CHECK(task == NULL, "%zu inputs returned a task", excessive_count);
-    CHECK(strstr(error, "invalid fixed inference request") != NULL,
+    CHECK(strstr(error, "shape") != NULL,
           "%zu inputs gave the wrong error: %s", excessive_count, error);
     provider.task_free(provider.context, task);
     hwa_inference_provider_destroy(&provider);
@@ -1016,10 +1278,13 @@ static void test_fixed_provider_bounds_source_name_before_allocation(void)
 
 int main(void)
 {
+    test_request_validator_checks_shape_limits_and_hashes();
+    test_request_validator_checks_settings_format_and_callbacks();
+    test_output_validator_binds_request_identity();
     test_fixed_provider_returns_one_exact_note();
     test_fixed_provider_obeys_output_count_limits();
     test_fixed_provider_rejects_result_outside_bundle_limits();
-    test_fixed_provider_defers_saved_byte_limits();
+    test_request_validator_rejects_zero_output_limits();
     test_fixed_provider_accepts_spaced_empty_settings();
     test_fixed_provider_rejects_other_model_identity();
     test_fixed_provider_rejects_other_name_and_version();
