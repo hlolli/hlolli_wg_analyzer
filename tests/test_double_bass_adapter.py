@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,7 @@ import wave
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = (ROOT / "adapters" / "hlolli_wg_double_bass" /
            "build_renderer.py")
+FIT_TOOL = ROOT / "tools" / "instrument_fit.py"
 PYTHON = Path(sys.executable).resolve()
 ANALYZER = None
 if len(sys.argv) == 2 and sys.argv[1].startswith("--analyzer="):
@@ -82,7 +84,7 @@ def write(path: Path, data: bytes, mode: int = 0o600) -> None:
     path.chmod(mode)
 
 
-def fixture(root: Path) -> Path:
+def fixture(root: Path, allow_damped_loss: bool = False) -> Path:
     plugin = root / "plug in"
     write(plugin / "src" / "hlolli_wg_double_bass.c", b"source\n")
     model = {
@@ -138,7 +140,8 @@ def fixture(root: Path) -> Path:
         csound,
         f"#!{PYTHON} -I\n".encode("ascii")
         + b"import json, math, pathlib, re, sys, wave\n"
-        b"i=sys.argv.index('-o')\n"
+        + f"allow_damped_loss={allow_damped_loss!r}\n".encode("ascii")
+        + b"i=sys.argv.index('-o')\n"
         b"p=pathlib.Path(sys.argv[i+1])\n"
         b"if '-3' not in sys.argv or '-f' in sys.argv or '-K' not in sys.argv: raise SystemExit(10)\n"
         b"text=pathlib.Path(sys.argv[-1]).read_text()\n"
@@ -146,7 +149,7 @@ def fixture(root: Path) -> Path:
         b"module=pathlib.Path(next(value.split('=',1)[1] for value in sys.argv if value.startswith('--opcode-lib='))).read_text()\n"
         b"values=json.loads(re.search(r'FAKE_MODEL_VALUES=(\\[[^]]*\\])',module).group(1))\n"
         b"cutoffs=json.loads(re.search(r'FAKE_BRIDGE_CUTOFFS=(\\[[^]]*\\])',module).group(1))\n"
-        b"if sum(value != 0.25 for value in values)==1 and '  kGate = 1\\n' not in text: raise SystemExit(11)\n"
+        b"if not allow_damped_loss and sum(value != 0.25 for value in values)==1 and '  kGate = 1\\n' not in text: raise SystemExit(11)\n"
         b"line=next(value for value in text.splitlines() if 'hlolli_wg_double_bass kGate,' in value)\n"
         b"controls=[value.strip() for value in line.split('kGate,',1)[1].split(',')]\n"
         b"frequency=float(controls[0]); force=float(controls[1]); speed=float(controls[2]); position=float(controls[3]); articulation=int(controls[6]); string=int(controls[9])\n"
@@ -160,9 +163,10 @@ def fixture(root: Path) -> Path:
         b"frames=round(duration*rate)\n"
         b"frames=((frames+31)//32)*32\n"
         b"prefix=[round(value*10000) for value in values]+[string*1000,round(frequency*10),round(cutoffs[2])]\n"
+        b"amplitude=round(20000*values[0]) if allow_damped_loss else 8000\n"
         b"with wave.open(str(p),'wb') as w:\n"
         b" w.setnchannels(1); w.setsampwidth(3); w.setframerate(rate)\n"
-        b" w.writeframes(b''.join(int(prefix[n] if n<len(prefix) else round(8000*math.sin(2*math.pi*frequency*n/rate))).to_bytes(3,'little',signed=True) for n in range(frames)))\n",
+        b" w.writeframes(b''.join(int(prefix[n] if n<len(prefix) else round(amplitude*math.sin(2*math.pi*frequency*n/rate))).to_bytes(3,'little',signed=True) for n in range(frames)))\n",
         0o700)
     config = {
         "schema": "hwa-double-bass-renderer-build",
@@ -273,6 +277,20 @@ def wave_file(path: Path, frames: int = 12000,
             for index in range(frames)))
 
 
+def rms_wave_file(path: Path, amplitude: int, frequency_hz: float,
+                  frames: int = 12000) -> None:
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(3)
+        stream.setframerate(48000)
+        stream.writeframes(b"".join(
+            round(amplitude * math.sin(
+                2.0 * math.pi * frequency_hz * index / 48000.0
+            )).to_bytes(3, "little", signed=True)
+            for index in range(frames)
+        ))
+
+
 def extensible_wave_file(path: Path) -> None:
     frames = b"".join(
         int((index % 200) - 100).to_bytes(3, "little", signed=True)
@@ -325,7 +343,7 @@ def experiment_manifest(check_reference: Path,
         "method_version": "stage8-1",
         "clock_rate_hz": 48000,
         "inputs": [
-            {"id": "iowa2001-pizz-mf-open-a1-heldout-48k-soxr",
+            {"id": "iowa2001-pizz-mf-open-e1-heldout-48k-soxr",
              "sha256": file_hash(check_reference)},
             {"id": "iowa2012-pizz-e-ff-open",
              "sha256": file_hash(fit_reference)},
@@ -333,8 +351,9 @@ def experiment_manifest(check_reference: Path,
         "parameters": [
             {
                 "id": f"string_{name}_loss_seconds", "unit": "seconds",
-                "minimum": 0.2, "maximum": 0.3, "baseline": 0.25,
-                "levels": [0.25],
+                "minimum": 0.2, "maximum": 0.35, "baseline": 0.25,
+                "levels": ([0.2, 0.25, 0.3, 0.35]
+                           if name == "e" else [0.25]),
             }
             for name in ("a", "d", "e", "g")
         ],
@@ -343,8 +362,8 @@ def experiment_manifest(check_reference: Path,
             "sample_count": 0, "replicates": 1,
         },
         "cases": [
-            case("iowa2001-pizz-mf-open-a1-heldout-48k-soxr", "check",
-                 "iowa2001-pizz-mf-open-a1-heldout-48k-soxr"),
+            case("iowa2001-pizz-mf-open-e1-heldout-48k-soxr", "check",
+                 "iowa2001-pizz-mf-open-e1-heldout-48k-soxr"),
             case("iowa2012-pizz-e-ff-open", "fit",
                  "iowa2012-pizz-e-ff-open"),
         ],
@@ -354,6 +373,45 @@ def experiment_manifest(check_reference: Path,
                 "feature": "rms_dbfs", "index": 0,
             },
         ],
+    }
+
+
+def fit_manifest() -> dict:
+    profile_indexes = {"a": 1, "d": 2, "e": 0, "g": 3}
+    return {
+        "schema": "hwa-instrument-fit",
+        "schema_version": 1,
+        "adapter_id": "hlolli_wg_double_bass",
+        "parameters": [
+            {
+                "id": f"string_{name}_loss_seconds",
+                "unit": "seconds",
+                "minimum": 0.2,
+                "maximum": 0.35,
+                "baseline": 0.25,
+                "profile_paths": [[
+                    "strings", profile_indexes[name],
+                    "loss_time_constant_seconds",
+                ]],
+            }
+            for name in ("a", "d", "e", "g")
+        ],
+        "objectives": [
+            {
+                "id": f"{split}_rms_gap",
+                "kind": "experiment-gap",
+                "response": "final.rms",
+                "split": split,
+                "weight": 1.0,
+                "scale": 1.0,
+            }
+            for split in ("fit", "check")
+        ],
+        "selection": {
+            "check_weight": 1.0,
+            "max_check_loss_increase": 0.0,
+            "max_candidate_worst_harm": 100.0,
+        },
     }
 
 
@@ -1314,10 +1372,14 @@ class DoubleBassAdapterTests(unittest.TestCase):
                     self.assertFalse((root / "outside.wav").exists())
 
     @unittest.skipIf(ANALYZER is None, "analyzer executable was not supplied")
-    def test_public_experiment_and_resume_use_the_frozen_renderer(self) -> None:
+    def test_public_fit_flow_uses_the_frozen_renderer(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hwa bass experiment ") as text:
             root = Path(text)
-            config = fixture(root)
+            config = fixture(root, allow_damped_loss=True)
+            source_profile = (
+                root / "plug in" / "model" / "double_bass-v1.json"
+            )
+            source_before = source_profile.read_bytes()
             renderer = root / "renderer"
             built = subprocess.run(
                 [str(PYTHON), "-I", str(BUILDER), "build",
@@ -1327,45 +1389,174 @@ class DoubleBassAdapterTests(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr)
             check_reference = root / "check-reference.wav"
             fit_reference = root / "fit-reference.wav"
-            wave_file(check_reference, frames=12032)
-            wave_file(fit_reference)
+            rms_wave_file(
+                check_reference, 6200, 41.20344461410875, frames=12032
+            )
+            rms_wave_file(fit_reference, 6000, 41.20344461410875)
+            self.assertNotEqual(file_hash(check_reference),
+                                file_hash(fit_reference))
             manifest = root / "experiment.json"
             manifest.write_text(
                 json.dumps(experiment_manifest(check_reference, fit_reference)),
                 encoding="utf-8")
+            fit_path = root / "fit.json"
+            fit_path.write_text(json.dumps(fit_manifest()), encoding="utf-8")
             fresh = root / "fresh"
+            independent = root / "independent"
             resumed = root / "resumed"
 
-            first = subprocess.run(
-                [str(ANALYZER), "--renderer", str(renderer), "--allow-run",
-                 "--bind", "iowa2001-pizz-mf-open-a1-heldout-48k-soxr=" +
-                 str(check_reference),
-                 "--bind", "iowa2012-pizz-e-ff-open=" + str(fit_reference),
-                 "--output", str(fresh), "experiment", str(manifest)],
-                check=False, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, env={})
-            self.assertEqual(first.returncode, 0, first.stderr)
-            second = subprocess.run(
-                [str(ANALYZER), "--renderer", str(renderer), "--allow-run",
-                 "--bind", "iowa2001-pizz-mf-open-a1-heldout-48k-soxr=" +
-                 str(check_reference),
-                 "--bind", "iowa2012-pizz-e-ff-open=" + str(fit_reference),
-                 "--resume-from", str(fresh), "--output", str(resumed),
-                 "experiment", str(manifest)],
-                check=False, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, env={})
-            self.assertEqual(second.returncode, 0, second.stderr)
+            def run_experiment(output: Path, resume_from=None) -> None:
+                command = [
+                    str(ANALYZER), "--renderer", str(renderer), "--allow-run",
+                    "--bind",
+                    "iowa2001-pizz-mf-open-e1-heldout-48k-soxr=" +
+                    str(check_reference),
+                    "--bind", "iowa2012-pizz-e-ff-open=" + str(fit_reference),
+                ]
+                if resume_from is not None:
+                    command.extend(["--resume-from", str(resume_from)])
+                command.extend([
+                    "--output", str(output), "experiment", str(manifest),
+                ])
+                completed = subprocess.run(
+                    command, check=False, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, env={})
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            run_experiment(fresh)
+            run_experiment(independent)
+            run_experiment(resumed, resume_from=fresh)
 
             first_result = fresh / "result.hwa-experiment"
-            second_result = resumed / "result.hwa-experiment"
-            self.assertEqual(first_result.read_bytes(),
-                             second_result.read_bytes())
+            independent_result = independent / "result.hwa-experiment"
+            resumed_result = resumed / "result.hwa-experiment"
+            first_bytes = first_result.read_bytes()
+            self.assertEqual(first_bytes, independent_result.read_bytes())
+            self.assertEqual(first_bytes, resumed_result.read_bytes())
+            self.assertIn(b"META,input_count,2,", first_bytes)
+            self.assertIn(b"META,point_count,4,", first_bytes)
+            self.assertIn(file_hash(check_reference).encode("ascii"), first_bytes)
+            self.assertIn(file_hash(fit_reference).encode("ascii"), first_bytes)
             self.assertIn(file_hash(renderer).encode("ascii"),
-                          first_result.read_bytes())
+                          first_bytes)
             self.assertFalse(any(
                 path.name in {"request.json", "stdout.txt", "stderr.txt"}
                 for path in fresh.rglob("*")
             ))
+
+            selection_path = root / "selection.json"
+            selected = subprocess.run([
+                str(PYTHON), "-B", "-I", str(FIT_TOOL), "select",
+                "--manifest", str(fit_path),
+                "--experiment", str(first_result),
+                "--analyzer", str(ANALYZER),
+                "--profile", str(source_profile),
+                "--output", str(selection_path),
+            ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               text=True, env={})
+            self.assertEqual(selected.returncode, 0, selected.stderr)
+            selection = json.loads(selection_path.read_text(encoding="utf-8"))
+            self.assertEqual(selection["status"], "pass")
+            self.assertEqual(len(selection["points"]), 4)
+            self.assertEqual(
+                selection["chosen_parameters"]["string_e_loss_seconds"], 0.3
+            )
+            self.assertEqual(
+                selection["profile_adapter_sha256"], file_hash(renderer)
+            )
+            points = {
+                row["parameters"]["string_e_loss_seconds"]: row
+                for row in selection["points"]
+            }
+            self.assertEqual(set(points), {0.2, 0.25, 0.3, 0.35})
+            self.assertEqual(
+                sum(not row["baseline"] for row in points.values()), 3
+            )
+            lower = points[0.2]
+            baseline = points[0.25]
+            chosen = points[0.3]
+            upper = points[0.35]
+            self.assertEqual(selection["chosen_point_id"], chosen["point_id"])
+            self.assertTrue(chosen["eligible"])
+            self.assertFalse(lower["eligible"])
+            self.assertLess(chosen["fit_loss"], baseline["fit_loss"])
+            self.assertLess(chosen["check_loss"], baseline["check_loss"])
+            self.assertGreater(lower["check_loss"], baseline["check_loss"])
+            self.assertLess(chosen["score"], upper["score"])
+            self.assertLess(upper["score"], baseline["score"])
+            self.assertLess(baseline["score"], lower["score"])
+
+            wrong_renderer = root / "wrong-renderer"
+            wrong_renderer.write_bytes(renderer.read_bytes() + b"\n# changed\n")
+            wrong_renderer.chmod(0o700)
+            wrong_profile = root / "wrong-profile.json"
+            wrong_receipt = root / "wrong-receipt.json"
+            rejected = subprocess.run([
+                str(PYTHON), "-B", "-I", str(FIT_TOOL), "write-profile",
+                "--manifest", str(fit_path),
+                "--fit", str(selection_path),
+                "--source", str(source_profile),
+                "--adapter", str(wrong_renderer),
+                "--output", str(wrong_profile),
+                "--receipt", str(wrong_receipt),
+            ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               text=True, env={})
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("does not match", rejected.stderr)
+            self.assertFalse(wrong_profile.exists())
+            self.assertFalse(wrong_receipt.exists())
+
+            output_profile = root / "selected-profile.json"
+            receipt_path = root / "profile-receipt.json"
+            written = subprocess.run([
+                str(PYTHON), "-B", "-I", str(FIT_TOOL), "write-profile",
+                "--manifest", str(fit_path),
+                "--fit", str(selection_path),
+                "--source", str(source_profile),
+                "--adapter", str(renderer),
+                "--output", str(output_profile),
+                "--receipt", str(receipt_path),
+            ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               text=True, env={})
+            self.assertEqual(written.returncode, 0, written.stderr)
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["schema"], "hwa-profile-write-receipt")
+            self.assertEqual(receipt["schema_version"], 1)
+            self.assertEqual(receipt["adapter_id"], "hlolli_wg_double_bass")
+            self.assertEqual(receipt["adapter_sha256"], file_hash(renderer))
+            self.assertEqual(
+                receipt["fit_result_sha256"], file_hash(selection_path)
+            )
+            self.assertEqual(
+                receipt["source_profile_sha256"],
+                hashlib.sha256(source_before).hexdigest(),
+            )
+            self.assertEqual(
+                receipt["output_profile_sha256"], file_hash(output_profile)
+            )
+            changes = {
+                row["parameter"]: row for row in receipt["changes"]
+            }
+            self.assertEqual(set(changes), {
+                "string_a_loss_seconds", "string_d_loss_seconds",
+                "string_e_loss_seconds", "string_g_loss_seconds",
+            })
+            self.assertEqual(changes["string_e_loss_seconds"], {
+                "parameter": "string_e_loss_seconds",
+                "path": ["strings", 0, "loss_time_constant_seconds"],
+                "before": 0.25,
+                "after": 0.3,
+            })
+            for name in (
+                    "string_a_loss_seconds", "string_d_loss_seconds",
+                    "string_g_loss_seconds"):
+                self.assertEqual(changes[name]["before"], 0.25)
+                self.assertEqual(changes[name]["after"], 0.25)
+            output_value = json.loads(output_profile.read_text(encoding="utf-8"))
+            self.assertEqual(
+                output_value["strings"][0]["loss_time_constant_seconds"], 0.3
+            )
+            self.assertEqual(source_profile.read_bytes(), source_before)
 
 
 if __name__ == "__main__":
