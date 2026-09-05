@@ -17,6 +17,7 @@
 #include <direct.h>
 #include <io.h>
 #include <process.h>
+#include <sys/stat.h>
 #define TEST_MKDIR(path) _mkdir(path)
 #define TEST_RMDIR(path) _rmdir(path)
 #define TEST_UNLINK(path) _unlink(path)

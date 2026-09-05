@@ -179,6 +179,35 @@ static int hwa_basic_pitch_add_allocation(uint64_t *total,
     return hwa_basic_pitch_u64_add(total, (uint64_t)bytes, maximum);
 }
 
+static int hwa_basic_pitch_size_exceeds_json_integer(size_t value)
+{
+#if SIZE_MAX > HWA_BASIC_PITCH_JSON_SAFE_INTEGER
+    return value > (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER;
+#else
+    (void)value;
+    return 0;
+#endif
+}
+
+static size_t hwa_basic_pitch_limit_json_integer(size_t value)
+{
+#if SIZE_MAX > HWA_BASIC_PITCH_JSON_SAFE_INTEGER
+    if (value > (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER)
+        return (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER;
+#endif
+    return value;
+}
+
+static int hwa_basic_pitch_size_exceeds_u64_half(size_t value)
+{
+#if SIZE_MAX > UINT64_MAX / 2U
+    return value > (size_t)(UINT64_MAX / 2U);
+#else
+    (void)value;
+    return 0;
+#endif
+}
+
 int hwa_basic_pitch_task_settings_build(
     const HWABasicPitchDecoderOptions *decoder_options,
     char **settings_json,
@@ -202,10 +231,10 @@ int hwa_basic_pitch_task_settings_build(
     if (hwa_basic_pitch_decoder_options_validate(
             decoder_options, error, error_size) != 0)
         return -1;
-    if ((uint64_t)decoder_options->minimum_note_frames >
-            HWA_BASIC_PITCH_JSON_SAFE_INTEGER ||
-        (uint64_t)decoder_options->energy_tolerance_frames >
-            HWA_BASIC_PITCH_JSON_SAFE_INTEGER) {
+    if (hwa_basic_pitch_size_exceeds_json_integer(
+            decoder_options->minimum_note_frames) ||
+        hwa_basic_pitch_size_exceeds_json_integer(
+            decoder_options->energy_tolerance_frames)) {
         hwa_basic_pitch_provider_error(
             error, error_size,
             "Basic Pitch decoder counts exceed the JSON integer limit");
@@ -868,13 +897,7 @@ static int hwa_basic_pitch_provider_start(void *context_value,
     max_notes = request->output_limits.max_events;
     if (max_notes > request->output_limits.max_values)
         max_notes = request->output_limits.max_values;
-#if SIZE_MAX > UINT64_MAX
-    if (max_notes > (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER)
-        max_notes = (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER;
-#else
-    if ((uint64_t)max_notes > HWA_BASIC_PITCH_JSON_SAFE_INTEGER)
-        max_notes = (size_t)HWA_BASIC_PITCH_JSON_SAFE_INTEGER;
-#endif
+    max_notes = hwa_basic_pitch_limit_json_integer(max_notes);
     if (hwa_basic_pitch_collect_activations(
             context, request, source, deadline_started,
             &note_activations, &onset_activations, &frame_count,
@@ -888,7 +911,7 @@ static int hwa_basic_pitch_provider_start(void *context_value,
             frame_count, HWA_BASIC_PITCH_NOTE_BINS, &cell_count) != 0 ||
         hwa_basic_pitch_size_bytes(
             cell_count, sizeof(float), &matrix_bytes) != 0 ||
-        (uint64_t)matrix_bytes > UINT64_MAX / 2U) {
+        hwa_basic_pitch_size_exceeds_u64_half(matrix_bytes)) {
         hwa_basic_pitch_provider_error(
             error, error_size, "Basic Pitch decode size overflows");
         goto cleanup;

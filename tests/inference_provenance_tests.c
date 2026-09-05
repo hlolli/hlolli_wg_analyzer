@@ -159,11 +159,13 @@ static void test_invalid_name_bytes_fail_closed(void)
     HWAInferenceRequest request;
     HWAInferenceInput inputs[2];
     HWAInferenceRuntimeProvenance runtime = make_runtime();
-    char name[] = {'b', 'a', 'd', (char)0xff, '.', 'w', 'a', 'v', '\0'};
+    static const unsigned char name_bytes[] = {
+        'b', 'a', 'd', 0xffU, '.', 'w', 'a', 'v', '\0'
+    };
     char *settings = NULL;
     char error[128] = {0};
     make_request(&request, inputs, 0);
-    inputs[0].bytes.name = name;
+    inputs[0].bytes.name = (const char *)name_bytes;
     CHECK(hwa_inference_provenance_settings_build(
               &request, &runtime, 8192U, &settings,
               error, sizeof(error)) != 0 && settings == NULL &&

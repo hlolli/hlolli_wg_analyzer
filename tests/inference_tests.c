@@ -315,7 +315,10 @@ static void test_request_validator_checks_settings_format_and_callbacks(void)
     HWAInferenceRequest request;
     HWAInferenceProvider provider;
     HWAInferencePollFunction poll;
-    char invalid_utf8[] = {'b', 'a', 'd', (char)0xff, '\0'};
+    static const unsigned char invalid_utf8_bytes[] = {
+        'b', 'a', 'd', 0xffU, '\0'
+    };
+    const char *invalid_utf8 = (const char *)invalid_utf8_bytes;
     char error[HWA_ERROR_SIZE] = {0};
 
     test_request_init(&request, &bytes, inputs);
