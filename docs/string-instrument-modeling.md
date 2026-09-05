@@ -92,7 +92,7 @@ Done when an interrupted or failed write cannot alter the source model.
 
 ### 5. Prove reuse
 
-- [ ] Finish and test the violin adapter and manifest.
+- [x] Finish and test the violin adapter and manifest.
 - [ ] Add viola, cello, and double-bass adapters as their renderers become
   available.
 - [ ] Keep one shared objective set where the measured fact is the same.

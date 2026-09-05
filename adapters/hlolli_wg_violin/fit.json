@@ -1,0 +1,122 @@
+{
+  "schema": "hwa-instrument-fit",
+  "schema_version": 1,
+  "adapter_id": "hlolli-wg-violin-v1",
+  "parameters": [
+    {
+      "id": "body_wet_gain",
+      "unit": "ratio",
+      "minimum": 0.1,
+      "maximum": 0.55,
+      "baseline": 0.45,
+      "profile_paths": [["body", "wet_gain"]]
+    },
+    {
+      "id": "bridge_cutoff_g_hz",
+      "unit": "Hz",
+      "minimum": 4800.0,
+      "maximum": 8200.0,
+      "baseline": 5386.995271806526,
+      "profile_paths": [["strings", 0, "bridge_cutoff_hz"]]
+    },
+    {
+      "id": "bridge_cutoff_d_hz",
+      "unit": "Hz",
+      "minimum": 2800.0,
+      "maximum": 5200.0,
+      "baseline": 4964.244281108786,
+      "profile_paths": [["strings", 1, "bridge_cutoff_hz"]]
+    },
+    {
+      "id": "bridge_cutoff_a_hz",
+      "unit": "Hz",
+      "minimum": 4800.0,
+      "maximum": 8200.0,
+      "baseline": 7086.471045764144,
+      "profile_paths": [["strings", 2, "bridge_cutoff_hz"]]
+    },
+    {
+      "id": "bridge_cutoff_e_hz",
+      "unit": "Hz",
+      "minimum": 4400.0,
+      "maximum": 7600.0,
+      "baseline": 6024.580442039031,
+      "profile_paths": [["strings", 3, "bridge_cutoff_hz"]]
+    }
+  ],
+  "objectives": [
+    {
+      "id": "fit_mid_band",
+      "kind": "experiment-gap",
+      "response": "final.band.500-1000",
+      "split": "fit",
+      "weight": 0.4,
+      "scale": 6.0
+    },
+    {
+      "id": "fit_presence_band",
+      "kind": "experiment-gap",
+      "response": "final.band.2-4k",
+      "split": "fit",
+      "weight": 0.8,
+      "scale": 6.0
+    },
+    {
+      "id": "fit_metal_band",
+      "kind": "experiment-gap",
+      "response": "final.band.4-8k",
+      "split": "fit",
+      "weight": 1.0,
+      "scale": 6.0
+    },
+    {
+      "id": "fit_body_shape",
+      "kind": "body-envelope",
+      "case": "body-fit",
+      "reference_binding": "reference_body_fit",
+      "resource_id": "model.final",
+      "split": "fit",
+      "weight": 1.4,
+      "scale": 6.0
+    },
+    {
+      "id": "check_mid_band",
+      "kind": "experiment-gap",
+      "response": "final.band.500-1000",
+      "split": "check",
+      "weight": 0.4,
+      "scale": 6.0
+    },
+    {
+      "id": "check_presence_band",
+      "kind": "experiment-gap",
+      "response": "final.band.2-4k",
+      "split": "check",
+      "weight": 0.8,
+      "scale": 6.0
+    },
+    {
+      "id": "check_metal_band",
+      "kind": "experiment-gap",
+      "response": "final.band.4-8k",
+      "split": "check",
+      "weight": 1.0,
+      "scale": 6.0
+    },
+    {
+      "id": "check_body_shape",
+      "kind": "body-envelope",
+      "case": "body-check",
+      "reference_binding": "reference_body_check",
+      "resource_id": "model.final",
+      "split": "check",
+      "weight": 1.4,
+      "scale": 6.0
+    }
+  ],
+  "selection": {
+    "check_weight": 1.0,
+    "max_check_loss_increase": 0.08,
+    "max_candidate_worst_harm": 4.0
+  }
+}

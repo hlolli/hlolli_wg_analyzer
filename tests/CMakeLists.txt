@@ -1445,6 +1445,15 @@ if(HWA_PYTHON3_EXECUTABLE)
 
   if(NOT WIN32)
     add_test(
+      NAME unit.violin-fit-adapter
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_violin_fit_adapter.py
+        --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+    set_tests_properties(unit.violin-fit-adapter PROPERTIES TIMEOUT 120)
+
+    add_test(
       NAME unit.viola-fit-adapter
       COMMAND
         ${HWA_PYTHON3_EXECUTABLE}

@@ -243,6 +243,9 @@ It reads the saved `result.hwa-experiment`, joins fit and validation scores, and
 can add a pitch-conditioned body-shape score or a gain-independent passive
 decay score. Instrument adapters own rendering and any profile rules. The
 selector owns neither Csound nor a model profile. The
+[violin fit adapter](adapters/hlolli_wg_violin/README.md) tests the model's
+five existing controls through this shared path. It checks four open-string
+pitches and records the exact hashes of all six references. The
 [cello open-string adapter](adapters/hlolli_wg_cello/README.md) gives a full
 rerun command. The
 [viola passive-string adapter](adapters/hlolli_wg_viola/README.md) documents
