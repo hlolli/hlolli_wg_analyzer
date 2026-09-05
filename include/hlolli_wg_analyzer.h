@@ -1843,7 +1843,8 @@ typedef enum HWAExperimentPlanKind {
 typedef enum HWAExperimentSplit {
     HWA_EXPERIMENT_FIT = 1,
     HWA_EXPERIMENT_CHECK = 2,
-    HWA_EXPERIMENT_SPLIT_COUNT = 3
+    HWA_EXPERIMENT_AUDIT = 3,
+    HWA_EXPERIMENT_SPLIT_COUNT = 4
 } HWAExperimentSplit;
 
 typedef enum HWAExperimentMonotonicity {

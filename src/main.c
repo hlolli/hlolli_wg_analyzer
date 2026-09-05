@@ -342,7 +342,7 @@ static void hwa_print_usage(FILE *stream)
         "  --max-experiment-total-ms N  Maximum total experiment time.\n"
         "  --max-experiment-parameters N  Maximum varied parameters.\n"
         "  --max-experiment-levels N  Maximum saved parameter levels.\n"
-        "  --max-experiment-cases N   Maximum fit/check cases.\n"
+        "  --max-experiment-cases N   Maximum experiment cases.\n"
         "  --max-experiment-responses N  Maximum selected responses.\n"
         "  --max-experiment-points N  Maximum parameter points.\n"
         "  --max-experiment-jobs N    Maximum rendered or reused jobs.\n"

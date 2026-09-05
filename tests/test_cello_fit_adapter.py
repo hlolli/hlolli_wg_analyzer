@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import subprocess
 import struct
@@ -67,6 +68,29 @@ def pcm16_wave(path, frames=256, rate=44100, channels=2):
         stream.setsampwidth(2)
         stream.setframerate(rate)
         stream.writeframes(b"\0\0" * frames * channels)
+
+
+def decay_wave(path, tau, *, lead=0.10, duration=2.5, channels=2):
+    rate = 44100
+    maximum = 32767
+    frames = round((lead + duration) * rate)
+    raw = bytearray()
+    for index in range(frames):
+        time = index / rate
+        value = 0.0
+        if time >= lead:
+            age = time - lead
+            value = (0.7 * math.exp(-age / tau) *
+                     math.sin(2.0 * math.pi * 220.0 * age))
+        encoded = max(
+            -maximum, min(maximum, round(value * maximum))
+        ).to_bytes(2, "little", signed=True)
+        raw.extend(encoded * channels)
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(channels)
+        stream.setsampwidth(2)
+        stream.setframerate(rate)
+        stream.writeframes(raw)
 
 
 def pcm24_extensible_wave(path, frames=256, rate=44100, channels=2):
@@ -466,7 +490,7 @@ def fake_shape_selection(bundle, target, values):
 
 
 def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False,
-                            shape_targets=None):
+                            shape_targets=None, decay_audio=False):
     if selected is None:
         selected = {"c2": 1.0, "g2": 1.0, "d3": 0.75, "a3": 1.0}
     if shape_targets is None:
@@ -479,7 +503,13 @@ def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False,
         scalar_root = root / ("scalar-" + target)
         scalar_root.mkdir()
         reference_paths = None
-        if tamper == "reused-scalar" and target == "g2":
+        if decay_audio:
+            fit_reference = scalar_root / "fit-reference.wav"
+            check_reference = scalar_root / "check-reference.wav"
+            decay_wave(fit_reference, 0.40, lead=0.07 + index * 0.01)
+            decay_wave(check_reference, 0.40, lead=0.15 + index * 0.01)
+            reference_paths = (fit_reference, check_reference)
+        elif tamper == "reused-scalar" and target == "g2":
             reference_paths = first_references
         completed, bundle, cello = build_fake_bundle(
             scalar_root, target, reference_offset=index * 2,
@@ -511,6 +541,9 @@ def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False,
         audit = root / ("audit-" + target + ".wav")
         if tamper == "reused-audit" and target == "g2":
             audit = fit_path
+        elif decay_audio:
+            decay_wave(
+                audit, 0.40, lead=0.23 + index * 0.01, channels=1)
         else:
             pcm16_wave(audit, frames=300 + index, channels=1)
         scalar_rows.extend(["--scalar", target, str(bundle), str(selection)])
@@ -531,14 +564,86 @@ def build_fake_joint_bundle(root, tamper=None, selected=None, shape_g2=False,
     return completed, output, source_profiles
 
 
-def joint_render_request(binding, output_path, target, value):
+def joint_render_request(binding, output_path, target, value, split="fit"):
     request = render_request(binding, output_path, target=target)
-    request["case_id"] = target + "-pizz-fit"
-    request["inputs"][0]["binding_id"] = "reference_{}_fit".format(target)
+    request["case_id"] = "{}-pizz-{}".format(target, split)
+    request["inputs"][0]["binding_id"] = "reference_{}_{}".format(
+        target, split)
+    with wave.open(binding["path"], "rb") as stream:
+        request["inputs"][0]["channels"] = stream.getnchannels()
     request["parameters"] = [{
         "id": "joint_candidate", "unit": "choice", "value": value,
     }]
+    request["split"] = split
     return request
+
+
+def write_joint_experiment_result(bundle, output_dir):
+    manifest = json.loads(
+        (bundle / "experiment.json").read_text(encoding="utf-8")
+    )
+    output_dir.mkdir()
+    cases = [{
+        "id": index,
+        "name": row["id"],
+        "split": row["split"],
+        "weight": row["weight"],
+    } for index, row in enumerate(manifest["cases"], 1)]
+    jobs = []
+    artifacts = []
+    job_id = 0
+    for point_id, tau in ((1, 0.80), (2, 0.40)):
+        for case in cases:
+            job_id += 1
+            audio = output_dir / "model-{}-{}.wav".format(
+                point_id, case["name"])
+            decay_wave(audio, tau, lead=0.11 + case["id"] * 0.002)
+            jobs.append({
+                "id": job_id,
+                "key": "{:064x}".format(job_id),
+                "point_id": point_id,
+                "case_id": case["id"],
+            })
+            artifacts.append({
+                "id": job_id,
+                "job_id": job_id,
+                "resource_id": "model.final",
+                "artifact": {
+                    "path": audio.name,
+                    "sha256": hashlib.sha256(audio.read_bytes()).hexdigest(),
+                },
+                "file_bytes": audio.stat().st_size,
+                "kind": "stem",
+            })
+    parameter = manifest["parameters"][0]
+    result = {
+        "command": "experiment",
+        "schema_version": 10,
+        "parameters": [{
+            "id": 1,
+            "name": parameter["id"],
+            "unit": parameter["unit"],
+            "minimum": parameter["minimum"],
+            "maximum": parameter["maximum"],
+            "baseline": parameter["baseline"],
+        }],
+        "cases": cases,
+        "responses": [],
+        "points": [
+            {"id": 1, "key": "a" * 64, "baseline": True},
+            {"id": 2, "key": "b" * 64, "baseline": False},
+        ],
+        "values": [
+            {"id": 1, "point_id": 1, "parameter_id": 1, "value": 0.0},
+            {"id": 2, "point_id": 2, "parameter_id": 1, "value": 1.0},
+        ],
+        "jobs": jobs,
+        "artifacts": artifacts,
+        "candidates": [],
+    }
+    path = output_dir / "experiment-result.json"
+    path.write_text(json.dumps(result), encoding="utf-8")
+    return path
 
 
 def shape_render_request(binding, output_path, target="g2", values=None):
@@ -983,10 +1088,17 @@ class CelloFitAdapterTests(unittest.TestCase):
                 "minimum": 0.0, "maximum": 1.0, "baseline": 0.0,
                 "levels": [0.0, 1.0],
             }])
-            self.assertEqual(len(experiment["cases"]), 8)
+            self.assertEqual(len(experiment["cases"]), 12)
             self.assertEqual(
                 [row["id"] for row in experiment["cases"]],
                 sorted(row["id"] for row in experiment["cases"]),
+            )
+            self.assertEqual(
+                {(row["id"].split("-", 1)[0], row["split"])
+                 for row in experiment["cases"]},
+                {(target, split)
+                 for target in ("c2", "g2", "d3", "a3")
+                 for split in ("fit", "check", "audit")},
             )
             self.assertEqual(fit["schema_version"], 2)
             self.assertEqual(fit["selection"]["mode"], "verify-candidate")
@@ -1006,7 +1118,7 @@ class CelloFitAdapterTests(unittest.TestCase):
             )
             self.assertEqual(receipt["schema"],
                              "hwa-cello-joint-fit-adapter-bundle")
-            self.assertEqual(receipt["job_count"], 16)
+            self.assertEqual(receipt["job_count"], 24)
             self.assertEqual(receipt["candidate_profile_sha256"],
                              hashlib.sha256(
                                  (output / "candidate-profile.json").read_bytes()
@@ -1028,6 +1140,71 @@ class CelloFitAdapterTests(unittest.TestCase):
                 [hashlib.sha256(path.read_bytes()).hexdigest()
                  for path in profiles],
                 [receipt["source_profile_sha256"]] * 4,
+            )
+
+            bindings = rows_by_id_for_test(json.loads(
+                (output / "bindings.json").read_text(encoding="utf-8")
+            )["bindings"])
+            job = root / "wrong-audit-recording"
+            job.mkdir()
+            model = job / "model.wav"
+            request = job / "request.json"
+            request_value = joint_render_request(
+                bindings["reference_c2_audit"], model, "c2", 1.0,
+                split="audit")
+            request_value["inputs"][0].update({
+                "path": bindings["reference_g2_audit"]["path"],
+                "sha256": bindings["reference_g2_audit"]["sha256"],
+            })
+            request.write_text(json.dumps(request_value), encoding="utf-8")
+            rejected_recording = subprocess.run([
+                str(output / "renderer"), "--hwa-experiment-job",
+                str(request), "--output-dir", str(job),
+            ], check=False, stdout=subprocess.PIPE,
+               stderr=subprocess.PIPE, text=True)
+            self.assertNotEqual(rejected_recording.returncode, 0)
+            self.assertIn("frozen case recording", rejected_recording.stderr)
+            self.assertFalse(model.exists())
+
+    def test_joint_bundle_true_audit_cases_run_through_selector(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            completed, bundle, profiles = build_fake_joint_bundle(
+                root, decay_audio=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            experiment_result = write_joint_experiment_result(
+                bundle, root / "experiment-result")
+            bindings = json.loads(
+                (bundle / "bindings.json").read_text(encoding="utf-8")
+            )["bindings"]
+            result_path = root / "selection.json"
+            command = [
+                sys.executable, str(FIT_TOOL), "select",
+                "--manifest", str(bundle / "fit.json"),
+                "--experiment", str(experiment_result),
+                "--analyzer", str(bundle / "renderer"),
+                "--profile", str(profiles[0]),
+                "--output", str(result_path),
+            ]
+            for row in bindings:
+                if row["id"].startswith("reference_"):
+                    command.extend([
+                        "--bind", "{}={}".format(row["id"], row["path"]),
+                    ])
+            selected = subprocess.run(
+                command, check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            self.assertEqual(selected.returncode, 0, selected.stderr)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["chosen_point_id"], 2)
+            candidate = next(
+                row for row in result["points"] if not row["baseline"])
+            self.assertEqual(
+                {row["objective"] for row in candidate["evidence"]
+                 if row["split"] == "audit"},
+                {"audit_{}_passive_decay".format(target)
+                 for target in ("c2", "g2", "d3", "a3")},
             )
 
     def test_build_joint_rejects_reused_audit_audio(self):

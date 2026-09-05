@@ -853,10 +853,10 @@ static int hwa_event_analysis_fill_event(
     for (point = segment->first_point; point <= segment->last_point; ++point) {
         const HWAFrameMetrics *frame = &analysis->tracks[point];
         double onset = frame->combined_onset_strength;
-        power_sum += pow(10.0L, (long double)frame->rms_dbfs / 10.0L);
+        power_sum += powl(10.0L, (long double)frame->rms_dbfs / 10.0L);
         if (hwa_event_analysis_point_active(frame, options)) {
             long double weight = (long double)frame->pitch_confidence;
-            pitch_log_sum += weight * log((long double)frame->pitch_hz);
+            pitch_log_sum += weight * logl((long double)frame->pitch_hz);
             pitch_weight_sum += weight;
             confidence_sum += weight;
             pitch_count++;
@@ -878,7 +878,7 @@ static int hwa_event_analysis_fill_event(
     if (hwa_event_analysis_value_init(
             &event->values[value_count], hwa_event_value_specs[0].name,
             HWA_EVENT_INFERENCE,
-            (double)exp(pitch_log_sum / pitch_weight_sum),
+            (double)expl(pitch_log_sum / pitch_weight_sum),
             hwa_event_value_specs[0].unit,
             (double)(confidence_sum / (long double)pitch_count), 1,
             error, error_size) != 0)

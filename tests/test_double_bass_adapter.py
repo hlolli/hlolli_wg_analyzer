@@ -63,6 +63,16 @@ CASE_SPECS = (
     ("iowa2001-pizz-mf-open-g2-heldout-48k-soxr", "check", 48000,
      4, 97.99885899543733),
 )
+V2_CASE_PARAMETERS = {
+    "iowa2012-pizz-e-string-g1-ff-left-48k-soxr":
+        "string_e_loss_seconds",
+    "iowa2012-pizz-a-ff-open-left-48k-soxr":
+        "string_a_loss_seconds",
+    "iowa2012-pizz-d-ff-open-left-48k-soxr":
+        "string_d_loss_seconds",
+    "iowa2012-pizz-g-ff-open-left-48k-soxr":
+        "string_g_loss_seconds",
+}
 MAX_JSON_INPUT_BYTES = 1024 * 1024
 
 
@@ -79,7 +89,7 @@ def fixture(root: Path) -> Path:
         "valid": True,
         "strings": [
             {
-                "bridge_cutoff_hz": 7000.0,
+                "bridge_cutoff_hz": 7086.471045764144,
                 "loss_time_constant_seconds": 0.25,
             } for _ in range(4)
         ],
@@ -197,7 +207,8 @@ def add_joint_candidate_config(config: Path) -> None:
             "source_fit_result_sha256": "2" * 64, "unit": "seconds",
         },
         {
-            "after": 1500.0, "before": 7000.0, "maximum": 7086.471,
+            "after": 1500.0, "before": 7086.471045764144,
+            "maximum": 7086.471045764144,
             "minimum": 1000.0, "parameter": "string_d_bridge_cutoff_hz",
             "path": ["strings", 2, "bridge_cutoff_hz"],
             "source_fit_result_sha256": "3" * 64, "unit": "hertz",
@@ -231,7 +242,7 @@ def add_joint_candidate_config(config: Path) -> None:
         ("g", 4, 97.99885899543733),
     )
     for letter, string_index, frequency in specs:
-        for split in ("fit", "check"):
+        for split in ("fit", "check", "audit"):
             name = f"joint-{letter}-{split}"
             cases[name] = {
                 "articulation": 5, "binding_id": name,
@@ -751,9 +762,16 @@ class DoubleBassAdapterTests(unittest.TestCase):
                         reference, model, case_id=case_id, split=split,
                         rate_hz=rate_hz,
                     )
-                    if case_id.endswith("-diagnostic-check"):
+                    base_case_id = case_id.removesuffix("-diagnostic-check")
+                    if base_case_id in V2_CASE_PARAMETERS:
+                        request_value["parameters"] = [{
+                            "id": V2_CASE_PARAMETERS[base_case_id],
+                            "unit": "seconds",
+                            "value": 0.25,
+                        }]
+                    if case_id != base_case_id:
                         request_value["inputs"][0]["binding_id"] = (
-                            case_id.removesuffix("-diagnostic-check")
+                            base_case_id
                         )
                     request.write_text(
                         json.dumps(request_value), encoding="utf-8")
@@ -926,7 +944,9 @@ class DoubleBassAdapterTests(unittest.TestCase):
             output = root / "job"
             output.mkdir()
             model = output / "model.wav"
-            request_value = render_request(reference, model)
+            v2_case_id = "iowa2012-pizz-e-string-g1-ff-left-48k-soxr"
+            request_value = render_request(
+                reference, model, case_id=v2_case_id)
             request_value["parameters"] = [{
                 "id": "string_e_loss_seconds",
                 "unit": "seconds",
@@ -993,7 +1013,8 @@ class DoubleBassAdapterTests(unittest.TestCase):
             wrong_output = root / "wrong-job"
             wrong_output.mkdir()
             wrong_model = wrong_output / "model.wav"
-            wrong_value = render_request(reference, wrong_model)
+            wrong_value = render_request(
+                reference, wrong_model, case_id=v2_case_id)
             wrong_value["parameters"] = [{
                 "id": "string_a_loss_seconds",
                 "unit": "seconds",
@@ -1066,6 +1087,8 @@ class DoubleBassAdapterTests(unittest.TestCase):
             for name, change in (
                     ("wrong unit", lambda value: value["parameters"][1].update(
                         unit="seconds")),
+                    ("out of range", lambda value: value["parameters"][0].update(
+                        value=4.0)),
                     ("wrong case", lambda value: value.update(
                         case_id="iowa2012-pizz-a-ff-open-left-48k-soxr"))):
                 with self.subTest(name=name):
@@ -1105,6 +1128,58 @@ class DoubleBassAdapterTests(unittest.TestCase):
             value = json.loads(config.read_text(encoding="utf-8"))
             for case in value["joint_candidate"]["cases"].values():
                 case["binding_sha256"] = file_hash(reference)
+
+            def rejected_config(name, change, message):
+                changed = json.loads(json.dumps(value))
+                change(changed["joint_candidate"])
+                changed_config = root / (name + "-config.json")
+                changed_config.write_text(
+                    json.dumps(changed), encoding="utf-8")
+                output = root / (name + "-renderer")
+                rejected = subprocess.run(
+                    [str(PYTHON), "-I", str(BUILDER), "build",
+                     "--config", str(changed_config), "--output",
+                     str(output)],
+                    check=False, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, env={})
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(message, rejected.stderr)
+                self.assertFalse(output.exists())
+
+            def remove_audit(joint, adapter_id):
+                joint["adapter_id"] = adapter_id
+                joint["cases"].pop("joint-e-audit")
+
+            for version in ("v1", "v2"):
+                adapter_id = (
+                    "hlolli_wg_double_bass-passive-joint-validation-" +
+                    version
+                )
+                rejected_config(
+                    "missing-audit-" + version,
+                    lambda joint, identifier=adapter_id:
+                        remove_audit(joint, identifier),
+                    "exactly one case per route",
+                )
+
+            def duplicate_route(joint):
+                row = dict(joint["cases"]["joint-e-fit"])
+                row["binding_id"] = "joint-e-fit-copy"
+                joint["cases"]["joint-e-fit-copy"] = row
+
+            rejected_config(
+                "duplicate-route", duplicate_route, "repeats a route")
+
+            def widen_bounds(joint):
+                row = next(
+                    item for item in joint["changes"]
+                    if item["parameter"] == "string_e_loss_seconds"
+                )
+                row["maximum"] = 31.0
+
+            rejected_config(
+                "widened-bounds", widen_bounds, "frozen change")
+
             config.write_text(json.dumps(value), encoding="utf-8")
             v1_renderer = root / "v1-renderer"
             built = subprocess.run(
@@ -1125,6 +1200,23 @@ class DoubleBassAdapterTests(unittest.TestCase):
                 check=False, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, env={})
             self.assertEqual(built.returncode, 0, built.stderr)
+
+            scalar_output = root / "rejected-scalar"
+            scalar_output.mkdir()
+            scalar_model = scalar_output / "model.wav"
+            scalar_request = root / "rejected-scalar.json"
+            scalar_request.write_text(json.dumps(render_request(
+                reference, scalar_model,
+                case_id="iowa2012-pizz-e-ff-open", split="fit",
+            )), encoding="utf-8")
+            scalar = subprocess.run(
+                [str(renderer), "--hwa-experiment-job", str(scalar_request),
+                 "--output-dir", str(scalar_output)],
+                check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env={}, cwd=scalar_output)
+            self.assertNotEqual(scalar.returncode, 0)
+            self.assertIn("unknown render case", scalar.stderr)
+            self.assertFalse(scalar_model.exists())
 
             output = root / "joint-output"
             output.mkdir()

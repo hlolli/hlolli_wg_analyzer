@@ -718,7 +718,8 @@ def joint_experiment(references, dependencies):
 
     cases = []
     for target in sorted(STRING_SPECS):
-        for role, split in (("check", "check"), ("fit", "fit")):
+        for role, split in (
+                ("audit", "audit"), ("check", "check"), ("fit", "fit")):
             input_id = "reference_{}_{}".format(target, role)
             cases.append({
                 "id": "{}-pizz-{}".format(target, role),
@@ -770,10 +771,9 @@ def joint_fit_manifest(chains, profile_adapter_sha256):
         chain = chains[target]
         changes.extend(chain["changes"])
         for split in ("audit", "check", "fit"):
-            case_role = "fit" if split == "fit" else "check"
             objective_id = "{}_{}_passive_decay".format(split, target)
             objectives.append({
-                "case": "{}-pizz-{}".format(target, case_role),
+                "case": "{}-pizz-{}".format(target, split),
                 "id": objective_id,
                 "kind": "passive-decay",
                 "reference_binding": "reference_{}_{}".format(target, split),
@@ -1426,9 +1426,49 @@ def checked_config(config):
                 } == set(range(len(STRING_SPECS)))
             except (AdapterError, TypeError):
                 valid_changes = False
+        cases = config.get("cases")
+        expected_case_ids = {
+            "{}-pizz-{}".format(target, split)
+            for target in STRING_SPECS
+            for split in ("audit", "check", "fit")
+        }
+        valid_cases = type(cases) is dict and set(cases) == expected_case_ids
+        if valid_cases:
+            try:
+                for target, spec in STRING_SPECS.items():
+                    render = {
+                        "a4": spec["render_a4"],
+                        "frames": MODEL_FRAMES,
+                        "frequency": spec["render_frequency"],
+                        "string": spec["render_string"],
+                    }
+                    for split in ("audit", "check", "fit"):
+                        case = cases["{}-pizz-{}".format(target, split)]
+                        if (type(case) is not dict or set(case) != {
+                                "binding", "reference_channels",
+                                "reference_sha256", "render", "split",
+                                "target",
+                            } or
+                                case["binding"] !=
+                                "reference_{}_{}".format(target, split) or
+                                case["reference_channels"] not in (1, 2) or
+                                re.fullmatch(
+                                    r"[0-9a-f]{64}",
+                                    str(case["reference_sha256"]),
+                                ) is None or
+                                case["render"] != render or
+                                case["split"] != split or
+                                case["target"] != target):
+                            valid_cases = False
+                            break
+                    if not valid_cases:
+                        break
+            except (KeyError, TypeError):
+                valid_cases = False
         valid_mode = (
             config.get("adapter_id") == JOINT_ADAPTER_ID and
             config.get("parameter") == JOINT_PARAMETER and valid_changes and
+            valid_cases and
             re.fullmatch(r"[0-9a-f]{64}",
                          str(config.get("candidate_profile_sha256"))) is not None
         )
@@ -1566,6 +1606,9 @@ def validate_render_request(request_path, output_dir):
     if (type(input_row["sha256"]) is not str or
             re.fullmatch(r"[0-9a-f]{64}", input_row["sha256"]) is None):
         raise AdapterError("reference input hash is invalid")
+    if (case.get("reference_sha256") is not None and
+            input_row["sha256"] != case["reference_sha256"]):
+        raise AdapterError("reference input is not the frozen case recording")
     reference = regular(Path(input_row["path"]), "reference input")
     if sha256(reference) != input_row["sha256"]:
         raise AdapterError("reference input hash changed")
@@ -2691,6 +2734,7 @@ def build_joint_bundle(arguments):
             cases[case["id"]] = {
                 "split": case["split"], "binding": binding,
                 "reference_channels": wave_facts(references[binding])[1],
+                "reference_sha256": sha256(references[binding]),
                 "target": target,
                 "render": {
                     "a4": spec["render_a4"], "frames": MODEL_FRAMES,
@@ -2749,7 +2793,8 @@ def build_joint_bundle(arguments):
         write_json(temporary / "receipt.json", {
             "schema": "hwa-cello-joint-fit-adapter-bundle",
             "schema_version": 1, "adapter_id": JOINT_ADAPTER_ID,
-            "build_type": BUILD_TYPE, "job_count": 16,
+            "build_type": BUILD_TYPE,
+            "job_count": 2 * len(experiment["cases"]),
             "source_profile_sha256": sha256(files["base_profile"]),
             "candidate_profile_sha256": candidate_hash,
             "candidate_values": values,

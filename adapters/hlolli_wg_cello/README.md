@@ -199,9 +199,9 @@ python3 -B adapters/hlolli_wg_cello/adapter.py build-joint \
 The new directory has `renderer`, `experiment.json`, `fit.json`,
 `bindings.json`, `receipt.json`, and `candidate-profile.json`. Its experiment
 has two points: the unchanged four-string baseline and one frozen candidate.
-Eight fit and validation cases give 16 Release render jobs. Audit goals reuse
-the validation renders, so audit audio cannot change the candidate or add a
-hidden build.
+Twelve fit, validation, and audit cases give 24 Release render jobs. Each audit
+goal uses its own frozen case, recording, and model render. Audit audio cannot
+change the one fixed candidate.
 
 Run the experiment with every row in `bindings.json`, then call `select` with
 the 12 `reference_*` rows. The version 2 fit manifest checks total score,

@@ -182,7 +182,8 @@ static const HWAExperimentName hwa_experiment_plan_names[] = {
 
 static const HWAExperimentName hwa_experiment_split_names[] = {
     {HWA_EXPERIMENT_FIT, "fit"},
-    {HWA_EXPERIMENT_CHECK, "check"}
+    {HWA_EXPERIMENT_CHECK, "check"},
+    {HWA_EXPERIMENT_AUDIT, "audit"}
 };
 
 static const HWAExperimentName hwa_experiment_monotonicity_names[] = {
@@ -796,6 +797,7 @@ static int hwa_experiment_parse_split(const char *text,
 {
     if (strcmp(text, "fit") == 0) *split = HWA_EXPERIMENT_FIT;
     else if (strcmp(text, "check") == 0) *split = HWA_EXPERIMENT_CHECK;
+    else if (strcmp(text, "audit") == 0) *split = HWA_EXPERIMENT_AUDIT;
     else return -1;
     return 0;
 }
@@ -1867,12 +1869,14 @@ static int hwa_experiment_manifest_semantics(HWAExperimentJson *json,
                                                  "fit weights are too large");
             fit_weight += record->weight;
             fit_count++;
-        } else {
+        } else if (record->split == HWA_EXPERIMENT_CHECK) {
             if (!isfinite(check_weight + record->weight))
                 return hwa_experiment_json_fail(
                     json, "check weights are too large");
             check_weight += record->weight;
             check_count++;
+        } else if (record->split != HWA_EXPERIMENT_AUDIT) {
+            return hwa_experiment_json_fail(json, "invalid case split");
         }
         if (item->stem_count > options->run.max_stems ||
             item->probe_count > options->run.max_probes ||
@@ -6195,7 +6199,8 @@ int hwa_experiment_result_validate_locale(
             if (record->id != (uint64_t)index + UINT64_C(1) ||
                 !hwa_experiment_token_valid(record->name, 0) ||
                 (record->split != HWA_EXPERIMENT_FIT &&
-                 record->split != HWA_EXPERIMENT_CHECK) ||
+                 record->split != HWA_EXPERIMENT_CHECK &&
+                 record->split != HWA_EXPERIMENT_AUDIT) ||
                 !isfinite(record->weight) || !(record->weight > 0.0) ||
                 (index != 0U && strcmp(result->cases[index - 1U].name,
                                        record->name) >= 0)) goto failed;
@@ -6203,7 +6208,7 @@ int hwa_experiment_result_validate_locale(
                 if (!isfinite(fit_weight + record->weight)) goto failed;
                 fit_weight += record->weight;
                 fit++;
-            } else {
+            } else if (record->split == HWA_EXPERIMENT_CHECK) {
                 if (!isfinite(check_weight + record->weight)) goto failed;
                 check_weight += record->weight;
                 check++;

@@ -157,7 +157,8 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
     artifacts = []
     job_id = 0
     for point_id, tau in ((1, 0.80), (2, candidate_tau)):
-        for case_id, case_name in ((1, "fit"), (2, "check")):
+        for case_id, case_name in (
+                (1, "audit"), (2, "check"), (3, "fit")):
             job_id += 1
             audio = root / ("model-%d-%s.wav" % (point_id, case_name))
             write_decay(audio, tau, lead=0.11 + case_id * 0.03)
@@ -179,8 +180,9 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
             "minimum": 0, "maximum": 1, "baseline": 0,
         }],
         "cases": [
-            {"id": 1, "name": "c-fit", "split": "fit", "weight": 1},
+            {"id": 1, "name": "c-audit", "split": "audit", "weight": 1},
             {"id": 2, "name": "c-check", "split": "check", "weight": 1},
+            {"id": 3, "name": "c-fit", "split": "fit", "weight": 1},
         ],
         "responses": [],
         "points": [
@@ -198,7 +200,7 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
         {"id": "c-check", "kind": "passive-decay", "case": "c-check",
          "reference_binding": "c_check", "resource_id": "model.final",
          "split": "check", "weight": 1, "scale": 1},
-        {"id": "c-audit", "kind": "passive-decay", "case": "c-check",
+        {"id": "c-audit", "kind": "passive-decay", "case": "c-audit",
          "reference_binding": "c_audit", "resource_id": "model.final",
          "split": "audit", "weight": 1, "scale": 1},
     ]
@@ -580,7 +582,7 @@ class InstrumentFitTests(unittest.TestCase):
             experiment = json.loads(
                 fixture["experiment"].read_text(encoding="utf-8"))
             experiment["cases"].append({
-                "id": 3, "name": "unused-check", "split": "check",
+                "id": 4, "name": "unused-check", "split": "check",
                 "weight": 1,
             })
             fixture["experiment"].write_text(json.dumps(experiment),

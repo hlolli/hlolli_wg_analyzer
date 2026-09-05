@@ -746,7 +746,7 @@ static int hwa_e_raw_rows_valid(const HWAExperimentResult *result,
             check_weight += record->weight;
             check_count++;
         }
-        else goto invalid;
+        else if (record->split != HWA_EXPERIMENT_AUDIT) goto invalid;
     }
     if (fit_count == 0U || check_count == 0U) goto invalid;
     for (index = 0U; index < result->response_count; ++index) {

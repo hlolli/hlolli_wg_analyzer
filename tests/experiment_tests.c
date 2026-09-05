@@ -5,6 +5,7 @@
 #endif
 
 #include "experiment.h"
+#include "experiment_file.h"
 #include "hlolli_wg_analyzer.h"
 #include "sha256.h"
 
@@ -275,6 +276,7 @@ static int test_render(void *context,
 static int test_manifest_write_mode(const TestFiles *files,
                                     const char *parameters,
                                     const char *plan,
+                                    const char *first_case,
                                     const char *model_input,
                                     const char *model_output)
 {
@@ -291,7 +293,7 @@ static int test_manifest_write_mode(const TestFiles *files,
         "{\"schema\":\"hwa-experiment\",\"schema_version\":1,"
         "\"method_version\":\"stage8-1\",\"clock_rate_hz\":48000,"
         "\"inputs\":[{\"id\":\"artist\",\"sha256\":\"%s\"}],"
-        "\"parameters\":%s,\"plan\":%s,\"cases\":["
+        "\"parameters\":%s,\"plan\":%s,\"cases\":[%s"
         "{\"id\":\"check\",\"split\":\"check\",\"weight\":1,"
         "\"stems\":[{\"id\":\"model.final\",\"side\":\"model\","
         "\"role\":\"final\",\"input_id\":%s,\"output\":%s,"
@@ -312,7 +314,7 @@ static int test_manifest_write_mode(const TestFiles *files,
         "\"probes\":[],\"links\":[]}],"
         "\"responses\":[{\"id\":\"final.rms\",\"role\":\"final\","
         "\"feature\":\"rms_dbfs\",\"index\":0}]}\n",
-        hash, parameters, plan, model_input, model_output,
+        hash, parameters, plan, first_case, model_input, model_output,
         model_input, model_output) > 0;
     if (fflush(stream) != 0 || ferror(stream) || fclose(stream) != 0)
         okay = 0;
@@ -324,7 +326,25 @@ static int test_manifest_write(const TestFiles *files,
                                const char *plan)
 {
     return test_manifest_write_mode(
-        files, parameters, plan, "null", "\"model.wav\"");
+        files, parameters, plan, "", "null", "\"model.wav\"");
+}
+
+static int test_manifest_write_audit(const TestFiles *files,
+                                     const char *parameters,
+                                     const char *plan)
+{
+    static const char audit_case[] =
+        "{\"id\":\"audit\",\"split\":\"audit\",\"weight\":1,"
+        "\"stems\":[{\"id\":\"model.final\",\"side\":\"model\","
+        "\"role\":\"final\",\"input_id\":null,\"output\":\"model.wav\","
+        "\"start_sample\":0,\"gain_db\":0,\"rate_hz\":48000,"
+        "\"channels\":1},{\"id\":\"reference.final\","
+        "\"side\":\"reference\",\"role\":\"final\","
+        "\"input_id\":\"artist\",\"output\":null,\"start_sample\":0,"
+        "\"gain_db\":0,\"rate_hz\":48000,\"channels\":1}],"
+        "\"probes\":[],\"links\":[]},";
+    return test_manifest_write_mode(
+        files, parameters, plan, audit_case, "null", "\"model.wav\"");
 }
 
 static int test_execute(const TestFiles *files,
@@ -705,6 +725,51 @@ static void test_random_plan(TestFiles *files)
     (void)test_remove_tree(files->output);
 }
 
+static void test_audit_split(TestFiles *files)
+{
+    static const char parameters[] =
+        "[{\"id\":\"alpha\",\"unit\":\"ratio\",\"minimum\":0,"
+        "\"maximum\":1,\"baseline\":0,\"levels\":[0,1]}]";
+    static const char plan[] =
+        "{\"kind\":\"one-at-a-time\",\"seed\":1,"
+        "\"sample_count\":0,\"replicates\":1}";
+    HWAExperimentOptions options;
+    HWAExperimentResult result;
+    HWAExperimentResult loaded;
+    TestRenderer renderer;
+    char result_path[PATH_MAX];
+    char hash[HWA_SHA256_HEX_SIZE];
+    char error[HWA_ERROR_SIZE];
+    memset(&result, 0, sizeof(result));
+    memset(&loaded, 0, sizeof(loaded));
+    memset(&renderer, 0, sizeof(renderer));
+    error[0] = '\0';
+    hwa_experiment_options_default(&options);
+    CHECK(test_manifest_write_audit(files, parameters, plan),
+          "cannot write audit manifest");
+    if (test_execute(files, files->output, &options, &renderer,
+                     &result, error) != 0) {
+        CHECK(0, "audit execution failed: %s", error);
+        hwa_experiment_result_free(&result);
+        return;
+    }
+    CHECK(!renderer.request_bad && renderer.calls == 6U &&
+              result.case_count == 3U && result.job_count == 6U &&
+              result.cases[0].split == HWA_EXPERIMENT_AUDIT &&
+              strcmp(hwa_experiment_split_name(result.cases[0].split),
+                     "audit") == 0,
+          "audit jobs or split metadata are wrong");
+    CHECK(test_join(result_path, files->output, "result.hwa-experiment") &&
+              hwa_experiment_file_read(result_path, &options, &loaded, hash,
+                                       error, sizeof(error)) == 0 &&
+              loaded.case_count == 3U &&
+              loaded.cases[0].split == HWA_EXPERIMENT_AUDIT,
+          "saved audit experiment did not round trip: %s", error);
+    hwa_experiment_result_free(&loaded);
+    hwa_experiment_result_free(&result);
+    (void)test_remove_tree(files->output);
+}
+
 static void test_authority_and_hostile(TestFiles *files)
 {
     static const char parameters[] =
@@ -738,7 +803,7 @@ static void test_authority_and_hostile(TestFiles *files)
               state.calls == 0U && !test_exists(files->output),
           "wrong fixed-input authority reached renderer");
     binding.id = "artist";
-    CHECK(test_manifest_write_mode(files, parameters, plan,
+    CHECK(test_manifest_write_mode(files, parameters, plan, "",
                                    "\"artist\"", "null"),
           "cannot write zero-output manifest");
     state.calls = 0U;
@@ -792,6 +857,7 @@ int main(void)
     test_oat_and_limits(&files);
     test_grid(&files);
     test_random_plan(&files);
+    test_audit_split(&files);
     test_authority_and_hostile(&files);
     CHECK(test_remove_tree(files.root) == 0,
           "cannot remove experiment fixture tree");

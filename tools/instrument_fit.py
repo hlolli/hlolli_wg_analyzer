@@ -1929,7 +1929,7 @@ def verify_candidate_points(
                 identifier < 1 or identifier in case_ids):
             raise FitError("experiment case has an invalid or duplicate id")
         case_ids.add(identifier)
-        if row.get("split") not in ("fit", "check"):
+        if row.get("split") not in ("fit", "check", "audit"):
             raise FitError("experiment case has an invalid split")
     required_case_names = {row["case"] for row in manifest["objectives"]}
     if set(cases) != required_case_names:
@@ -1992,9 +1992,7 @@ def verify_candidate_points(
             case = cases.get(objective["case"])
             if case is None:
                 raise FitError(f"missing case: {objective['case']}")
-            expected_case_split = (
-                "fit" if objective["split"] == "fit" else "check"
-            )
+            expected_case_split = objective["split"]
             if case.get("split") != expected_case_split:
                 raise FitError(
                     f"objective uses the wrong case split: {objective['id']}"

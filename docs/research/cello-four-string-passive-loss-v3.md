@@ -157,9 +157,12 @@ The selector SHA-256 for these four files is
 
 The checked joint path freezes the four selected values into one two-point
 experiment. Point 0 keeps all four loss times at 0.25 seconds. Point 1 uses
-C2 1.00, G2 1.00, D3 0.75, and A3 1.00 seconds. Eight fit and validation
-cases give 16 builds and renders. Four audit goals reuse the matching
-validation render, so audit recordings cannot tune the values.
+C2 1.00, G2 1.00, D3 0.75, and A3 1.00 seconds. The first contract run below
+used eight fit and validation cases, 16 renders, and the matching validation
+render for each audit goal. The current adapter writes 12 true fit,
+validation, and audit cases and 24 renders. Each audit recording now has its
+own frozen case and model render. The saved hashes below still describe the
+first 16-render run.
 
 The builder requires eight distinct scalar recordings and four more distinct
 audit recordings. It rejects bundle and audit paths under either source

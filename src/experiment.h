@@ -42,10 +42,12 @@
  * job and point keys are lowercase SHA-256 over fixed canonical JSON bytes.
  * Observations use the matching Stage 7 normalized_gap.
  *
- * Candidate mean gaps are case-weighted means for one point, response, and
- * split. improvement is baseline mean minus current mean. worst_harm is the
- * largest per-case current-minus-baseline mean. Sensitivity uses OLS slope,
- * Pearson correlation, R squared, and conditional-mean monotonicity. Grid
+ * Fit and check candidate mean gaps are case-weighted means for one point,
+ * response, and split. Audit cases run and remain in the saved result, but do
+ * not feed the Stage 8 candidate, sensitivity, interaction, or warning rows.
+ * improvement is baseline mean minus current mean. worst_harm is the largest
+ * per-case current-minus-baseline mean. Sensitivity uses OLS slope, Pearson
+ * correlation, R squared, and conditional-mean monotonicity. Grid
  * effect is Var(E[y|x])/Var(y). Grid pair interaction is
  * Var(cell-mainA-mainB+grand)/Var(y). Replicate noise is the pooled within-cell
  * population variance. Flat means range <= 1e-6, noisy means SD > 0.02, and

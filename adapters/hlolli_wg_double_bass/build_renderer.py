@@ -160,11 +160,84 @@ CASES = {
         "string": 4,
     },
 }
+V2_CASE_TARGETS = {
+    "iowa2012-pizz-e-string-g1-ff-left-48k-soxr": {
+        "frequency_hz": 48.999429497718666,
+        "parameter": "string_e_loss_seconds",
+        "string": 1,
+    },
+    "iowa2012-pizz-a-ff-open-left-48k-soxr": {
+        "frequency_hz": 55.0,
+        "parameter": "string_a_loss_seconds",
+        "string": 2,
+    },
+    "iowa2012-pizz-d-ff-open-left-48k-soxr": {
+        "frequency_hz": 73.41619197935188,
+        "parameter": "string_d_loss_seconds",
+        "string": 3,
+    },
+    "iowa2012-pizz-g-ff-open-left-48k-soxr": {
+        "frequency_hz": 97.99885899543733,
+        "parameter": "string_g_loss_seconds",
+        "string": 4,
+    },
+}
+for v2_case_id, v2_target in V2_CASE_TARGETS.items():
+    common = {
+        "articulation": 5,
+        "binding_id": v2_case_id,
+        "force": 0.75,
+        "frequency_hz": v2_target["frequency_hz"],
+        "passive": True,
+        "position": 0.12,
+        "sample_rate": 48000,
+        "speed": 0.80,
+        "string": v2_target["string"],
+    }
+    CASES[v2_case_id] = dict(common, split="fit")
+    CASES[v2_case_id + "-diagnostic-check"] = dict(common, split="check")
+
 PARAMETER_PATHS = {
     "string_e_loss_seconds": ("strings", 0, "loss_time_constant_seconds"),
     "string_a_loss_seconds": ("strings", 1, "loss_time_constant_seconds"),
     "string_d_loss_seconds": ("strings", 2, "loss_time_constant_seconds"),
     "string_g_loss_seconds": ("strings", 3, "loss_time_constant_seconds"),
+    "string_d_bridge_cutoff_hz": ("strings", 2, "bridge_cutoff_hz"),
+}
+LOSS_PARAMETERS = frozenset(
+    name for name in PARAMETER_PATHS if name.endswith("_loss_seconds"))
+PARAMETER_LIMITS = {
+    name: ("seconds", 0.01, 30.0) for name in LOSS_PARAMETERS
+}
+PARAMETER_LIMITS["string_d_bridge_cutoff_hz"] = (
+    "hertz", 1000.0, 7086.471045764144)
+JOINT_PARAMETER = "joint_candidate"
+JOINT_ADAPTER_IDS = frozenset({
+    "hlolli_wg_double_bass-passive-joint-validation-v1",
+    "hlolli_wg_double_bass-passive-joint-validation-v2",
+})
+FROZEN_JOINT_CHANGES = {
+    "string_e_loss_seconds": {
+        "after": 0.5, "before": 0.25, "maximum": 30.0,
+        "minimum": 0.01, "source": "e1", "unit": "seconds",
+    },
+    "string_a_loss_seconds": {
+        "after": 1.5, "before": 0.25, "maximum": 30.0,
+        "minimum": 0.01, "source": "a1", "unit": "seconds",
+    },
+    "string_d_bridge_cutoff_hz": {
+        "after": 1500.0, "before": 7086.471045764144,
+        "maximum": 7086.471045764144, "minimum": 1000.0,
+        "source": "d2", "unit": "hertz",
+    },
+    "string_d_loss_seconds": {
+        "after": 3.0, "before": 0.25, "maximum": 3.0,
+        "minimum": 0.25, "source": "d2", "unit": "seconds",
+    },
+    "string_g_loss_seconds": {
+        "after": 0.5, "before": 0.25, "maximum": 30.0,
+        "minimum": 0.01, "source": "g2", "unit": "seconds",
+    },
 }
 
 
@@ -268,11 +341,14 @@ def checked_python_shebang(path: Path) -> str:
 
 def build_config(path: Path) -> dict[str, Any]:
     source = load_json(path)
-    exact_keys(source, {
+    wanted_fields = {
         "schema", "schema_version", "plugin_root", "csound_executable",
         "csound_include_dir", "c_compiler", "python_executable",
         "extra_resources", "macos_sdk_root", "permissions",
-    }, "build config")
+    }
+    if "joint_candidate" in source:
+        wanted_fields.add("joint_candidate")
+    exact_keys(source, wanted_fields, "build config")
     if (source["schema"] != BUILD_SCHEMA or
             source["schema_version"] != SCHEMA_VERSION):
         raise AdapterError("unsupported build config")
@@ -348,7 +424,7 @@ def build_config(path: Path) -> dict[str, Any]:
             raise AdapterError(f"extra_resources[{index}].path is invalid")
         paths[name] = regular(
             Path(row["path"]), f"extra resource {name}")
-    return {
+    result = {
         "adapter_id": ADAPTER_ID,
         "compiler": compiler,
         "permissions": permissions,
@@ -361,6 +437,10 @@ def build_config(path: Path) -> dict[str, Any]:
         "schema": RENDERER_SCHEMA,
         "schema_version": SCHEMA_VERSION,
     }
+    if "joint_candidate" in source:
+        result["joint_candidate"] = checked_joint_candidate(
+            source["joint_candidate"], paths["model"])
+    return result
 
 
 def write_renderer(output: Path, config: dict[str, Any]) -> None:
@@ -429,10 +509,13 @@ def embedded_config() -> dict[str, Any]:
         raise AdapterError("embedded renderer config is invalid") from error
     if type(value) is not dict:
         raise AdapterError("embedded renderer config is not an object")
-    exact_keys(value, {
+    wanted_fields = {
         "adapter_id", "compiler", "permissions", "platform", "resources",
         "schema", "schema_version",
-    }, "embedded config")
+    }
+    if "joint_candidate" in value:
+        wanted_fields.add("joint_candidate")
+    exact_keys(value, wanted_fields, "embedded config")
     if (value["schema"] != RENDERER_SCHEMA or
             value["schema_version"] != SCHEMA_VERSION or
             value["adapter_id"] != ADAPTER_ID or
@@ -447,6 +530,9 @@ def embedded_config() -> dict[str, Any]:
          (type(sdk_root) is not str or not sdk_root)) or
             (sys.platform != "darwin" and sdk_root is not None)):
         raise AdapterError("embedded compiler config has invalid values")
+    if "joint_candidate" in value:
+        value["joint_candidate"] = checked_joint_candidate(
+            value["joint_candidate"])
     return value
 
 
@@ -515,7 +601,149 @@ def token(value: Any, field: str) -> str:
     return value
 
 
-def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
+def hash_text(value: Any, field: str) -> str:
+    if (type(value) is not str or len(value) != 64 or
+            any(character not in "0123456789abcdef" for character in value)):
+        raise AdapterError(f"{field} must be a lowercase SHA-256")
+    return value
+
+
+def path_value(root: Any, parts: tuple[Any, ...], field: str) -> float:
+    current = root
+    for part in parts:
+        try:
+            current = current[part]
+        except (KeyError, IndexError, TypeError) as error:
+            raise AdapterError(f"{field} path is missing: {parts}") from error
+    return finite_number(current, field)
+
+
+def checked_joint_candidate(value: Any,
+                            model_path: Path | None = None) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise AdapterError("joint_candidate must be an object")
+    exact_keys(value, {
+        "adapter_id", "candidate_profile_sha256", "cases", "changes",
+    }, "joint_candidate")
+    if value["adapter_id"] not in JOINT_ADAPTER_IDS:
+        raise AdapterError("joint_candidate has an unsupported adapter_id")
+    candidate_hash = hash_text(
+        value["candidate_profile_sha256"],
+        "joint_candidate candidate_profile_sha256")
+
+    changes = value["changes"]
+    if type(changes) is not list or len(changes) != len(PARAMETER_PATHS):
+        raise AdapterError("joint_candidate must have five changes")
+    seen_parameters: set[str] = set()
+    source_hashes: dict[str, str] = {}
+    checked_changes: list[dict[str, Any]] = []
+    for index, row in enumerate(changes):
+        field = f"joint_candidate changes[{index}]"
+        if type(row) is not dict:
+            raise AdapterError(f"{field} must be an object")
+        exact_keys(row, {
+            "after", "before", "maximum", "minimum", "parameter", "path",
+            "source_fit_result_sha256", "unit",
+        }, field)
+        name = token(row["parameter"], field + " parameter")
+        expected = FROZEN_JOINT_CHANGES.get(name)
+        if expected is None or name in seen_parameters:
+            raise AdapterError(f"{field} has an invalid parameter")
+        seen_parameters.add(name)
+        if row["unit"] != expected["unit"]:
+            raise AdapterError(f"{field} has the wrong unit")
+        path = row["path"]
+        if type(path) is not list or tuple(path) != PARAMETER_PATHS[name]:
+            raise AdapterError(f"{field} has the wrong model path")
+        for number_field in ("after", "before", "maximum", "minimum"):
+            found = finite_number(
+                row[number_field], f"{field} {number_field}")
+            if found != expected[number_field]:
+                raise AdapterError(f"{field} differs from the frozen change")
+        result_hash = hash_text(
+            row["source_fit_result_sha256"],
+            field + " source_fit_result_sha256")
+        source = expected["source"]
+        if source in source_hashes and source_hashes[source] != result_hash:
+            raise AdapterError(f"{field} has a mismatched source result hash")
+        source_hashes[source] = result_hash
+        checked_changes.append(row)
+    if (seen_parameters != set(FROZEN_JOINT_CHANGES) or
+            set(source_hashes) != {"e1", "a1", "d2", "g2"}):
+        raise AdapterError("joint_candidate has the wrong change set")
+
+    cases = value["cases"]
+    if type(cases) is not dict or not 1 <= len(cases) <= 64:
+        raise AdapterError("joint_candidate cases must be a bounded object")
+    required_splits = {"fit", "check", "audit"}
+    routes: set[tuple[str, int]] = set()
+    for case_id, row in cases.items():
+        name = token(case_id, "joint_candidate case ID")
+        if name in CASES or type(row) is not dict:
+            raise AdapterError(f"invalid joint_candidate case: {name}")
+        exact_keys(row, {
+            "articulation", "binding_id", "binding_sha256", "force",
+            "frequency_hz", "joint", "position", "sample_rate", "speed",
+            "split", "string",
+        }, f"joint_candidate case {name}")
+        if row["joint"] is not True:
+            raise AdapterError(f"joint_candidate case {name} is not joint")
+        token(row["binding_id"], f"joint_candidate case {name} binding_id")
+        hash_text(
+            row["binding_sha256"],
+            f"joint_candidate case {name} binding_sha256")
+        split = row["split"]
+        string_index = row["string"]
+        if split not in required_splits or type(string_index) is not int or not (
+                1 <= string_index <= 4):
+            raise AdapterError(f"joint_candidate case {name} has invalid routing")
+        route = (split, string_index)
+        if route in routes:
+            raise AdapterError(f"joint_candidate case {name} repeats a route")
+        routes.add(route)
+        if (type(row["articulation"]) is not int or
+                row["articulation"] != 5 or row["sample_rate"] != 48000 or
+                finite_number(row["frequency_hz"], name + " frequency_hz") <=
+                0.0 or
+                finite_number(row["force"], name + " force") != 0.75 or
+                finite_number(row["speed"], name + " speed") != 0.8 or
+                finite_number(row["position"], name + " position") != 0.12):
+            raise AdapterError(f"joint_candidate case {name} has invalid values")
+    expected_routes = {
+        (split, string_index)
+        for split in required_splits for string_index in (1, 2, 3, 4)
+    }
+    if routes != expected_routes or len(cases) != 12:
+        raise AdapterError(
+            "joint_candidate cases must have exactly one case per route")
+
+    if model_path is not None:
+        profile = load_json(model_path)
+        for index, row in enumerate(checked_changes):
+            parts = tuple(row["path"])
+            before = path_value(
+                profile, parts, f"joint_candidate changes[{index}] before")
+            if before != float(row["before"]):
+                raise AdapterError(
+                    f"joint_candidate changes[{index}] before differs from model")
+            set_path(profile, parts, float(row["after"]))
+        candidate_source = (
+            json.dumps(profile, indent=2, allow_nan=False) + "\n"
+        ).encode("utf-8")
+        if hashlib.sha256(candidate_source).hexdigest() != candidate_hash:
+            raise AdapterError("joint_candidate candidate profile hash differs")
+    return value
+
+
+def renderer_cases(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    joint = config.get("joint_candidate")
+    if type(joint) is dict:
+        return dict(joint["cases"])
+    return dict(CASES)
+
+
+def checked_job(path: Path, output_dir: Path,
+                config: dict[str, Any]) -> dict[str, Any]:
     job = load_json(regular(path, "render job"))
     exact_keys(job, {
         "schema", "schema_version", "method_version", "case_id", "job_id",
@@ -526,9 +754,10 @@ def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
             job["method_version"] != "stage8-1"):
         raise AdapterError("unsupported render job")
     case_id = token(job["case_id"], "case_id")
-    if case_id not in CASES:
+    cases = renderer_cases(config)
+    if case_id not in cases:
         raise AdapterError(f"unknown render case: {case_id}")
-    case = CASES[case_id]
+    case = cases[case_id]
     if (type(job["job_id"]) is not int or job["job_id"] < 1 or
             type(job["replicate"]) is not int or job["replicate"] < 0 or
             type(job["seed"]) is not int or job["seed"] < 0 or
@@ -538,7 +767,7 @@ def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
     if (type(key) is not str or len(key) != 64 or
             any(character not in "0123456789abcdef" for character in key)):
         raise AdapterError("render job has an invalid job_key")
-    if job["split"] not in ("fit", "check"):
+    if job["split"] not in ("fit", "check", "audit"):
         raise AdapterError("render job has an invalid split")
     if job["split"] != case["split"]:
         raise AdapterError("render job split does not match its case")
@@ -569,8 +798,12 @@ def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
             finite_number(reference["gain_db"], "reference gain_db") != 0.0):
         raise AdapterError("reference input has unsupported fields")
     reference_path = regular(Path(reference["path"]), "reference WAVE")
-    if sha256(reference_path) != reference["sha256"]:
+    reference_hash = sha256(reference_path)
+    if reference_hash != reference["sha256"]:
         raise AdapterError("reference WAVE hash changed")
+    if ("binding_sha256" in case and
+            reference_hash != case["binding_sha256"]):
+        raise AdapterError("reference WAVE does not match its joint case")
 
     outputs = job["outputs"]
     if type(outputs) is not list or len(outputs) != 1 or type(outputs[0]) is not dict:
@@ -597,7 +830,8 @@ def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
         raise AdapterError("model output has unsupported fields")
 
     parameters = job["parameters"]
-    if type(parameters) is not list or len(parameters) != len(PARAMETER_PATHS):
+    if (type(parameters) is not list or not parameters or
+            len(parameters) > len(PARAMETER_PATHS)):
         raise AdapterError("render job has the wrong parameter count")
     values: dict[str, float] = {}
     for index, row in enumerate(parameters):
@@ -606,11 +840,40 @@ def checked_job(path: Path, output_dir: Path) -> dict[str, Any]:
         exact_keys(row, {"id", "unit", "value"}, f"parameters[{index}]")
         name = token(row["id"], f"parameters[{index}].id")
         value = finite_number(row["value"], f"parameters[{index}].value")
-        if (name not in PARAMETER_PATHS or name in values or
-                row["unit"] != "seconds" or value < 0.01 or value > 30.0):
+        if case.get("joint") is True:
+            valid = (name == JOINT_PARAMETER and row["unit"] == "choice" and
+                     value in (0.0, 1.0))
+        else:
+            limits = PARAMETER_LIMITS.get(name)
+            valid = (limits is not None and row["unit"] == limits[0] and
+                     limits[1] <= value <= limits[2])
+        if not valid or name in values:
             raise AdapterError(f"invalid render parameter: {name}")
         values[name] = value
-    if set(values) != set(PARAMETER_PATHS):
+
+    names = set(values)
+    parameter_set_is_valid = False
+    if case.get("joint") is True:
+        parameter_set_is_valid = names == {JOINT_PARAMETER}
+    else:
+        base_case_id = case_id.removesuffix("-diagnostic-check")
+        target = V2_CASE_TARGETS.get(base_case_id)
+        if target is None:
+            parameter_set_is_valid = names == set(LOSS_PARAMETERS)
+        else:
+            allowed = [{target["parameter"]}]
+            d_frequency_parameters = {
+                "string_d_bridge_cutoff_hz",
+                "string_d_loss_seconds",
+            }
+            if target["string"] == 3:
+                allowed.append(d_frequency_parameters)
+            parameter_set_is_valid = names in allowed
+            if (parameter_set_is_valid and
+                    names == d_frequency_parameters and
+                    not 0.25 <= values["string_d_loss_seconds"] <= 3.0):
+                parameter_set_is_valid = False
+    if not parameter_set_is_valid:
         raise AdapterError("render job has the wrong parameter set")
     job["reference_path"] = reference_path
     job["output_path"] = output_path
@@ -635,7 +898,11 @@ def set_path(root: Any, parts: tuple[Any, ...], value: float) -> None:
 
 
 def csd_text(case: dict[str, Any], duration: float) -> str:
-    release = max(0.05, duration - 0.50)
+    passive = case.get("passive") is True or case.get("joint") is True
+    lead = min(0.10, duration / 4.0) if passive else 0.0
+    note_duration = duration - lead
+    gate = "1" if passive else (
+        f"timeinsts() < {max(0.05, duration - 0.50):.17g} ? 1 : 0")
     return """<CsoundSynthesizer>
 <CsOptions>
 -d -m0
@@ -649,7 +916,7 @@ nchnls = 1
 giBass hlolli_wg_double_bass_create
 
 instr Bass
-  kGate = timeinsts() < {release:.17g} ? 1 : 0
+  kGate = {gate}
   aLeft, aRight hlolli_wg_double_bass kGate, {frequency_hz:.17g}, \
       {force:.17g}, {speed:.17g}, {position:.17g}, 0, 0, \
       {articulation}, 0, 0, {string}, giBass
@@ -657,11 +924,11 @@ instr Bass
 endin
 </CsInstruments>
 <CsScore>
-i "Bass" 0 {duration:.17g}
+i "Bass" {lead:.17g} {note_duration:.17g}
 e
 </CsScore>
 </CsoundSynthesizer>
-""".format(release=release, duration=duration, **case)
+""".format(gate=gate, lead=lead, note_duration=note_duration, **case)
 
 
 def run_checked(command: list[str], cwd: Path, label: str,
@@ -860,14 +1127,27 @@ def render_job(request: Path, output_dir: Path) -> None:
         raise AdapterError("rendering is not granted")
     resources = resource_paths(config)
     output_dir = directory(output_dir, "output directory")
-    job = checked_job(request, output_dir)
-    case = CASES[job["case_id"]]
+    job = checked_job(request, output_dir, config)
+    case = renderer_cases(config)[job["case_id"]]
     sample_rate = case["sample_rate"]
     reference_frames = pcm_wave_frames(job["reference_path"], sample_rate)
     duration = reference_frames / sample_rate
     profile = load_json(resources["model"])
-    for name, value in job["parameter_values"].items():
-        set_path(profile, PARAMETER_PATHS[name], value)
+    if case.get("joint") is True:
+        if job["parameter_values"][JOINT_PARAMETER] == 1.0:
+            joint = config["joint_candidate"]
+            for change in joint["changes"]:
+                set_path(
+                    profile, tuple(change["path"]), float(change["after"]))
+            candidate_source = (
+                json.dumps(profile, indent=2, allow_nan=False) + "\n"
+            ).encode("utf-8")
+            if hashlib.sha256(candidate_source).hexdigest() != joint[
+                    "candidate_profile_sha256"]:
+                raise AdapterError("joint candidate profile hash changed")
+    else:
+        for name, value in job["parameter_values"].items():
+            set_path(profile, PARAMETER_PATHS[name], value)
 
     scratch = output_dir
     model = scratch / ".hwa-double-bass-candidate.json"

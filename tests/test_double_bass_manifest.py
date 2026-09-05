@@ -127,21 +127,117 @@ def fake_analyzer(path):
     path.chmod(0o700)
 
 
-def fake_renderer_builder(path, marker):
+def fake_renderer_builder(path, marker, *, bad_description=False,
+                          accept_invalid_profile=False):
+    renderer_shebang = "#!{} -I\n".format(PYTHON)
     path.write_text(
         f"#!{PYTHON} -I\n"
-        "import pathlib, sys\n"
+        "import json, pathlib, sys\n"
         f"marker=pathlib.Path({str(marker)!r})\n"
+        f"bad_description={bad_description!r}\n"
+        f"accept_invalid_profile={accept_invalid_profile!r}\n"
         "a=sys.argv[1:]\n"
         "if len(a)!=5 or a[0]!='build' or a[1]!='--config' or a[3]!='--output':\n"
         " raise SystemExit(9)\n"
+        "config=json.loads(pathlib.Path(a[2]).read_text(encoding='utf-8'))\n"
         "output=pathlib.Path(a[4])\n"
-        "output.write_text('#!/usr/bin/python3 -I\\n',encoding='utf-8')\n"
+        "source=(\n"
+        f" {renderer_shebang!r}\n"
+        " + 'import hashlib, json, pathlib, sys\\n'\n"
+        " + 'config=' + repr(config) + '\\n'\n"
+        " + 'bad_description=' + repr(bad_description) + '\\n'\n"
+        " + 'accept_invalid_profile=' + repr(accept_invalid_profile) + '\\n'\n"
+        " + \"here=pathlib.Path(__file__).resolve()\\n\"\n"
+        " + \"if sys.argv[1:]==['--describe']:\\n\"\n"
+        " + \" digest=hashlib.sha256(here.read_bytes()).hexdigest()\\n\"\n"
+        " + \" if bad_description: print('{}'); raise SystemExit(0)\\n\"\n"
+        " + \" ids=['c_compiler','csound','csound_include/csdl.h','csound_include/float-version.h','csound_include/version.h','generator','model','python','source']\\n\"\n"
+        " + \" resources=[{'id':i,'path':str(here),'sha256':digest} for i in ids]\\n\"\n"
+        " + \" value={'adapter_id':'hlolli_wg_double_bass','compiler':{'macos_sdk_root':None},'joint_candidate':config['joint_candidate'],'permissions':config['permissions'],'platform':sys.platform,'resources':resources,'schema':'hwa-double-bass-renderer','schema_version':1}\\n\"\n"
+        " + \" print(json.dumps(value,sort_keys=True,separators=(',',':'))); raise SystemExit(0)\\n\"\n"
+        " + \"if len(sys.argv)==3 and sys.argv[1]=='--validate-profile':\\n\"\n"
+        " + \" try: profile=json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))\\n\"\n"
+        " + \" except Exception: raise SystemExit(1)\\n\"\n"
+        " + \" if accept_invalid_profile or (isinstance(profile.get('strings'),list) and len(profile['strings'])==4): raise SystemExit(0)\\n\"\n"
+        " + \" raise SystemExit(1)\\n\"\n"
+        " + \"raise SystemExit(9)\\n\"\n"
+        ")\n"
+        "output.write_text(source,encoding='utf-8')\n"
         "output.chmod(0o700)\n"
         "marker.write_text('built\\n',encoding='utf-8')\n",
         encoding="utf-8",
     )
     path.chmod(0o700)
+
+
+def joint_selection_result(target, contract, fit_id, fit_hash,
+                           analyzer_hash, selector_hash, profile_hash):
+    manifest = MODULE.joint_selection_manifest(target, contract)
+    parameters = manifest["parameters"]
+    objective = manifest["objectives"][0]
+    baseline_parameters = {
+        row["id"]: float(row["baseline"]) for row in parameters
+    }
+    chosen_parameters = dict(MODULE.JOINT_SELECTION_PARAMETERS[target])
+
+    def point(point_id, values, loss, baseline):
+        evidence = {
+            "checked_harmonic_decay_valid": True,
+            "checked_note_valid": True,
+            "loss": loss,
+            "loss_increase_from_baseline": loss - 0.5,
+            "maximum_absolute_t60_error_octaves": 0.4,
+            "mean_absolute_t60_error_octaves": 0.2,
+            "median_t60_bias_octaves": 0.0,
+            "model_pitch_error_cents": 0.0,
+            "objective": objective["id"],
+            "reference_pitch_error_cents": 0.0,
+            "rms_t60_error_octaves": loss,
+            "shared_reference_coverage": 1.0,
+            "valid_harmonic_count": 4,
+        }
+        return {
+            "baseline": baseline,
+            "check_loss": 0.0,
+            "eligible": True,
+            "evidence": [evidence],
+            "fit_loss": loss,
+            "parameters": values,
+            "point_id": point_id,
+            "point_key": hashlib.sha256(
+                (target + ":" + str(point_id)).encode("utf-8")
+            ).hexdigest(),
+            "score": loss,
+            "source_groups": [],
+            "worst_harm": 0.0,
+        }
+
+    chosen = point(1, chosen_parameters, 0.2, False)
+    baseline = point(0, baseline_parameters, 0.5, True)
+    return {
+        "adapter_id": manifest["adapter_id"],
+        "analyzer_sha256": analyzer_hash,
+        "baseline_point_id": 0,
+        "baseline_score": 0.5,
+        "chosen_parameters": chosen_parameters,
+        "chosen_point_id": 1,
+        "chosen_score": 0.2,
+        "experiment_result_sha256": hashlib.sha256(
+            (target + ":experiment").encode("utf-8")
+        ).hexdigest(),
+        "fit_manifest_sha256": hashlib.sha256(
+            MODULE.json_bytes(manifest)
+        ).hexdigest(),
+        "method_versions": MODULE.JOINT_SELECTION_METHODS,
+        "points": [chosen, baseline],
+        "profile_sha256": profile_hash,
+        "reference_bindings": [{"id": fit_id, "sha256": fit_hash}],
+        "schema": "hwa-instrument-fit-result",
+        "schema_version": 1,
+        "selection_mode": "fit-only",
+        "selector_sha256": selector_hash,
+        "status": "pass",
+    }
 
 
 def joint_v2_fixture(root):
@@ -159,14 +255,7 @@ def joint_v2_fixture(root):
         ],
     }
     fixed.write_text(json.dumps(fixed_value), encoding="utf-8")
-    candidate_value = json.loads(json.dumps(fixed_value))
-    for row in MODULE.joint_candidate_changes():
-        parent = candidate_value
-        for part in row["path"][:-1]:
-            parent = parent[part]
-        parent[row["path"][-1]] = row["after"]
     candidate = root / "candidate.json"
-    candidate.write_text(json.dumps(candidate_value), encoding="utf-8")
     renderer_config = root / "renderer-base.json"
     renderer_config.write_text(json.dumps({
         "permissions": {
@@ -184,9 +273,12 @@ def joint_v2_fixture(root):
     fit_selector = root / "instrument-fit.py"
     fit_selector.write_text("# fixture\n", encoding="utf-8")
 
-    fit_references = []
+    contract = MODULE.expected_v2_contract()
+    contract_references = {
+        row["target"]: row for row in contract["fit_references"]
+    }
     fit_reference_rows = []
-    fit_selection_rows = []
+    fit_paths = {}
     roster = []
     archive = {
         "bytes": 2168063959,
@@ -205,48 +297,15 @@ def joint_v2_fixture(root):
     source_group_id = "good-sounds-double-bass-player-1"
     for index, (target, target_spec) in enumerate(
             MODULE.JOINT_OPEN_TARGETS.items()):
-        fit_id = "fixture-fit-" + target
+        fit_row = contract_references[target]
+        fit_id = fit_row["id"]
         fit_path = root / (fit_id + ".wav")
         wave_file(fit_path, 48000, 3, 12000 + index)
         fit_hash = sha256(fit_path)
-        fit_references.append({
-            "bits_per_sample": 24,
-            "channels": 1,
-            "expected_hz": target_spec["expected_hz"],
-            "frames": 12000 + index,
-            "id": fit_id,
-            "sample_rate_hz": 48000,
-            "sha256": fit_hash,
-            "target": target,
-        })
+        fit_row["frames"] = 12000 + index
+        fit_row["sha256"] = fit_hash
+        fit_paths[target] = fit_path
         fit_reference_rows.append({"path": str(fit_path), "target": target})
-        selection = root / ("selection-" + target + ".json")
-        selection.write_text(json.dumps({
-            "chosen_parameters": MODULE.JOINT_SELECTION_PARAMETERS[target],
-            "chosen_point_id": "selected",
-            "points": [{
-                "eligible": True,
-                "evidence": [{
-                    "checked_harmonic_decay_valid": True,
-                    "checked_note_valid": True,
-                    "maximum_absolute_t60_error_octaves": 0.4,
-                    "mean_absolute_t60_error_octaves": 0.2,
-                    "rms_t60_error_octaves": 0.3,
-                    "valid_harmonic_count": 4,
-                }],
-                "point_id": "selected",
-            }],
-            "reference_bindings": [{"id": fit_id, "sha256": fit_hash}],
-            "schema": "hwa-instrument-fit-result",
-            "schema_version": 1,
-            "selection_mode": "fit-only",
-            "status": "pass",
-        }), encoding="utf-8")
-        fit_selection_rows.append({
-            "path": str(selection),
-            "sha256": sha256(selection),
-            "target": target,
-        })
 
         source_path = root / ("whole-good-sounds-" + target + ".wav")
         wave_file(source_path, 48000, 3, 13000 + index)
@@ -279,6 +338,30 @@ def joint_v2_fixture(root):
             },
             "target": target,
         })
+
+    fit_selection_rows = []
+    selection_hashes = {}
+    for target in MODULE.JOINT_TARGETS:
+        fit_row = contract_references[target]
+        selection = root / ("selection-" + target + ".json")
+        selection.write_text(json.dumps(joint_selection_result(
+            target, contract, fit_row["id"], fit_row["sha256"],
+            sha256(analyzer), sha256(fit_selector), sha256(fixed),
+        )), encoding="utf-8")
+        selection_hashes[target] = sha256(selection)
+        fit_selection_rows.append({
+            "path": str(selection),
+            "sha256": selection_hashes[target],
+            "target": target,
+        })
+
+    candidate_value = json.loads(json.dumps(fixed_value))
+    for row in MODULE.joint_candidate_changes(selection_hashes):
+        parent = candidate_value
+        for part in row["path"][:-1]:
+            parent = parent[part]
+        parent[row["path"][-1]] = row["after"]
+    candidate.write_text(json.dumps(candidate_value), encoding="utf-8")
 
     tools = {
         "analyzer": analyzer,
@@ -326,8 +409,8 @@ def joint_v2_fixture(root):
     }
     declaration_path = root / "joint-v2-declaration.json"
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
-    contract = {"fit_references": fit_references}
-    return declaration_path, declaration, contract, renderer_marker
+    return (declaration_path, declaration, contract, renderer_marker,
+            selection_hashes)
 
 
 class DoubleBassManifestTests(unittest.TestCase):
@@ -605,7 +688,7 @@ class DoubleBassManifestTests(unittest.TestCase):
         experiment = MODULE.joint_experiment(references)
         self.assertEqual(
             hashlib.sha256(MODULE.json_bytes(experiment)).hexdigest(),
-            "1109daca5b0904d37aa1d5e85f44f29fed908968584a4769bb5d7876e8210b92",
+            "eefd1e87accd60540741798d7fa30f232a638cdc1c31d883d939691318701055",
         )
         self.assertEqual(
             experiment["parameters"][0]["levels"], [0.0, 1.0]
@@ -616,6 +699,10 @@ class DoubleBassManifestTests(unittest.TestCase):
         })
         self.assertEqual(experiment["parameters"], [MODULE.JOINT_PARAMETER])
         self.assertEqual(len(experiment["cases"]), 12)
+        self.assertEqual(
+            [row["id"] for row in experiment["cases"]],
+            sorted(row["id"] for row in experiment["cases"]),
+        )
         manifest = MODULE.joint_fit_manifest(
             references,
             {target: 0.2 for target in MODULE.JOINT_TARGETS},
@@ -623,7 +710,7 @@ class DoubleBassManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             hashlib.sha256(MODULE.json_bytes(manifest)).hexdigest(),
-            "fecc8cad2246a7708850f42e7c2d78fc29004f6508d8bfc5d6683c4b9c38b96e",
+            "4f37e7cb95d2657d3e7cecba38e419727f053ea2522e9436f214a098a0f6cae6",
         )
         self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["selection"][
@@ -652,82 +739,153 @@ class DoubleBassManifestTests(unittest.TestCase):
         })
         with tempfile.TemporaryDirectory(prefix="hwa bass joint v2 ") as text:
             root = Path(text)
-            declaration_path, declaration, unused_contract, unused_marker = (
-                joint_v2_fixture(root)
-            )
-            checked = MODULE.checked_joint_declaration_v2(declaration_path)
-            self.assertEqual(checked, declaration)
-            self.assertNotIn("conversion", checked)
-            for row in checked["validation_roster"]:
-                self.assertNotIn("derived", row)
-                self.assertEqual(
-                    row["source"]["string_assignment_evidence"],
-                    {
-                        "good_sounds_metadata_string": None,
-                        "kind": "open-pitch-transfer-proxy",
-                        "source_proven_physical_string": False,
-                    },
+            (declaration_path, declaration, contract, unused_marker,
+             selection_hashes) = joint_v2_fixture(root)
+            with mock.patch.object(
+                    MODULE, "expected_v2_contract", return_value=contract), \
+                    mock.patch.object(
+                        MODULE, "JOINT_SELECTION_SHA256", selection_hashes):
+                checked = MODULE.checked_joint_declaration_v2(declaration_path)
+                self.assertEqual(checked, declaration)
+                self.assertNotIn("conversion", checked)
+                for row in checked["validation_roster"]:
+                    self.assertNotIn("derived", row)
+                    self.assertEqual(
+                        row["source"]["string_assignment_evidence"],
+                        {
+                            "good_sounds_metadata_string": None,
+                            "kind": "open-pitch-transfer-proxy",
+                            "source_proven_physical_string": False,
+                        },
+                    )
+                    self.assertTrue(row["source"]["whole_file"])
+                    self.assertNotIn("iowa", row["source"]["id"])
+                for row in checked["fit_selections"]:
+                    result = json.loads(
+                        Path(row["path"]).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(result["status"], "pass")
+                    self.assertEqual(len(result["points"]), 2)
+                    self.assertEqual(
+                        result["chosen_parameters"],
+                        MODULE.JOINT_SELECTION_PARAMETERS[row["target"]],
+                    )
+
+                def rejects(name, change, message):
+                    changed = json.loads(json.dumps(declaration))
+                    change(changed)
+                    changed_path = root / (name + ".json")
+                    changed_path.write_text(
+                        json.dumps(changed), encoding="utf-8")
+                    with self.assertRaisesRegex(MODULE.ManifestError, message):
+                        MODULE.checked_joint_declaration_v2(changed_path)
+
+                rejects(
+                    "wrong-open-frequency",
+                    lambda value: value["validation_roster"][0].update(
+                        expected_hz=42.0),
+                    "exact open target",
                 )
-                self.assertTrue(row["source"]["whole_file"])
-                self.assertNotIn("iowa", row["source"]["id"])
+                rejects(
+                    "physical-string-claim",
+                    lambda value: value["validation_roster"][0]["source"][
+                        "string_assignment_evidence"
+                    ].update(source_proven_physical_string=True),
+                    "open-pitch transfer proxy",
+                )
+                rejects(
+                    "second-source-group",
+                    lambda value: value["validation_roster"][0][
+                        "source"].update(
+                            source_group_id="another-good-sounds-player"),
+                    "one source group",
+                )
+                rejects(
+                    "conversion-field",
+                    lambda value: value.update(conversion={}),
+                    "fields differ",
+                )
+                rejects(
+                    "license-conflict-erased",
+                    lambda value: value["validation_roster"][0]["source"][
+                        "license"
+                    ].update(status="clear"),
+                    "license conflict",
+                )
+                source_path = Path(
+                    declaration["validation_roster"][0]["source"]["path"]
+                )
+                linked = root / "linked-source.wav"
+                linked.symlink_to(source_path)
+                rejects(
+                    "source-symlink",
+                    lambda value: value["validation_roster"][0][
+                        "source"].update(path=str(linked)),
+                    "must be a regular file",
+                )
 
-            def rejects(name, change, message):
-                changed = json.loads(json.dumps(declaration))
-                change(changed)
-                changed_path = root / (name + ".json")
-                changed_path.write_text(json.dumps(changed), encoding="utf-8")
-                with self.assertRaisesRegex(MODULE.ManifestError, message):
+                copied_builder = root / "copied-manifest-builder.py"
+                copied_builder.write_bytes(BUILDER.read_bytes())
+                rejects(
+                    "copied-manifest-builder",
+                    lambda value: value["tools"]["manifest_builder"].update(
+                        path=str(copied_builder),
+                        sha256=sha256(copied_builder)),
+                    "not this builder",
+                )
+                rejects(
+                    "unfrozen-fit-selection",
+                    lambda value: value["fit_selections"][0].update(
+                        sha256="f" * 64),
+                    "not the frozen result",
+                )
+
+                fit_source_group = contract["fit_references"][0][
+                    "source_group"]
+
+                def reuse_fit_source_group(value):
+                    value["audit"]["source_group_id"] = fit_source_group
+                    for item in value["validation_roster"]:
+                        item["source"]["source_group_id"] = fit_source_group
+
+                rejects(
+                    "reused-fit-source-group", reuse_fit_source_group,
+                    "audit source group reuses the fit source group",
+                )
+                fit_path = declaration["fit_references"][0]["path"]
+                rejects(
+                    "reused-fit-file",
+                    lambda value: value["validation_roster"][0][
+                        "source"].update(path=fit_path),
+                    "validation source reuses a fit source",
+                )
+
+            changed = json.loads(json.dumps(declaration))
+            target = changed["fit_selections"][0]["target"]
+            selection_path = Path(changed["fit_selections"][0]["path"])
+            result = json.loads(selection_path.read_text(encoding="utf-8"))
+            result["chosen_score"] = 99.0
+            changed_selection = root / "changed-full-selection.json"
+            changed_selection.write_text(json.dumps(result), encoding="utf-8")
+            changed_hashes = dict(selection_hashes)
+            changed_hashes[target] = sha256(changed_selection)
+            changed["fit_selections"][0].update(
+                path=str(changed_selection), sha256=changed_hashes[target])
+            changed_path = root / "changed-full-selection-declaration.json"
+            changed_path.write_text(json.dumps(changed), encoding="utf-8")
+            with mock.patch.object(
+                    MODULE, "expected_v2_contract", return_value=contract), \
+                    mock.patch.object(
+                        MODULE, "JOINT_SELECTION_SHA256", changed_hashes):
+                with self.assertRaisesRegex(
+                        MODULE.ManifestError, "result summary differs"):
                     MODULE.checked_joint_declaration_v2(changed_path)
-
-            rejects(
-                "wrong-open-frequency",
-                lambda value: value["validation_roster"][0].update(
-                    expected_hz=42.0),
-                "exact open target",
-            )
-            rejects(
-                "physical-string-claim",
-                lambda value: value["validation_roster"][0]["source"][
-                    "string_assignment_evidence"
-                ].update(source_proven_physical_string=True),
-                "open-pitch transfer proxy",
-            )
-            rejects(
-                "second-source-group",
-                lambda value: value["validation_roster"][0]["source"].update(
-                    source_group_id="another-good-sounds-player"),
-                "one source group",
-            )
-            rejects(
-                "conversion-field",
-                lambda value: value.update(conversion={}),
-                "fields differ",
-            )
-            rejects(
-                "license-conflict-erased",
-                lambda value: value["validation_roster"][0]["source"][
-                    "license"
-                ].update(status="clear"),
-                "license conflict",
-            )
-            source_path = Path(
-                declaration["validation_roster"][0]["source"]["path"]
-            )
-            linked = root / "linked-source.wav"
-            linked.symlink_to(source_path)
-            rejects(
-                "source-symlink",
-                lambda value: value["validation_roster"][0]["source"].update(
-                    path=str(linked)),
-                "must be a regular file",
-            )
 
     def test_joint_v2_build_preflights_before_emitting_frozen_bundle(self):
         with tempfile.TemporaryDirectory(prefix="hwa bass joint v2 build ") as text:
             root = Path(text)
-            declaration_path, declaration, contract, renderer_marker = (
-                joint_v2_fixture(root)
-            )
+            (declaration_path, declaration, contract, renderer_marker,
+             selection_hashes) = joint_v2_fixture(root)
             output = root / "joint-v2-bundle"
             arguments = types.SimpleNamespace(
                 declaration=declaration_path,
@@ -738,7 +896,9 @@ class DoubleBassManifestTests(unittest.TestCase):
             fixed_before = fixed_path.read_bytes()
             candidate_before = candidate_path.read_bytes()
             with mock.patch.object(
-                    MODULE, "expected_v2_contract", return_value=contract):
+                    MODULE, "expected_v2_contract", return_value=contract), \
+                    mock.patch.object(
+                        MODULE, "JOINT_SELECTION_SHA256", selection_hashes):
                 summary = MODULE.build_joint_validation_v2_bundle(arguments)
             self.assertEqual(summary["audit_scope"],
                              "open-pitch-transfer-proxy")
@@ -782,6 +942,10 @@ class DoubleBassManifestTests(unittest.TestCase):
                 "max_candidate_harmonic_mean_error_octaves"], 0.75)
             self.assertEqual(fit["selection"][
                 "max_candidate_harmonic_maximum_error_octaves"], 1.5)
+            self.assertEqual(
+                fit["candidate"]["profile_adapter_sha256"],
+                sha256(output / "renderer"),
+            )
             renderer_config = json.loads(
                 (output / "renderer-config.json").read_text(encoding="utf-8")
             )
@@ -792,13 +956,16 @@ class DoubleBassManifestTests(unittest.TestCase):
             )
             self.assertEqual(fixed_path.read_bytes(), fixed_before)
             self.assertEqual(candidate_path.read_bytes(), candidate_before)
+            self.assertEqual(set(receipt["files"]), {
+                "bindings.local.json", "experiment.json", "fit.json",
+                "renderer", "renderer-config.json",
+            })
 
         with tempfile.TemporaryDirectory(
                 prefix="hwa bass joint v2 rejected ") as text:
             root = Path(text)
-            declaration_path, unused_declaration, contract, renderer_marker = (
-                joint_v2_fixture(root)
-            )
+            (declaration_path, unused_declaration, contract, renderer_marker,
+             selection_hashes) = joint_v2_fixture(root)
             output = root / "rejected-bundle"
             arguments = types.SimpleNamespace(
                 declaration=declaration_path,
@@ -806,6 +973,8 @@ class DoubleBassManifestTests(unittest.TestCase):
             )
             with mock.patch.object(
                     MODULE, "expected_v2_contract", return_value=contract), \
+                    mock.patch.object(
+                        MODULE, "JOINT_SELECTION_SHA256", selection_hashes), \
                     mock.patch.object(
                         MODULE, "v2_reference_evidence",
                         side_effect=MODULE.ManifestError(
@@ -815,6 +984,37 @@ class DoubleBassManifestTests(unittest.TestCase):
                     MODULE.build_joint_validation_v2_bundle(arguments)
             self.assertFalse(renderer_marker.exists())
             self.assertFalse(output.exists())
+
+        for probe, expected in (
+                ("bad-description", "renderer description"),
+                ("accept-invalid-profile", "accepted an invalid profile")):
+            with self.subTest(probe=probe), tempfile.TemporaryDirectory(
+                    prefix="hwa bass joint v2 probe ") as text:
+                root = Path(text)
+                (declaration_path, declaration, contract, renderer_marker,
+                 selection_hashes) = joint_v2_fixture(root)
+                renderer_builder = Path(
+                    declaration["tools"]["renderer_builder"]["path"])
+                fake_renderer_builder(
+                    renderer_builder, renderer_marker,
+                    bad_description=probe == "bad-description",
+                    accept_invalid_profile=probe == "accept-invalid-profile",
+                )
+                declaration["tools"]["renderer_builder"]["sha256"] = sha256(
+                    renderer_builder)
+                declaration_path.write_text(
+                    json.dumps(declaration), encoding="utf-8")
+                output = root / "rejected-probe-bundle"
+                arguments = types.SimpleNamespace(
+                    declaration=declaration_path, output_dir=output)
+                with mock.patch.object(
+                        MODULE, "expected_v2_contract",
+                        return_value=contract), mock.patch.object(
+                            MODULE, "JOINT_SELECTION_SHA256",
+                            selection_hashes):
+                    with self.assertRaisesRegex(MODULE.ManifestError, expected):
+                        MODULE.build_joint_validation_v2_bundle(arguments)
+                self.assertFalse(output.exists())
 
     def test_build_makes_a_repeatable_explicit_derived_binding_bundle(self):
         with tempfile.TemporaryDirectory(prefix="hwa bass manifest ") as text:
