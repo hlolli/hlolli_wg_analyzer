@@ -443,10 +443,10 @@ static int hwa_production_add_size(uint64_t *total, uint64_t amount,
 static int hwa_production_array_bytes(size_t count, size_t element,
                                       uint64_t *bytes)
 {
-    if (element != 0U &&
-        (count > SIZE_MAX / element || count > UINT64_MAX / element)) {
-        return -1;
-    }
+    if (element != 0U && count > SIZE_MAX / element) return -1;
+#if SIZE_MAX > UINT64_MAX
+    if (element != 0U && count > UINT64_MAX / element) return -1;
+#endif
     *bytes = (uint64_t)count * (uint64_t)element;
     return 0;
 }

@@ -2896,7 +2896,10 @@ int hwa_alignment_file_read(const char *path,
     state.limits = copied;
     state.validator.retain_locked = 0;
     hwa_alignment_options_default(&state.result.options);
-    if ((uint64_t)size + 1U > UINT64_MAX / 2U ||
+    if (
+#if SIZE_MAX > UINT64_MAX / 2U - 1U
+        size > (size_t)(UINT64_MAX / 2U - 1U) ||
+#endif
         (uint64_t)HWA_ALIGNMENT_FILE_MAX_FIELDS >
             UINT64_MAX / (uint64_t)sizeof(char *)) {
         hwa_set_error(error, error_size,

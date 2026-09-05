@@ -101,8 +101,10 @@ static int hwa_htdemucs_work_add(uint64_t *total,
     if (total == NULL || (item_size != 0U && count > SIZE_MAX / item_size))
         return -1;
     bytes = count * item_size;
-    if ((uintmax_t)bytes > UINT64_MAX || *total > maximum ||
-        (uint64_t)bytes > maximum - *total)
+#if SIZE_MAX > UINT64_MAX
+    if (bytes > (size_t)UINT64_MAX) return -1;
+#endif
+    if (*total > maximum || (uint64_t)bytes > maximum - *total)
         return -1;
     *total += (uint64_t)bytes;
     return 0;

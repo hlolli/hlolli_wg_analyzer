@@ -4501,10 +4501,14 @@ static int hwa_event_work_add(uint64_t *total,
                               size_t item_size,
                               uint64_t maximum)
 {
+    size_t native_bytes;
     uint64_t bytes;
     if (count != 0U && item_size > SIZE_MAX / count) return -1;
-    if ((uintmax_t)(count * item_size) > UINT64_MAX) return -1;
-    bytes = (uint64_t)(count * item_size);
+    native_bytes = count * item_size;
+#if SIZE_MAX > UINT64_MAX
+    if (native_bytes > (size_t)UINT64_MAX) return -1;
+#endif
+    bytes = (uint64_t)native_bytes;
     if (*total > maximum || bytes > maximum - *total) return -1;
     *total += bytes;
     return 0;

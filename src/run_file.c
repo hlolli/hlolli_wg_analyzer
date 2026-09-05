@@ -2041,7 +2041,10 @@ static int hwa_run_file_read_impl(
                                 limits->max_work_bytes,
                                 &data, &data_size, file_sha256,
                                 error, error_size) != 0) return -1;
-    if ((uint64_t)data_size + UINT64_C(1) > UINT64_MAX / 3U ||
+    if (
+#if SIZE_MAX > UINT64_MAX / 3U - 1U
+        data_size > (size_t)(UINT64_MAX / 3U - 1U) ||
+#endif
         ((uint64_t)data_size + UINT64_C(1)) * 3U >
             limits->max_work_bytes) {
         hwa_run_file_error(error, error_size,

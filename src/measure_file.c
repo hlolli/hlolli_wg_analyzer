@@ -834,6 +834,17 @@ static char *hwa_measure_read_path(HWAMeasureReadState *state,
     return path;
 }
 
+static int hwa_measure_array_bytes(size_t count,
+                                   size_t element_size,
+                                   uint64_t *bytes)
+{
+#if SIZE_MAX >= UINT64_MAX
+    if (element_size != 0U && count > UINT64_MAX / element_size) return -1;
+#endif
+    *bytes = (uint64_t)count * (uint64_t)element_size;
+    return 0;
+}
+
 static int hwa_measure_read_allocate_arrays(HWAMeasureReadState *state,
                                             char *error,
                                             size_t error_size)
@@ -842,12 +853,12 @@ static int hwa_measure_read_allocate_arrays(HWAMeasureReadState *state,
 #define HWA_ADD_ARRAY(count_, type_)                                         \
     do {                                                                     \
         uint64_t add_;                                                       \
-        if ((uint64_t)(count_) > UINT64_MAX / (uint64_t)sizeof(type_)) {    \
+        if (hwa_measure_array_bytes(                                         \
+                (count_), sizeof(type_), &add_) != 0) {                     \
             hwa_set_error(error, error_size,                                 \
                           "measurement row storage overflows");             \
             return -1;                                                       \
         }                                                                    \
-        add_ = (uint64_t)(count_) * (uint64_t)sizeof(type_);                 \
         if (add_ > UINT64_MAX - bytes) {                                     \
             hwa_set_error(error, error_size,                                 \
                           "measurement row total overflows");               \

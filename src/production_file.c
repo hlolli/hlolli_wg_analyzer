@@ -462,7 +462,9 @@ static int hwa_production_add_array(uint64_t *total,
                                     size_t count,
                                     size_t element_size)
 {
+#if SIZE_MAX >= UINT64_MAX
     if (element_size != 0U && count > UINT64_MAX / element_size) return -1;
+#endif
     return hwa_production_add_bytes(
         total, (uint64_t)count * (uint64_t)element_size);
 }

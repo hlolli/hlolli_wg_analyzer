@@ -2830,7 +2830,7 @@ def write_verified_profile(
                 (Path(__file__), selector_hash, "fit selector")):
             if sha256(path) != expected:
                 raise FitError(f"{field} changed during profile validation")
-        with temporary.open("rb") as stream:
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         try:
             os.link(temporary, output)
@@ -2970,7 +2970,7 @@ def write_profile(arguments: argparse.Namespace) -> None:
             raise FitError("profile adapter rejected output: " + completed.stderr.strip())
         if sha256(adapter) != adapter_hash:
             raise FitError("profile adapter changed during validation")
-        with temporary.open("rb") as stream:
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         try:
             os.link(temporary, output)

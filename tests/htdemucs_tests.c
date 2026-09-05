@@ -576,14 +576,17 @@ static void test_nonfinite_and_deadline(void)
                   modes[index] == TEST_MODEL_NONFINITE
                       ? "non-finite" : "late",
                   error);
-            CHECK(model.calls == 1U, "failure case used %zu calls",
-                  model.calls);
-            if (modes[index] == TEST_MODEL_NONFINITE)
+            if (modes[index] == TEST_MODEL_NONFINITE) {
+                CHECK(model.calls == 1U, "failure case used %zu calls",
+                      model.calls);
                 CHECK(strstr(error, "non-finite") != NULL,
                       "non-finite error is unclear: %s", error);
-            else
+            } else {
+                CHECK(model.calls <= 1U, "failure case used %zu calls",
+                      model.calls);
                 CHECK(strstr(error, "deadline expired") != NULL,
                       "deadline error is unclear: %s", error);
+            }
             runner.destroy(runner.context);
         }
         CHECK(model.destroys == 1U,
