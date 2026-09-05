@@ -567,12 +567,26 @@ static int hwa_event_analysis_work_add(uint64_t *total,
                                        size_t item_size,
                                        uint64_t maximum)
 {
+    size_t native_bytes;
     uint64_t bytes;
     if (count != 0U && item_size > SIZE_MAX / count) return -1;
-    if ((uintmax_t)(count * item_size) > UINT64_MAX) return -1;
-    bytes = (uint64_t)(count * item_size);
+    native_bytes = count * item_size;
+#if SIZE_MAX > UINT64_MAX
+    if (native_bytes > (size_t)UINT64_MAX) return -1;
+#endif
+    bytes = (uint64_t)native_bytes;
     if (*total > maximum || bytes > maximum - *total) return -1;
     *total += bytes;
+    return 0;
+}
+
+static int hwa_event_analysis_trace_byte_count(size_t point_count,
+                                                uint64_t *bytes)
+{
+#if SIZE_MAX > UINT64_MAX / UINT64_C(8)
+    if (point_count > (size_t)(UINT64_MAX / UINT64_C(8))) return -1;
+#endif
+    *bytes = (uint64_t)point_count * UINT64_C(8);
     return 0;
 }
 
@@ -723,8 +737,8 @@ static int hwa_event_analysis_trace_read(void *context,
     uint64_t total;
     size_t copied = 0U;
     if (source == NULL || source->analysis == NULL || destination == NULL ||
-        source->point_count > UINT64_MAX / UINT64_C(8)) return -1;
-    total = (uint64_t)source->point_count * UINT64_C(8);
+        hwa_event_analysis_trace_byte_count(
+            source->point_count, &total) != 0) return -1;
     if (offset > total || (uint64_t)size > total - offset) return -1;
     while (copied < size) {
         uint64_t absolute = offset + (uint64_t)copied;
@@ -1020,12 +1034,12 @@ static int hwa_event_analysis_build_bundle(
     }
     if (trace_count != 0U) {
         uint64_t trace_bytes;
-        if ((uint64_t)full_point_count > UINT64_MAX / UINT64_C(8)) {
+        if (hwa_event_analysis_trace_byte_count(
+                full_point_count, &trace_bytes) != 0) {
             hwa_event_analysis_error(error, error_size,
                                      "event trace byte count overflows");
             return -1;
         }
-        trace_bytes = (uint64_t)full_point_count * UINT64_C(8);
         bundle->traces = (HWAEventTrace *)calloc(
             trace_count, sizeof(*bundle->traces));
         if (bundle->traces == NULL) {

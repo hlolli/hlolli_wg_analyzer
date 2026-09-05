@@ -258,7 +258,7 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
     manifest_path = root / "fit-v2.json"
     experiment_path = root / "experiment-v2.json"
     profile_path = root / "profile.json"
-    analyzer_path = root / "analyzer"
+    analyzer_path = root / "analyzer.py"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     experiment_path.write_text(json.dumps(experiment), encoding="utf-8")
     profile_path.write_text(
@@ -355,6 +355,12 @@ def write_fake_checked_analyzer(path):
 
 
 class InstrumentFitTests(unittest.TestCase):
+    def test_windows_python_tools_use_the_current_interpreter(self):
+        script = Path("checked-tool.py")
+        with mock.patch.object(MODULE.os, "name", "nt"):
+            command = MODULE.tool_command(script)
+        self.assertEqual(command, [sys.executable, "-I", str(script)])
+
     def test_v1_select_requires_a_lowercase_experiment_renderer_hash(self):
         for name in ("missing", "uppercase"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as text:
@@ -961,7 +967,7 @@ class InstrumentFitTests(unittest.TestCase):
             for path, tau in ((reference, 0.4), (baseline_audio, 0.8),
                               (candidate_audio, 0.4)):
                 write_decay(path, tau)
-            analyzer = root / "analyzer"
+            analyzer = root / "analyzer.py"
             write_fake_checked_analyzer(analyzer)
             manifest = {
                 "schema": "hwa-instrument-fit", "schema_version": 1,

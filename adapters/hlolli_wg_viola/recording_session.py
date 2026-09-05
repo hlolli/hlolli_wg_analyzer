@@ -121,7 +121,8 @@ def normalized_relative_path(value: Any, name: str) -> str:
     return value
 
 
-def _open_regular(path: Path, name: str) -> tuple[BinaryIO, os.stat_result]:
+def _open_regular(path: Path, name: str) -> tuple[
+        BinaryIO, os.stat_result, os.stat_result]:
     try:
         before = os.lstat(path)
         if not stat.S_ISREG(before.st_mode):
@@ -145,7 +146,7 @@ def _open_regular(path: Path, name: str) -> tuple[BinaryIO, os.stat_result]:
                 or not stat.S_ISREG(after.st_mode)
                 or len(set(identities)) != 1):
             raise OSError
-        return os.fdopen(descriptor, "rb"), opened
+        return os.fdopen(descriptor, "rb"), opened, after
     except (OSError, ValueError) as error:
         os.close(descriptor)
         raise ContractError(
@@ -153,7 +154,8 @@ def _open_regular(path: Path, name: str) -> tuple[BinaryIO, os.stat_result]:
         ) from error
 
 
-def _same_open_file(path: Path, opened: os.stat_result,
+def _same_open_file(path: Path, named_before: os.stat_result,
+                    opened: os.stat_result,
                     current: os.stat_result) -> bool:
     try:
         named = os.lstat(path)
@@ -161,19 +163,23 @@ def _same_open_file(path: Path, opened: os.stat_result,
         return False
     return (
         stat.S_ISREG(named.st_mode)
+        and stat.S_ISREG(named_before.st_mode)
         and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+        and (opened.st_dev, opened.st_ino) == (
+            named_before.st_dev, named_before.st_ino)
         and (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
         and opened.st_size == current.st_size
-        and current.st_size == named.st_size
+        and current.st_size == named_before.st_size
+        and named_before.st_size == named.st_size
         and opened.st_mtime_ns == current.st_mtime_ns
-        and current.st_mtime_ns == named.st_mtime_ns
         and opened.st_ctime_ns == current.st_ctime_ns
-        and current.st_ctime_ns == named.st_ctime_ns
+        and named_before.st_mtime_ns == named.st_mtime_ns
+        and named_before.st_ctime_ns == named.st_ctime_ns
     )
 
 
 def read_manifest(path: Path) -> bytes:
-    stream, opened = _open_regular(path, "manifest")
+    stream, opened, named_before = _open_regular(path, "manifest")
     try:
         if opened.st_size > MAX_MANIFEST_BYTES:
             raise ContractError("manifest exceeds the byte limit")
@@ -185,7 +191,7 @@ def read_manifest(path: Path) -> bytes:
         stream.close()
     if len(source) > MAX_MANIFEST_BYTES:
         raise ContractError("manifest exceeds the byte limit")
-    if not _same_open_file(path, opened, current):
+    if not _same_open_file(path, named_before, opened, current):
         raise ContractError("manifest changed while it was read")
     return source
 
@@ -232,7 +238,7 @@ def _consume_chunk(stream: BinaryIO, size: int, digest: Any,
 
 def inspect_wave(path: Path, name: str) -> dict[str, Any]:
     """Hash and inspect one regular WAVE file in one streamed pass."""
-    stream, opened = _open_regular(path, name)
+    stream, opened, named_before = _open_regular(path, name)
     digest = hashlib.sha256()
     try:
         header = _read_chunk(stream, 12, digest, name)
@@ -271,7 +277,7 @@ def inspect_wave(path: Path, name: str) -> dict[str, Any]:
     finally:
         stream.close()
 
-    if not _same_open_file(path, opened, current):
+    if not _same_open_file(path, named_before, opened, current):
         raise ContractError("source file changed while it was read: " + name)
     if format_chunk is None or data_size is None or len(format_chunk) < 16:
         raise ContractError("PCM24 WAVE lacks format or data: " + name)

@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 import wave
@@ -158,6 +159,38 @@ class ViolaRecordingSessionTests(unittest.TestCase):
             value = self.value
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
         return self.manifest
+
+    def test_file_snapshot_does_not_mix_path_and_handle_timestamps(self) -> None:
+        common = {
+            "st_mode": 0o100600,
+            "st_dev": 1,
+            "st_ino": 2,
+            "st_size": 3,
+        }
+        opened = types.SimpleNamespace(
+            **common, st_mtime_ns=10, st_ctime_ns=20,
+        )
+        current = types.SimpleNamespace(
+            **common, st_mtime_ns=10, st_ctime_ns=20,
+        )
+        named_before = types.SimpleNamespace(
+            **common, st_mtime_ns=11, st_ctime_ns=21,
+        )
+        named_after = types.SimpleNamespace(
+            **common, st_mtime_ns=11, st_ctime_ns=21,
+        )
+        with mock.patch.object(MODULE.os, "lstat", return_value=named_after):
+            self.assertTrue(MODULE._same_open_file(
+                self.manifest, named_before, opened, current,
+            ))
+
+        changed = types.SimpleNamespace(
+            **common, st_mtime_ns=12, st_ctime_ns=21,
+        )
+        with mock.patch.object(MODULE.os, "lstat", return_value=changed):
+            self.assertFalse(MODULE._same_open_file(
+                self.manifest, named_before, opened, current,
+            ))
 
     def assert_rejected(self, value: dict, message: str | None = None) -> None:
         self.write_manifest(value)

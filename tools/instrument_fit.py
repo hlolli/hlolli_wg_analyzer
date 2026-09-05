@@ -52,6 +52,13 @@ MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
 
 
+def tool_command(path: Path) -> list[str]:
+    """Name a checked tool in a form that Windows can start."""
+    if os.name == "nt" and path.suffix.lower() == ".py":
+        return [sys.executable, "-I", str(path)]
+    return [str(path)]
+
+
 def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -909,7 +916,8 @@ def artifact_path(root: Path, row: dict[str, Any]) -> Path:
 
 def run_body_envelope(analyzer: Path, reference: Path, model: Path) -> dict[str, Any]:
     completed = subprocess.run(
-        [str(analyzer), "--json", "body-envelope", str(reference), str(model)],
+        [*tool_command(analyzer), "--json", "body-envelope",
+         str(reference), str(model)],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -939,7 +947,7 @@ def run_checked_analyzer_json(
     """Run one bounded analyzer command and parse its duplicate-free JSON."""
     try:
         completed = subprocess.run(
-            [str(analyzer), "--json", *arguments], check=False,
+            [*tool_command(analyzer), "--json", *arguments], check=False,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}, timeout=120,
         )
@@ -2806,7 +2814,7 @@ def write_verified_profile(
             encoding="utf-8",
         )
         completed = subprocess.run(
-            [str(adapter), "--validate-profile", str(temporary)],
+            [*tool_command(adapter), "--validate-profile", str(temporary)],
             check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"},
         )
@@ -2951,7 +2959,7 @@ def write_profile(arguments: argparse.Namespace) -> None:
             encoding="utf-8"
         )
         completed = subprocess.run(
-            [str(adapter), "--validate-profile", str(temporary)],
+            [*tool_command(adapter), "--validate-profile", str(temporary)],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -3023,7 +3031,8 @@ def check_recordings(arguments: argparse.Namespace) -> None:
                 output_stream.setnframes(count)
                 output_stream.writeframes(audio)
             completed = subprocess.run(
-                [str(analyzer), "--json", "body-envelope", str(excerpt)],
+                [*tool_command(analyzer), "--json", "body-envelope",
+                 str(excerpt)],
                 check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
             )

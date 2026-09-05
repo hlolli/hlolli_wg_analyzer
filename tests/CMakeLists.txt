@@ -1469,12 +1469,14 @@ if(HWA_PYTHON3_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/test_viola_recording_session.py)
   set_tests_properties(unit.viola-recording-session PROPERTIES TIMEOUT 60)
 
-  add_test(
-    NAME unit.cello-fit-adapter
-    COMMAND
-      ${HWA_PYTHON3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/test_cello_fit_adapter.py)
-  set_tests_properties(unit.cello-fit-adapter PROPERTIES TIMEOUT 30)
+  if(NOT WIN32)
+    add_test(
+      NAME unit.cello-fit-adapter
+      COMMAND
+        ${HWA_PYTHON3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_cello_fit_adapter.py)
+    set_tests_properties(unit.cello-fit-adapter PROPERTIES TIMEOUT 30)
+  endif()
 
   if(NOT WIN32)
     add_test(

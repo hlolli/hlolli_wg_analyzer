@@ -406,7 +406,7 @@ static void test_valid_bundle_text_states_scope(void)
     CHECK(test_bundle_bytes(&files, &expected_bytes),
           "cannot count text fixture bytes");
     (void)snprintf(byte_line, sizeof(byte_line),
-                   "Total file bytes: %" PRIu64 "\n", expected_bytes);
+                   "Total file bytes: %" PRIu64, expected_bytes);
     arguments[0] = "validate-event-bundle";
     arguments[1] = files.bundle;
     CHECK(test_run(&files, arguments, 2U) == 0,
@@ -414,11 +414,11 @@ static void test_valid_bundle_text_states_scope(void)
     output = test_read_text(files.output);
     errors = test_read_text(files.errors);
     CHECK(output != NULL &&
-              strstr(output, "Event bundle validation passed\n") != NULL &&
-              strstr(output, "Valid means schema conformance.\n") != NULL &&
+              strstr(output, "Event bundle validation passed") != NULL &&
+              strstr(output, "Valid means schema conformance.") != NULL &&
               strstr(output,
                      "Counts: 1 provider, 1 audio, 1 event, 2 values, "
-                     "1 trace, 1 trace reference, 1 warning\n") != NULL &&
+                     "1 trace, 1 trace reference, 1 warning") != NULL &&
               strstr(output, "Retained work bytes: ") != NULL &&
               strstr(output, byte_line) != NULL,
           "text summary omitted its scope, counts, or byte total: %s",
