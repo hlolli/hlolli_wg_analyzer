@@ -869,8 +869,13 @@ def load_saved_experiment(path: Path, source: Optional[bytes] = None
             "worst_harm": number(row[8], "candidate worst harm") if valid else None,
             "values_valid": valid,
         })
+    renderer_sha256 = digest(
+        meta.get("renderer_sha256"),
+        "saved experiment renderer_sha256",
+    )
     return {
         "command": "experiment", "schema_version": 10,
+        "renderer": {"sha256": renderer_sha256},
         "parameters": parameters, "cases": cases, "responses": responses,
         "points": points, "values": values, "jobs": jobs,
         "artifacts": artifacts, "candidates": candidates,
@@ -2168,6 +2173,13 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
             selector_hash, bindings, binding_hashes,
         )
 
+    renderer = experiment.get("renderer")
+    if type(renderer) is not dict:
+        raise FitError("v1 experiment result has no renderer")
+    profile_adapter_hash = digest(
+        renderer.get("sha256"), "experiment renderer.sha256"
+    )
+
     required_bindings = {
         row["reference_binding"] for row in manifest["objectives"]
         if row["kind"] != "experiment-gap"
@@ -2433,6 +2445,7 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
         "analyzer_sha256": analyzer_hash,
         "selector_sha256": selector_hash,
         "profile_sha256": profile_hash,
+        "profile_adapter_sha256": profile_adapter_hash,
         "reference_bindings": [
             {"id": name, "sha256": binding_hashes[name]}
             for name in sorted(bindings)
@@ -2888,8 +2901,14 @@ def write_profile(arguments: argparse.Namespace) -> None:
             fit.get("fit_manifest_sha256") != manifest_hash or
             fit.get("profile_sha256") != source_hash):
         raise FitError("fit result does not bind this manifest and profile")
+    fit_adapter_hash = digest(
+        fit.get("profile_adapter_sha256"),
+        "fit result profile_adapter_sha256",
+    )
     if status == "fail":
         raise FitError("fit result did not pass selection gates")
+    if adapter_hash != fit_adapter_hash:
+        raise FitError("profile adapter does not match the experiment renderer")
     profile = parse_json(source_bytes, source)
     chosen = fit.get("chosen_parameters")
     if type(chosen) is not dict:

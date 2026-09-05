@@ -175,6 +175,10 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
             })
     experiment = {
         "command": "experiment", "schema_version": 10,
+        "renderer": {
+            "id": "profile-adapter",
+            "sha256": MODULE.sha256(adapter_path),
+        },
         "parameters": [{
             "id": 1, "name": "joint_candidate", "unit": "choice",
             "minimum": 0, "maximum": 1, "baseline": 0,
@@ -351,6 +355,79 @@ def write_fake_checked_analyzer(path):
 
 
 class InstrumentFitTests(unittest.TestCase):
+    def test_v1_select_requires_a_lowercase_experiment_renderer_hash(self):
+        for name in ("missing", "uppercase"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                fixture = make_v1_fixture(root)
+                experiment = json.loads(
+                    fixture["experiment"].read_text(encoding="utf-8")
+                )
+                if name == "missing":
+                    del experiment["renderer"]
+                else:
+                    experiment["renderer"]["sha256"] = "A" * 64
+                fixture["experiment"].write_text(
+                    json.dumps(experiment), encoding="utf-8"
+                )
+                output = root / "unbound-result.json"
+                completed = subprocess.run(
+                    select_v1_command(fixture, output), check=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                self.assertEqual(completed.returncode, 1)
+                expected = "no renderer" if name == "missing" else (
+                    "lowercase SHA-256"
+                )
+                self.assertIn(expected, completed.stderr)
+                self.assertFalse(output.exists())
+
+    def test_v1_select_binds_and_write_rejects_the_wrong_profile_adapter(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            fixture = make_v1_fixture(root)
+            manifest = json.loads(
+                fixture["manifest"].read_text(encoding="utf-8")
+            )
+            manifest["parameters"][0]["profile_paths"] = [[
+                "strings", 0, "loss_time_constant_seconds",
+            ]]
+            fixture["manifest"].write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            fit_path = root / "passing-v1-result.json"
+            completed = subprocess.run(
+                select_v1_command(fixture, fit_path), check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            fit = json.loads(fit_path.read_text(encoding="utf-8"))
+            expected = MODULE.sha256(fixture["adapter"])
+            self.assertEqual(fit["profile_adapter_sha256"], expected)
+
+            wrong_adapter = root / "wrong-profile-adapter.py"
+            wrong_adapter.write_bytes(
+                fixture["adapter"].read_bytes() + b"# different adapter\n"
+            )
+            wrong_adapter.chmod(0o755)
+            output = root / "wrong-adapter-profile.json"
+            receipt = root / "wrong-adapter-receipt.json"
+            source_before = fixture["profile"].read_bytes()
+            completed = subprocess.run([
+                sys.executable, str(TOOL), "write-profile",
+                "--manifest", str(fixture["manifest"]),
+                "--fit", str(fit_path),
+                "--source", str(fixture["profile"]),
+                "--adapter", str(wrong_adapter),
+                "--output", str(output), "--receipt", str(receipt),
+            ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+               text=True)
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("does not match", completed.stderr)
+            self.assertFalse(output.exists())
+            self.assertFalse(receipt.exists())
+            self.assertEqual(fixture["profile"].read_bytes(), source_before)
+
     def test_v1_can_gate_on_check_without_using_it_to_rank(self):
         with tempfile.TemporaryDirectory() as text:
             fixture = make_v1_fixture(Path(text))
@@ -912,6 +989,7 @@ class InstrumentFitTests(unittest.TestCase):
             }
             experiment = {
                 "command": "experiment", "schema_version": 10,
+                "renderer": {"sha256": "d" * 64},
                 "parameters": [{
                     "id": 1, "name": "tau", "unit": "seconds",
                     "minimum": 0.1, "maximum": 1.0, "baseline": 0.8,
@@ -1472,6 +1550,7 @@ class InstrumentFitTests(unittest.TestCase):
                     })
             experiment = {
                 "command": "experiment", "schema_version": 10,
+                "renderer": {"sha256": "d" * 64},
                 "parameters": [{"id": 1, "name": "tau", "unit": "seconds",
                                 "minimum": 0.1, "maximum": 1.0,
                                 "baseline": 0.8}],
@@ -1571,6 +1650,7 @@ class InstrumentFitTests(unittest.TestCase):
     def test_saved_experiment_reader(self):
         rows = [
             "HWA_EXPERIMENT,1",
+            "META,renderer_sha256," + "b" * 64 + ",",
             "META,parameter_count,1,parameters",
             "META,case_count,1,cases",
             "META,response_count,1,responses",
@@ -1593,6 +1673,7 @@ class InstrumentFitTests(unittest.TestCase):
             path.write_bytes(("\r\n".join(rows) + "\r\n").encode("ascii"))
             result = MODULE.load_saved_experiment(path)
         self.assertEqual(result["parameters"][0]["name"], "body")
+        self.assertEqual(result["renderer"]["sha256"], "b" * 64)
         self.assertEqual(result["artifacts"][0]["artifact"]["path"],
                          "jobs/a/model.wav")
         self.assertEqual(result["candidates"][0]["mean_gap"], 0.25)
@@ -1631,6 +1712,7 @@ class InstrumentFitTests(unittest.TestCase):
                 "selector_sha256": "a" * 64,
                 "fit_manifest_sha256": MODULE.sha256(manifest_path),
                 "profile_sha256": MODULE.sha256(profile_path),
+                "profile_adapter_sha256": MODULE.sha256(adapter_path),
                 "chosen_parameters": {"body": 0.6},
             }
             fit_path = root / "result.json"
