@@ -2752,11 +2752,13 @@ static int hwa_physical_add_body_single(
             probe->modes[mode].decay_seconds
         };
         size_t fact;
+#if SIZE_MAX > UINT32_MAX
         if (mode > (size_t)UINT32_MAX) {
             hwa_set_error(error, error_size,
                           "Stage 5 body mode index overflows");
             return -1;
         }
+#endif
         for (fact = 0U; fact < HWA_PHYSICAL_ARRAY_COUNT(kinds); ++fact) {
             HWAPhysicalCheck *check;
             if (hwa_physical_add_check(

@@ -1013,9 +1013,11 @@ static int hwa_instrument_stem_provider_start(
             error, error_size) != 0)
         goto cleanup;
     if (stems == NULL || stem_count == 0U ||
-        stem_count > SIZE_MAX - 1U ||
-        (uint64_t)stem_count >= HWA_INSTRUMENT_STEM_JSON_SAFE_INTEGER ||
-        request->output_limits.max_audio_files < stem_count + 1U ||
+        stem_count > SIZE_MAX - 1U
+#if SIZE_MAX >= HWA_INSTRUMENT_STEM_JSON_SAFE_INTEGER
+        || stem_count >= (size_t)HWA_INSTRUMENT_STEM_JSON_SAFE_INTEGER
+#endif
+        || request->output_limits.max_audio_files < stem_count + 1U ||
         request->output_limits.max_events < stem_count ||
         request->output_limits.max_values < stem_count) {
         hwa_instrument_stem_error(

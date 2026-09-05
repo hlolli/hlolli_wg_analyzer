@@ -839,7 +839,9 @@ static int hwa_seg_make_events(HWAItemBuilder *builder,
 
     if (alignment->match_count == 0U ||
         alignment->match_count > builder->options->max_events ||
+#if SIZE_MAX > UINT32_MAX
         alignment->match_count > (size_t)UINT32_MAX ||
+#endif
         alignment->match_count > SIZE_MAX / sizeof(*builder->result->events) ||
         alignment->match_count > SIZE_MAX / sizeof(*aux)) {
         hwa_set_error(error, error_size,
