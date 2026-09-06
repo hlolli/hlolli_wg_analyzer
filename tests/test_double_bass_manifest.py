@@ -32,6 +32,7 @@ assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(MODULE_SPEC)
 MODULE_SPEC.loader.exec_module(MODULE)
 FIT_TOOL = ROOT / "tools" / "instrument_fit.py"
+EVIDENCE_HELPER = ROOT / "tools" / "analyzer_evidence.py"
 FIT_MODULE_SPEC = importlib.util.spec_from_file_location(
     "double_bass_instrument_fit", FIT_TOOL)
 assert FIT_MODULE_SPEC is not None and FIT_MODULE_SPEC.loader is not None
@@ -103,7 +104,7 @@ def fake_ffmpeg(path, nonrepeatable=False):
     path.chmod(0o700)
 
 
-def fake_analyzer(path):
+def fake_analyzer(path, harmonic_count=4):
     path.write_text(
         f"#!{PYTHON} -I\n"
         "import json, pathlib, sys, wave\n"
@@ -117,10 +118,11 @@ def fake_analyzer(path):
         " print(json.dumps({'schema_version':2,'command':'inspect','file':{'path':str(source),'format':f}})); raise SystemExit(0)\n"
         "if len(a)==7 and a[:2]==['--json','isolated-note']:\n"
         " source=str(pathlib.Path(a[2]).absolute()); hz=float(a[4])\n"
-        " print(json.dumps({'schema':'hwa-isolated-note','schema_version':1,'command':'isolated-note','method':'isolated-note-1','path':source,'expected_hz':hz,'requested_metrics':['pitch'],'pitch':{'valid':True,'cents':0.0}})); raise SystemExit(0)\n"
+        " print(json.dumps({'schema':'hwa-isolated-note','schema_version':1,'command':'isolated-note','method':'isolated-note-1','path':source,'expected_hz':hz,'requested_mask':1,'valid_mask':1,'rejection_mask':0,'requested_metrics':['pitch'],'valid_metrics':['pitch'],'rejections':[],'pitch':{'valid':True,'hz':hz,'cents':0.0,'confidence':1.0,'coverage':1.0}})); raise SystemExit(0)\n"
         "if len(a)==5 and a[:2]==['--json','harmonic-decay']:\n"
         " source=str(pathlib.Path(a[2]).absolute()); hz=float(a[4])\n"
-        " profile={'path':source,'valid':True,'valid_band_count':4}\n"
+        f" count={harmonic_count}\n"
+        " profile={'path':source,'valid':count>=4,'band_count':4,'valid_band_count':count,'rejection_mask':0 if count>=4 else 512,'rejections':[] if count>=4 else ['low-harmonic-coverage'],'bands':[{'harmonic_number':i+1,'target_hz':hz*(i+1),'valid':i<count,'t60_seconds':1.0 if i<count else None,'rejection_mask':0 if i<count else 4,'rejections':[] if i<count else ['low-anchor-snr']} for i in range(4)]}\n"
         " print(json.dumps({'schema':'hwa-harmonic-decay','schema_version':1,'command':'harmonic-decay','method':'harmonic-decay-1','expected_hz':hz,'reference':profile,'model':None,'comparison':None})); raise SystemExit(0)\n"
         "raise SystemExit(9)\n",
         encoding="utf-8")
@@ -414,6 +416,29 @@ def joint_v2_fixture(root):
 
 
 class DoubleBassManifestTests(unittest.TestCase):
+    def test_shared_analyzer_evidence_helper_is_pinned(self):
+        self.assertEqual(
+            MODULE.ANALYZER_EVIDENCE_SHA256,
+            MODULE.sha256(EVIDENCE_HELPER),
+        )
+        with mock.patch.object(
+                MODULE, "ANALYZER_EVIDENCE_SHA256", "0" * 64):
+            MODULE._ANALYZER_EVIDENCE = None
+            with self.assertRaisesRegex(
+                    MODULE.ManifestError, "helper hash changed"):
+                MODULE.analyzer_evidence_module()
+        MODULE._ANALYZER_EVIDENCE = None
+
+        source = b"SENTINEL = 'checked snapshot'\n"
+        digest = MODULE.hashlib.sha256(source).hexdigest()
+        with mock.patch.object(
+                MODULE, "_analyzer_evidence_source",
+                return_value=source, create=True), mock.patch.object(
+                    MODULE, "ANALYZER_EVIDENCE_SHA256", digest):
+            loaded = MODULE.analyzer_evidence_module()
+        self.assertEqual(loaded.SENTINEL, "checked snapshot")
+        MODULE._ANALYZER_EVIDENCE = None
+
     def test_checked_fit_and_reference_contract_validate_without_local_paths(self):
         completed = subprocess.run(
             [str(PYTHON), "-I", str(BUILDER), "validate",
@@ -596,10 +621,28 @@ class DoubleBassManifestTests(unittest.TestCase):
                 evidence = json.loads(
                     (output / target / "reference-evidence.json").read_text(
                         encoding="utf-8"))
+                self.assertEqual(set(evidence), {
+                    "file", "harmonic_decay", "isolated_note",
+                })
                 self.assertEqual(
                     evidence["harmonic_decay"]["method"],
                     "harmonic-decay-1",
                 )
+
+    def test_v2_reference_policy_rejects_only_three_valid_harmonics(self):
+        with tempfile.TemporaryDirectory(prefix="hwa bass harmonic floor ") as text:
+            root = Path(text)
+            analyzer = root / "analyzer"
+            fake_analyzer(analyzer, harmonic_count=3)
+            row = MODULE.expected_v2_contract()["fit_references"][0]
+            source = root / "reference.wav"
+            wave_file(source, 48000, 3, 12000)
+            row["frames"] = 12000
+            row["sha256"] = sha256(source)
+
+            with self.assertRaisesRegex(
+                    ValueError, "failed checked harmonic decay"):
+                MODULE.v2_reference_evidence(analyzer, source, row)
 
     def test_d_frequency_build_is_d_only_and_copies_no_audio(self):
         with tempfile.TemporaryDirectory(

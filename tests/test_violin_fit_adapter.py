@@ -21,6 +21,7 @@ import wave
 
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER = ROOT / "adapters" / "hlolli_wg_violin" / "adapter.py"
+EVIDENCE_HELPER = ROOT / "tools" / "analyzer_evidence.py"
 FIT_MANIFEST = ROOT / "adapters" / "hlolli_wg_violin" / "fit.json"
 FIT_TOOL = ROOT / "tools" / "instrument_fit.py"
 PYTHON = Path(sys.executable).resolve()
@@ -193,9 +194,16 @@ with wave.open(output, 'wb') as stream:
 def fake_analyzer_source() -> str:
     return """#!{} -I
 import json
+import os
 import sys
 
 arguments = sys.argv[1:]
+if (os.environ.get('PATH') != '/run/current-system/sw/bin:/usr/bin:/bin' or
+        any(os.path.realpath(os.environ.get(name, '')) !=
+            os.path.realpath(os.getcwd())
+            for name in ('TMPDIR', 'TMP', 'TEMP'))):
+    print('wrong analyzer environment', file=sys.stderr)
+    raise SystemExit(3)
 if (len(arguments) != 7 or arguments[:2] != ['--json', 'isolated-note'] or
         arguments[3] != '--expected-hz' or
         arguments[5:] != ['--metrics', 'pitch']):
@@ -211,8 +219,10 @@ print(json.dumps({{
     'expected_hz': expected_hz,
     'requested_mask': 1,
     'valid_mask': 1,
+    'rejection_mask': 0,
     'requested_metrics': ['pitch'],
     'valid_metrics': ['pitch'],
+    'rejections': [],
     'pitch': {{
         'valid': True,
         'hz': expected_hz,
@@ -383,6 +393,30 @@ def render_request(binding: dict, output: Path) -> dict:
 
 
 class ViolinFitAdapterTests(unittest.TestCase):
+    def test_shared_analyzer_evidence_helper_is_pinned(self) -> None:
+        module = load_adapter()
+        self.assertEqual(
+            module.ANALYZER_EVIDENCE_SHA256,
+            sha256(EVIDENCE_HELPER),
+        )
+        with mock.patch.object(
+                module, "ANALYZER_EVIDENCE_SHA256", "0" * 64):
+            module._ANALYZER_EVIDENCE = None
+            with self.assertRaisesRegex(
+                    module.AdapterError, "helper hash changed"):
+                module.analyzer_evidence_module()
+        module._ANALYZER_EVIDENCE = None
+
+        source = b"SENTINEL = 'checked snapshot'\n"
+        digest = module.hashlib.sha256(source).hexdigest()
+        with mock.patch.object(
+                module, "_analyzer_evidence_source",
+                return_value=source, create=True), mock.patch.object(
+                    module, "ANALYZER_EVIDENCE_SHA256", digest):
+            loaded = module.analyzer_evidence_module()
+        self.assertEqual(loaded.SENTINEL, "checked snapshot")
+        module._ANALYZER_EVIDENCE = None
+
     def test_manifest_baselines_match_the_fixed_profile(self) -> None:
         manifest = json.loads(FIT_MANIFEST.read_text(encoding="utf-8"))
         profile = minimal_profile()
@@ -469,6 +503,10 @@ class ViolinFitAdapterTests(unittest.TestCase):
                     "open-a4": 440.0,
                     "open-e5": 659.255113825740,
                     }.items():
+                self.assertEqual(set(pitch_checks[case_id]), {
+                    "case_id", "reference_binding", "expected_hz",
+                    "measured_hz", "cents", "confidence", "coverage",
+                })
                 self.assertEqual(pitch_checks[case_id]["expected_hz"],
                                  expected_hz)
                 self.assertEqual(pitch_checks[case_id]["measured_hz"],

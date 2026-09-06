@@ -1443,6 +1443,15 @@ if(HWA_PYTHON3_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_fit.py)
   set_tests_properties(unit.instrument-fit PROPERTIES TIMEOUT 30)
 
+  add_test(
+    NAME unit.analyzer-evidence
+    COMMAND
+      ${HWA_PYTHON3_EXECUTABLE}
+      -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_analyzer_evidence.py
+      --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(unit.analyzer-evidence PROPERTIES TIMEOUT 30)
+
   if(NOT WIN32)
     add_test(
       NAME unit.violin-fit-adapter

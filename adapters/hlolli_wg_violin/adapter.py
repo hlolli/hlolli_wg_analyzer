@@ -76,10 +76,43 @@ REFERENCE_ARGUMENTS = {
 }
 
 OPEN_STRING_CASES = ("open-g3", "open-d4", "open-a4", "open-e5")
+ANALYZER_EVIDENCE_SHA256 = (
+    "5a848ce2b2b533f1a1e7cbedffd6c112a68299e71790082865b58b9cbeea9e1c"
+)
+_ANALYZER_EVIDENCE = None
 
 
 class AdapterError(ValueError):
     pass
+
+
+def _analyzer_evidence_source(path: Path) -> bytes:
+    return read_bounded(path, MAX_JSON_BYTES, "analyzer evidence helper")
+
+
+def analyzer_evidence_module():
+    """Load the build-only helper without adding the repo to ``sys.path``."""
+    global _ANALYZER_EVIDENCE
+    path = ROOT / "tools" / "analyzer_evidence.py"
+    source = _analyzer_evidence_source(path)
+    if hashlib.sha256(source).hexdigest() != ANALYZER_EVIDENCE_SHA256:
+        raise AdapterError("analyzer evidence helper hash changed")
+    if _ANALYZER_EVIDENCE is not None:
+        return _ANALYZER_EVIDENCE
+    specification = importlib.util.spec_from_file_location(
+        "hwa_violin_analyzer_evidence", path)
+    if specification is None or specification.loader is None:
+        raise AdapterError("cannot load analyzer evidence helper")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    except Exception as error:
+        sys.modules.pop(specification.name, None)
+        raise AdapterError(
+            "cannot load analyzer evidence helper: " + str(error)) from error
+    _ANALYZER_EVIDENCE = module
+    return module
 
 
 def reject_constant(value: str) -> NoReturn:
@@ -1173,19 +1206,6 @@ def reference_arguments(arguments: argparse.Namespace) -> dict[str, Path]:
     return result
 
 
-def verify_pitch_preflight_inputs(
-        analyzer: Path, analyzer_hash: str, references: dict[str, Path],
-        reference_hashes: dict[str, str]) -> None:
-    if sha256(analyzer) != analyzer_hash:
-        raise AdapterError("analyzer changed during open-string preflight")
-    if set(references) != set(reference_hashes):
-        raise AdapterError("open-string preflight hash set changed")
-    for binding, digest in reference_hashes.items():
-        if sha256(references[binding]) != digest:
-            raise AdapterError(
-                binding + " changed during open-string preflight")
-
-
 def preflight_open_string_references(
         analyzer: Path, references: dict[str, Path],
         reference_hashes: dict[str, str], cwd: Path
@@ -1195,61 +1215,35 @@ def preflight_open_string_references(
         raise AdapterError("reference set differs from the violin contract")
     if set(reference_hashes) != set(references):
         raise AdapterError("reference hashes differ from the violin contract")
-    analyzer_hash = sha256(analyzer)
-    verify_pitch_preflight_inputs(
-        analyzer, analyzer_hash, references, reference_hashes)
+    evidence = analyzer_evidence_module()
+    try:
+        checks = evidence.AnalyzerEvidence(
+            analyzer, {
+                binding: (reference, reference_hashes[binding])
+                for binding, reference in references.items()
+            }, cwd=cwd, environment=clean_environment(cwd), scratch=cwd)
+    except evidence.EvidenceError as error:
+        raise AdapterError(str(error)) from error
     rows = []
     for case_id in OPEN_STRING_CASES:
         specification = CASE_SPECS[case_id]
         binding = specification["reference"]
-        reference = references[binding]
         expected_hz = float(specification["frequency_hz"])
-        verify_pitch_preflight_inputs(
-            analyzer, analyzer_hash, {binding: reference},
-            {binding: reference_hashes[binding]})
-        completed = run_tool([
-            analyzer, "--json", "isolated-note", reference,
-            "--expected-hz", format(expected_hz, ".17g"),
-            "--metrics", "pitch",
-        ], case_id + " pitch preflight", cwd)
-        source = completed.stdout.encode("utf-8")
-        if len(source) > MAX_JSON_BYTES:
-            raise AdapterError(case_id + " pitch report exceeds its byte limit")
-        report = parse_json(source, case_id + " pitch report")
-        pitch = report.get("pitch")
-        if (not exact_value(report.get("schema"), "hwa-isolated-note") or
-                not exact_value(report.get("schema_version"), 1) or
-                not exact_value(report.get("command"), "isolated-note") or
-                not exact_value(report.get("method"), "isolated-note-1") or
-                not exact_value(report.get("path"), str(reference)) or
-                finite(report.get("expected_hz"),
-                       case_id + " reported expected_hz") != expected_hz or
-                not exact_value(report.get("requested_mask"), 1) or
-                not exact_tree(report.get("requested_metrics"), ["pitch"]) or
-                type(pitch) is not dict or
-                type(pitch.get("valid")) is not bool):
-            raise AdapterError(
-                case_id + " pitch preflight returned an unknown contract")
-        if (pitch["valid"] is not True or
-                not exact_value(report.get("valid_mask"), 1) or
-                not exact_tree(report.get("valid_metrics"), ["pitch"])):
+        try:
+            pitch = checks.isolated_note(binding, expected_hz).pitch
+        except evidence.EvidenceError as error:
+            raise AdapterError(str(error)) from error
+        if not pitch.valid:
             raise AdapterError(case_id + " pitch is not valid")
         rows.append({
             "case_id": case_id, "reference_binding": binding,
             "expected_hz": expected_hz,
-            "measured_hz": finite(pitch.get("hz"), case_id + " pitch hz"),
-            "cents": finite(pitch.get("cents"), case_id + " pitch cents"),
-            "confidence": finite(
-                pitch.get("confidence"), case_id + " pitch confidence"),
-            "coverage": finite(
-                pitch.get("coverage"), case_id + " pitch coverage"),
+            "measured_hz": pitch.hz,
+            "cents": pitch.cents,
+            "confidence": pitch.confidence,
+            "coverage": pitch.coverage,
         })
-        verify_pitch_preflight_inputs(
-            analyzer, analyzer_hash, {binding: reference},
-            {binding: reference_hashes[binding]})
-    verify_pitch_preflight_inputs(
-        analyzer, analyzer_hash, references, reference_hashes)
-    return analyzer_hash, rows
+    return checks.analyzer_sha256, rows
 
 
 def case_config(references: dict[str, Path],

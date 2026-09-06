@@ -15,6 +15,7 @@ import wave
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "instrument_fit.py"
+EVIDENCE_HELPER = TOOL.with_name("analyzer_evidence.py")
 SPEC = importlib.util.spec_from_file_location("instrument_fit", TOOL)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
@@ -340,14 +341,14 @@ def write_fake_checked_analyzer(path):
         "a=sys.argv[1:]\n"
         "if len(a)==7 and a[:2]==['--json','isolated-note']:\n"
         " p=str(pathlib.Path(a[2]).absolute()); hz=float(a[4]); valid='invalid' not in pathlib.Path(p).name\n"
-        " print(json.dumps({'schema':'hwa-isolated-note','schema_version':1,'command':'isolated-note','method':'isolated-note-1','path':p,'expected_hz':hz,'requested_metrics':['pitch'],'pitch':{'valid':valid,'cents':0.25}})); raise SystemExit(0)\n"
+        " print(json.dumps({'schema':'hwa-isolated-note','schema_version':1,'command':'isolated-note','method':'isolated-note-1','path':p,'expected_hz':hz,'requested_mask':1,'valid_mask':1 if valid else 0,'rejection_mask':0 if valid else 16,'requested_metrics':['pitch'],'valid_metrics':['pitch'] if valid else [],'rejections':[] if valid else ['low-support'],'pitch':{'valid':valid,'hz':hz if valid else 0.0,'cents':0.0,'confidence':1.0 if valid else 0.0,'coverage':1.0 if valid else 0.0}})); raise SystemExit(0)\n"
         "if len(a)==6 and a[:2]==['--json','harmonic-decay']:\n"
         " r=str(pathlib.Path(a[2]).absolute()); m=str(pathlib.Path(a[3]).absolute()); hz=float(a[5]); valid='invalid' not in pathlib.Path(m).name\n"
         " name=pathlib.Path(m).name; error=1.2 if 'candidate' in name or 'model-2-' in name else 6.0\n"
-        " bands=[{'valid':valid,'t60_log_error_db':error if valid else None} for _ in range(4)]\n"
-        " profile=lambda p,v:{'path':p,'valid':v}\n"
-        " comparison={'valid':valid,'shared_valid_band_count':4 if valid else 0,'shared_reference_coverage':1.0,'t60_log_rmse_db':error if valid else None,'median_t60_log_bias_db':error if valid else None,'bands':bands}\n"
-        " print(json.dumps({'schema':'hwa-harmonic-decay','schema_version':1,'command':'harmonic-decay','method':'harmonic-decay-1','expected_hz':hz,'reference':profile(r,True),'model':profile(m,valid),'comparison':comparison})); raise SystemExit(0)\n"
+        " bands=[{'harmonic_number':i+1,'reference_valid':True,'model_valid':valid,'valid':valid,'t60_log_error_db':error if valid else 0.0} for i in range(4)]\n"
+        " profile=lambda p,v,t:{'path':p,'valid':v,'band_count':4,'valid_band_count':4 if v else 0,'rejection_mask':0 if v else 512,'rejections':[] if v else ['low-harmonic-coverage'],'bands':[{'harmonic_number':i+1,'target_hz':hz*(i+1),'valid':v,'t60_seconds':t if v else None,'rejection_mask':0 if v else 4,'rejections':[] if v else ['low-anchor-snr']} for i in range(4)]}\n"
+        " comparison={'valid':valid,'band_count':4,'shared_valid_band_count':4 if valid else 0,'shared_reference_coverage':1.0 if valid else 0.0,'t60_log_rmse_db':error if valid else 0.0,'median_t60_log_bias_db':error if valid else 0.0,'bands':bands}\n"
+        " print(json.dumps({'schema':'hwa-harmonic-decay','schema_version':1,'command':'harmonic-decay','method':'harmonic-decay-1','expected_hz':hz,'reference':profile(r,True,1.0),'model':profile(m,valid,10.0**(error/20.0)),'comparison':comparison})); raise SystemExit(0)\n"
         "raise SystemExit(9)\n",
         encoding="utf-8",
     )
@@ -355,6 +356,28 @@ def write_fake_checked_analyzer(path):
 
 
 class InstrumentFitTests(unittest.TestCase):
+    def test_shared_analyzer_evidence_helper_is_pinned(self):
+        self.assertEqual(
+            MODULE.ANALYZER_EVIDENCE_SHA256,
+            MODULE.sha256(EVIDENCE_HELPER),
+        )
+        with mock.patch.object(
+                MODULE, "ANALYZER_EVIDENCE_SHA256", "0" * 64):
+            MODULE._ANALYZER_EVIDENCE = None
+            with self.assertRaisesRegex(MODULE.FitError, "helper hash changed"):
+                MODULE.analyzer_evidence_module()
+        MODULE._ANALYZER_EVIDENCE = None
+
+        source = b"SENTINEL = 'checked snapshot'\n"
+        digest = MODULE.hashlib.sha256(source).hexdigest()
+        with mock.patch.object(
+                MODULE, "_analyzer_evidence_source",
+                return_value=source, create=True), mock.patch.object(
+                    MODULE, "ANALYZER_EVIDENCE_SHA256", digest):
+            loaded = MODULE.analyzer_evidence_module()
+        self.assertEqual(loaded.SENTINEL, "checked snapshot")
+        MODULE._ANALYZER_EVIDENCE = None
+
     def test_windows_python_tools_use_the_current_interpreter(self):
         script = Path("checked-tool.py")
         with mock.patch.object(MODULE.os, "name", "nt"):

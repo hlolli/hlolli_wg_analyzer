@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import io
+import importlib.util
 import json
 import math
 import os
@@ -50,6 +51,39 @@ MIN_HARMONIC_SUPPORT_SECONDS = 0.20
 MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
+ANALYZER_EVIDENCE_SHA256 = (
+    "5a848ce2b2b533f1a1e7cbedffd6c112a68299e71790082865b58b9cbeea9e1c"
+)
+_ANALYZER_EVIDENCE = None
+
+
+def _analyzer_evidence_source(path: Path) -> bytes:
+    return file_snapshot(path, "analyzer evidence helper")[1]
+
+
+def analyzer_evidence_module():
+    """Load the sibling helper when Python runs this tool with ``-I``."""
+    global _ANALYZER_EVIDENCE
+    path = Path(__file__).resolve().with_name("analyzer_evidence.py")
+    source = _analyzer_evidence_source(path)
+    if hashlib.sha256(source).hexdigest() != ANALYZER_EVIDENCE_SHA256:
+        raise FitError("analyzer evidence helper hash changed")
+    if _ANALYZER_EVIDENCE is not None:
+        return _ANALYZER_EVIDENCE
+    specification = importlib.util.spec_from_file_location(
+        "hwa_instrument_fit_analyzer_evidence", path)
+    if specification is None or specification.loader is None:
+        raise FitError("cannot load analyzer evidence helper")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    except Exception as error:
+        sys.modules.pop(specification.name, None)
+        raise FitError(
+            "cannot load analyzer evidence helper: " + str(error)) from error
+    _ANALYZER_EVIDENCE = module
+    return module
 
 
 def tool_command(path: Path) -> list[str]:
@@ -942,57 +976,17 @@ def run_body_envelope(analyzer: Path, reference: Path, model: Path) -> dict[str,
             "confidence": confidence}
 
 
-def run_checked_analyzer_json(
-        analyzer: Path, arguments: list[str], label: str) -> dict[str, Any]:
-    """Run one bounded analyzer command and parse its duplicate-free JSON."""
-    try:
-        completed = subprocess.run(
-            [*tool_command(analyzer), "--json", *arguments], check=False,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}, timeout=120,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise FitError(f"{label} timed out") from error
-    except OSError as error:
-        raise FitError(f"cannot run {label}: {error}") from error
-    if completed.returncode != 0:
-        detail = (completed.stderr.strip() or completed.stdout.strip())[-2000:]
-        raise FitError(
-            f"{label} failed" + (f": {detail}" if detail else "")
-        )
-    source = completed.stdout.encode("utf-8")
-    if len(source) > MAX_CONTROL_FILE_BYTES:
-        raise FitError(f"{label} output exceeds the byte limit")
-    return parse_json(source, analyzer)
-
-
 def checked_note_report(
         analyzer: Path, audio: Path, expected_hz: float,
         expected_sha256: str, field: str) -> dict[str, Any]:
     """Require the analyzer's fixed isolated-note pitch contract."""
-    audio = regular(audio, field)
-    if sha256(audio) != expected_sha256:
-        raise FitError(f"{field} hash changed")
-    report = run_checked_analyzer_json(
-        analyzer,
-        ["isolated-note", str(audio), "--expected-hz", repr(expected_hz),
-         "--metrics", "pitch"],
-        field + " checked note",
-    )
-    pitch = report.get("pitch")
-    if (report.get("schema") != "hwa-isolated-note" or
-            report.get("schema_version") != 1 or
-            report.get("command") != "isolated-note" or
-            report.get("method") != CHECKED_NOTE_METHOD_VERSION or
-            report.get("path") != str(audio) or
-            finite(report.get("expected_hz"), field + " expected_hz") !=
-            expected_hz or
-            report.get("requested_metrics") != ["pitch"] or
-            type(pitch) is not dict or type(pitch.get("valid")) is not bool):
-        raise FitError(f"{field} checked note returned an unknown contract")
-    if sha256(audio) != expected_sha256:
-        raise FitError(f"{field} changed during checked note analysis")
-    return report
+    evidence = analyzer_evidence_module()
+    try:
+        checks = evidence.AnalyzerEvidence(
+            analyzer, {field: (audio, expected_sha256)})
+        return checks.isolated_note(field, expected_hz).report
+    except evidence.EvidenceError as error:
+        raise FitError(str(error)) from error
 
 
 def checked_note_harmonic_decay(
@@ -1000,84 +994,48 @@ def checked_note_harmonic_decay(
         analyzer_sha256: str, reference_sha256: str,
         model_sha256: str) -> dict[str, Any]:
     """Score native checked pitch and per-harmonic T60 evidence."""
-    analyzer = regular(analyzer, "analyzer")
-    reference = regular(reference, "checked harmonic reference")
-    model = regular(model, "checked harmonic model")
-    if sha256(analyzer) != analyzer_sha256:
-        raise FitError("checked harmonic analyzer hash changed")
-    if sha256(reference) != reference_sha256:
-        raise FitError("checked harmonic reference hash changed")
-    if sha256(model) != model_sha256:
-        raise FitError("checked harmonic model hash changed")
-    reference_note = checked_note_report(
-        analyzer, reference, expected_hz, reference_sha256,
-        "checked harmonic reference",
-    )
-    if reference_note["pitch"]["valid"] is not True:
-        raise FitError("checked harmonic reference failed the note pitch gate")
-    model_note = checked_note_report(
-        analyzer, model, expected_hz, model_sha256,
-        "checked harmonic model",
-    )
-    report = run_checked_analyzer_json(
-        analyzer,
-        ["harmonic-decay", str(reference), str(model),
-         "--expected-hz", repr(expected_hz)],
-        "checked harmonic-decay",
-    )
-    reference_profile = report.get("reference")
-    model_profile = report.get("model")
-    comparison = report.get("comparison")
-    if (report.get("schema") != "hwa-harmonic-decay" or
-            report.get("schema_version") != 1 or
-            report.get("command") != "harmonic-decay" or
-            report.get("method") != CHECKED_HARMONIC_DECAY_METHOD_VERSION or
-            finite(report.get("expected_hz"), "harmonic expected_hz") !=
-            expected_hz or
-            type(reference_profile) is not dict or
-            reference_profile.get("path") != str(reference) or
-            type(reference_profile.get("valid")) is not bool or
-            type(model_profile) is not dict or
-            model_profile.get("path") != str(model) or
-            type(model_profile.get("valid")) is not bool or
-            type(comparison) is not dict or
-            type(comparison.get("valid")) is not bool or
-            type(comparison.get("bands")) is not list):
-        raise FitError("checked harmonic-decay returned an unknown contract")
-    if reference_profile["valid"] is not True:
+    evidence = analyzer_evidence_module()
+    try:
+        checks = evidence.AnalyzerEvidence(
+            analyzer, {
+                "checked harmonic reference": (reference, reference_sha256),
+                "checked harmonic model": (model, model_sha256),
+            }, analyzer_sha256=analyzer_sha256)
+        reference_note = checks.isolated_note(
+            "checked harmonic reference", expected_hz).pitch
+        if not reference_note.valid:
+            raise FitError(
+                "checked harmonic reference failed the note pitch gate")
+        model_note = checks.isolated_note(
+            "checked harmonic model", expected_hz).pitch
+        harmonic = checks.harmonic_decay(
+            "checked harmonic reference", expected_hz,
+            model_id="checked harmonic model")
+    except evidence.EvidenceError as error:
+        raise FitError(str(error)) from error
+    if not harmonic.reference_valid:
         raise FitError("checked harmonic reference has no valid profile")
-
-    errors = []
-    for index, row in enumerate(comparison["bands"]):
-        if type(row) is not dict or type(row.get("valid")) is not bool:
-            raise FitError("checked harmonic-decay has an invalid band row")
-        if row["valid"]:
-            errors.append(abs(finite(
-                row.get("t60_log_error_db"),
-                f"checked harmonic-decay bands[{index}].t60_log_error_db",
-            )) / T60_DB_PER_OCTAVE)
-    shared_count = comparison.get("shared_valid_band_count")
-    if (type(shared_count) is not int or type(shared_count) is bool or
-            shared_count < 0 or shared_count != len(errors)):
-        raise FitError("checked harmonic-decay shared band count changed")
-    coverage = finite(
-        comparison.get("shared_reference_coverage"),
-        "checked harmonic-decay reference coverage",
-    )
+    shared_count = harmonic.shared_valid_band_count
+    coverage = harmonic.shared_reference_coverage
+    if shared_count is None or coverage is None:
+        raise FitError("checked harmonic-decay returned no comparison")
+    errors = [
+        abs(value) / T60_DB_PER_OCTAVE
+        for value in harmonic.band_t60_log_errors_db
+    ]
     comparison_valid = bool(
-        model_note["pitch"]["valid"] and model_profile["valid"] and
-        comparison["valid"] and
-        shared_count >= MIN_HARMONIC_VALID_BANDS
-    )
+        model_note.valid and harmonic.model_valid and
+        harmonic.comparison_valid and
+        shared_count >= MIN_HARMONIC_VALID_BANDS)
     if comparison_valid:
+        if (harmonic.t60_log_rmse_db is None or
+                harmonic.median_t60_log_bias_db is None):
+            raise FitError("checked harmonic-decay returned no loss values")
         rms_error = nonnegative(
-            comparison.get("t60_log_rmse_db"),
-            "checked harmonic-decay T60 RMSE",
-        ) / T60_DB_PER_OCTAVE
-        median_bias = finite(
-            comparison.get("median_t60_log_bias_db"),
-            "checked harmonic-decay median bias",
-        ) / T60_DB_PER_OCTAVE
+            harmonic.t60_log_rmse_db,
+            "checked harmonic-decay T60 RMSE") / T60_DB_PER_OCTAVE
+        median_bias = (
+            harmonic.median_t60_log_bias_db / T60_DB_PER_OCTAVE)
         mean_error = sum(errors) / len(errors)
         maximum_error = max(errors)
     else:
@@ -1085,22 +1043,11 @@ def checked_note_harmonic_decay(
         median_bias = 0.0
         mean_error = INVALID_HARMONIC_LOSS_OCTAVES
         maximum_error = INVALID_HARMONIC_LOSS_OCTAVES
-    if sha256(analyzer) != analyzer_sha256:
-        raise FitError("checked harmonic analyzer changed during analysis")
-    if (sha256(reference) != reference_sha256 or
-            sha256(model) != model_sha256):
-        raise FitError("checked harmonic-decay audio changed during analysis")
     return {
-        "checked_note_valid": model_note["pitch"]["valid"],
+        "checked_note_valid": model_note.valid,
         "checked_harmonic_decay_valid": comparison_valid,
-        "reference_pitch_error_cents": finite(
-            reference_note["pitch"].get("cents"),
-            "checked harmonic reference pitch cents",
-        ),
-        "model_pitch_error_cents": finite(
-            model_note["pitch"].get("cents"),
-            "checked harmonic model pitch cents",
-        ),
+        "reference_pitch_error_cents": reference_note.cents,
+        "model_pitch_error_cents": model_note.cents,
         "valid_harmonic_count": shared_count,
         "shared_reference_coverage": coverage,
         "rms_t60_error_octaves": rms_error,

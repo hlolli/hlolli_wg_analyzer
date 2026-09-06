@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -66,6 +67,7 @@ JOINT_SELECTION_METHODS = {
     "selection": "instrument-fit-fit-only-v1",
 }
 JOINT_SELECTION_MINIMUM_VALID_HARMONICS = 3
+V2_REFERENCE_MINIMUM_VALID_HARMONICS = 4
 RENDERER_ADAPTER_ID = "hlolli_wg_double_bass"
 RENDERER_SCHEMA = "hwa-double-bass-renderer"
 RENDERER_SCHEMA_VERSION = 1
@@ -93,6 +95,55 @@ JOINT_SELECTION_SHA256 = {
 
 class ManifestError(ValueError):
     pass
+
+
+ANALYZER_EVIDENCE_SHA256 = (
+    "5a848ce2b2b533f1a1e7cbedffd6c112a68299e71790082865b58b9cbeea9e1c"
+)
+_ANALYZER_EVIDENCE = None
+
+
+def _analyzer_evidence_source(path: Path) -> bytes:
+    path = regular(path, "analyzer evidence helper")
+    try:
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > MAX_JSON_BYTES:
+                raise ManifestError(
+                    "analyzer evidence helper exceeds its byte limit")
+            source = stream.read(MAX_JSON_BYTES + 1)
+    except OSError as error:
+        raise ManifestError(
+            "cannot read analyzer evidence helper: " + str(error)) from error
+    if len(source) > MAX_JSON_BYTES:
+        raise ManifestError(
+            "analyzer evidence helper exceeds its byte limit")
+    return source
+
+
+def analyzer_evidence_module():
+    """Load the repo helper when Python runs this builder with ``-I``."""
+    global _ANALYZER_EVIDENCE
+    path = ADAPTER_DIR.parents[1] / "tools" / "analyzer_evidence.py"
+    source = _analyzer_evidence_source(path)
+    if hashlib.sha256(source).hexdigest() != ANALYZER_EVIDENCE_SHA256:
+        raise ManifestError("analyzer evidence helper hash changed")
+    if _ANALYZER_EVIDENCE is not None:
+        return _ANALYZER_EVIDENCE
+    specification = importlib.util.spec_from_file_location(
+        "hwa_double_bass_analyzer_evidence", path)
+    if specification is None or specification.loader is None:
+        raise ManifestError("cannot load analyzer evidence helper")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    try:
+        exec(compile(source, str(path), "exec"), module.__dict__)
+    except Exception as error:
+        sys.modules.pop(specification.name, None)
+        raise ManifestError(
+            "cannot load analyzer evidence helper: " + str(error)) from error
+    _ANALYZER_EVIDENCE = module
+    return module
 
 
 def reject_constant(value: str) -> Any:
@@ -589,79 +640,34 @@ def checked_digest(value: Any, field: str) -> str:
     return value
 
 
-def run_json(arguments: list[str], field: str,
-             timeout: int = 120) -> dict[str, Any]:
-    try:
-        completed = subprocess.run(
-            arguments, check=False, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
-            env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"},
-            timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        raise ManifestError(field + " timed out") from error
-    except OSError as error:
-        raise ManifestError("cannot run {}: {}".format(field, error)) from error
-    if completed.returncode != 0:
-        detail = (completed.stderr.strip() or completed.stdout.strip())[-2000:]
-        raise ManifestError(field + " failed" +
-                            (": " + detail if detail else ""))
-    if len(completed.stdout.encode("utf-8")) > MAX_JSON_BYTES:
-        raise ManifestError(field + " exceeds its byte limit")
-    try:
-        value = json.loads(
-            completed.stdout, object_pairs_hook=unique_object,
-            parse_constant=reject_constant)
-    except (UnicodeError, json.JSONDecodeError) as error:
-        raise ManifestError(field + " returned invalid JSON") from error
-    if type(value) is not dict:
-        raise ManifestError(field + " returned a non-object")
-    return value
-
-
 def v2_reference_evidence(analyzer: Path, path: Path,
                           row: dict[str, Any]) -> dict[str, Any]:
     identifier = str(row.get("id", ""))
     path, facts = require_file_facts(
         path, row, "fit reference " + identifier, analyzer)
     expected_hz = row.get("expected_hz")
-    if type(expected_hz) not in (int, float) or type(expected_hz) is bool:
+    if (type(expected_hz) not in (int, float) or type(expected_hz) is bool or
+            not math.isfinite(float(expected_hz)) or expected_hz <= 0):
         raise ManifestError("fit reference has invalid expected frequency: " +
                             identifier)
-    frequency = repr(float(expected_hz))
-    isolated = run_json([
-        str(analyzer), "--json", "isolated-note", str(path),
-        "--expected-hz", frequency, "--metrics", "pitch",
-    ], "fit reference pitch check")
-    pitch = isolated.get("pitch")
-    if (isolated.get("schema") != "hwa-isolated-note" or
-            isolated.get("schema_version") != 1 or
-            isolated.get("command") != "isolated-note" or
-            isolated.get("method") != "isolated-note-1" or
-            isolated.get("path") != str(path) or
-            isolated.get("expected_hz") != expected_hz or
-            isolated.get("requested_metrics") != ["pitch"] or
-            type(pitch) is not dict or pitch.get("valid") is not True):
+    evidence = analyzer_evidence_module()
+    try:
+        checks = evidence.AnalyzerEvidence(
+            analyzer, {identifier: (path, facts["sha256"])})
+        isolated = checks.isolated_note(identifier, float(expected_hz))
+        harmonic = checks.harmonic_decay(identifier, float(expected_hz))
+    except evidence.EvidenceError as error:
+        raise ManifestError(str(error)) from error
+    if not isolated.pitch.valid:
         raise ManifestError("fit reference failed checked pitch: " + identifier)
-    harmonic = run_json([
-        str(analyzer), "--json", "harmonic-decay", str(path),
-        "--expected-hz", frequency,
-    ], "fit reference harmonic-decay check")
-    profile = harmonic.get("reference")
-    if (harmonic.get("schema") != "hwa-harmonic-decay" or
-            harmonic.get("schema_version") != 1 or
-            harmonic.get("command") != "harmonic-decay" or
-            harmonic.get("method") != "harmonic-decay-1" or
-            harmonic.get("expected_hz") != expected_hz or
-            type(profile) is not dict or profile.get("path") != str(path) or
-            profile.get("valid") is not True or
-            type(profile.get("valid_band_count")) is not int or
-            profile["valid_band_count"] < 4 or
-            harmonic.get("model") is not None or
-            harmonic.get("comparison") is not None):
+    if (not harmonic.reference_valid or
+            harmonic.reference_valid_band_count <
+            V2_REFERENCE_MINIMUM_VALID_HARMONICS):
         raise ManifestError(
             "fit reference failed checked harmonic decay: " + identifier)
     return {
-        "file": facts, "harmonic_decay": harmonic, "isolated_note": isolated,
+        "file": facts, "harmonic_decay": harmonic.report,
+        "isolated_note": isolated.report,
     }
 
 
