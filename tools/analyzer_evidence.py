@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
+import copy
 import hashlib
 import json
 import math
@@ -151,6 +153,43 @@ def note_phase_options(options: Optional[dict[str, Any]] = None) -> dict[str, An
 class NotePhaseEvidence:
     report: dict[str, Any]
     phases: dict[str, dict[str, Any]]
+
+
+class NotePhaseCache:
+    """Reuse checked reports within one run; never persist them."""
+
+    def __init__(self, max_entries: int = 64) -> None:
+        if type(max_entries) is not int or not 1 <= max_entries <= 64:
+            raise EvidenceError("note-phase cache capacity must be from 1 through 64")
+        self._max_entries = max_entries
+        self._reports: OrderedDict[tuple[Any, ...], NotePhaseEvidence] = OrderedDict()
+
+    def note_phases(
+            self, checks: AnalyzerEvidence, source_id: str,
+            start_sample: int, end_sample: int, *,
+            options: Optional[dict[str, Any]] = None) -> NotePhaseEvidence:
+        start = _count(start_sample, "note start sample")
+        end = _count(end_sample, "note end sample")
+        if start >= end or end > 2**64 - 1:
+            raise EvidenceError("note span must have increasing sample bounds")
+        settings = note_phase_options(options)
+        source = checks._source(source_id)
+        key = (checks._analyzer, checks.analyzer_sha256,
+               source, checks._sources[source_id][1], start, end,
+               tuple(settings.items()), checks._cwd or Path.cwd(),
+               tuple(sorted(checks._environment.items())))
+        cached = self._reports.get(key)
+        if cached is not None:
+            checks._verify_inputs("before cached note phases")
+            result = copy.deepcopy(cached)
+            checks._verify_inputs("during cached note phases")
+            self._reports.move_to_end(key)
+            return result
+        result = checks.note_phases(source_id, start, end, options=settings)
+        self._reports[key] = copy.deepcopy(result)
+        if len(self._reports) > self._max_entries:
+            self._reports.popitem(last=False)
+        return result
 
 
 def _body_number(value: Any, expected: float, field: str) -> float:

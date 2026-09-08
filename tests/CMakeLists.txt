@@ -1455,7 +1455,8 @@ if(HWA_PYTHON3_EXECUTABLE)
   add_test(NAME cli.note-phases COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_note_phases_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
-  set_tests_properties(cli.note-phases PROPERTIES TIMEOUT 60)
+  # Includes cached and uncached multi-objective selection runs.
+  set_tests_properties(cli.note-phases PROPERTIES TIMEOUT 180)
 
   if(NOT WIN32)
     add_test(

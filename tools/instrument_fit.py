@@ -52,7 +52,7 @@ MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
 ANALYZER_EVIDENCE_SHA256 = (
-    "1d9a5dedfacbfe663c4198b26dbabe333d6b3c21fc19e655940ae7aeca5d36c6"
+    "5961eb3b493c16c281c809793ed222547a79f7f048866ed7a1773782ccfa7c06"
 )
 _ANALYZER_EVIDENCE = None
 
@@ -996,7 +996,7 @@ def run_body_envelope(
 def run_note_phase(
         analyzer: Path, reference: Path, model: Path,
         objective: dict[str, Any], analyzer_hash: str,
-        reference_hash: str, model_hash: str) -> dict[str, Any]:
+        reference_hash: str, model_hash: str, *, cache: Any = None) -> dict[str, Any]:
     evidence = analyzer_evidence_module()
     try:
         settings = evidence.note_phase_options(objective.get("phase_options"))
@@ -1004,7 +1004,9 @@ def run_note_phase(
             "reference": (reference, reference_hash), "model": (model, model_hash),
         }, analyzer_sha256=analyzer_hash)
         reports = {
-            name: checks.note_phases(name, *objective[name + "_span"], options=settings)
+            name: (checks.note_phases(name, *objective[name + "_span"], options=settings)
+                   if cache is None else cache.note_phases(
+                       checks, name, *objective[name + "_span"], options=settings))
             for name in ("reference", "model")
         }
     except evidence.EvidenceError as error:
@@ -2244,6 +2246,9 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
     harmonic_reference_cache: dict[
         tuple[str, float, int], list[dict[str, Any]]
     ] = {}
+    phase_cache = (analyzer_evidence_module().NotePhaseCache()
+                   if any(row["kind"] == "note-phase" for row in manifest["objectives"])
+                   else None)
     point_rows: list[dict[str, Any]] = []
     selection = manifest["selection"]
     for point_id in sorted(points):
@@ -2340,7 +2345,8 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                     elif objective["kind"] == "note-phase":
                         measure = run_note_phase(
                             analyzer, reference, model, objective, analyzer_hash,
-                            binding_hashes[objective["reference_binding"]], model_hash)
+                            binding_hashes[objective["reference_binding"]], model_hash,
+                            cache=phase_cache)
                     elif objective["kind"] == "checked-note-harmonic-decay":
                         expected_hz = float(objective["expected_hz"])
                         measure = checked_note_harmonic_decay(

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import math
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -239,6 +240,29 @@ class NotePhasesTests(unittest.TestCase):
             for point in result["points"]:
                 for row in point["evidence"]:
                     self.assertEqual(row["phase_options"], expected)
+            manifest["objectives"] = [
+                {**row, "id": row["id"] + "-" + metric, "metric": metric}
+                for row in manifest["objectives"]
+                for metric in ("rms_dbfs", "centroid_hz", "duration_seconds")]
+            fixture["manifest"].write_text(json.dumps(manifest))
+            fit = fixtures.MODULE
+            evidence = fit.analyzer_evidence_module()
+            results = []
+            for name, calls in (("cached", 6), ("uncached", 24), ("repeat", 6)):
+                output = root / (name + "-result.json")
+                original_run = evidence.AnalyzerEvidence._run
+                with mock.patch.object(evidence.AnalyzerEvidence, "_run", autospec=True,
+                                       side_effect=original_run) as run, mock.patch.object(
+                        fit.sys, "argv", fixtures.select_v1_command(fixture, output)[1:]):
+                    if name == "uncached":
+                        with mock.patch.object(evidence, "NotePhaseCache", return_value=None):
+                            self.assertEqual(fit.main(), 0)
+                    else:
+                        self.assertEqual(fit.main(), 0)
+                    self.assertEqual(run.call_count, calls, name)
+                results.append(json.loads(output.read_text()))
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0], results[2])
 
     def test_fit_can_measure_a_slow_tail_with_explicit_settings(self):
         fit = load_fit_tests().MODULE
@@ -284,6 +308,107 @@ class NotePhasesTests(unittest.TestCase):
                     with self.assertRaises(evidence.EvidenceError):
                         checks.note_phases("note", 3200, 19200, options=options)
                     run.assert_not_called()
+
+    def test_fit_reuses_phase_reports_across_objectives_and_candidates(self):
+        fit = load_fit_tests().MODULE
+        evidence = fit.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.wav"
+            models = [Path(directory) / (name + ".wav") for name in ("first", "second")]
+            recording(reference)
+            for model in models:
+                recording(model, sustain_gain=0.15)
+            cache = evidence.NotePhaseCache()
+            original_run = evidence.AnalyzerEvidence._run
+            with mock.patch.object(evidence.AnalyzerEvidence, "_run", autospec=True,
+                                   side_effect=original_run) as run:
+                for model in models:
+                    for phase, metric in (("attack", "duration_seconds"),
+                                          ("sustain", "centroid_hz"),
+                                          ("release", "level_slope_db_per_second")):
+                        objective = {"phase": phase, "metric": metric,
+                            "reference_span": [3200, 19200], "model_span": [3200, 19200]}
+                        cached = fit.run_note_phase(ANALYZER, reference, model, objective,
+                            fit.sha256(ANALYZER), fit.sha256(reference), fit.sha256(model),
+                            cache=cache)
+                        with mock.patch.object(evidence.AnalyzerEvidence, "_run", original_run):
+                            direct = fit.run_note_phase(ANALYZER, reference, model, objective,
+                                fit.sha256(ANALYZER), fit.sha256(reference), fit.sha256(model))
+                        self.assertEqual(cached, direct)
+                self.assertEqual(run.call_count, 3)
+
+    def test_phase_cache_returns_copies_and_rechecks_inputs(self):
+        evidence = load_fit_tests().MODULE.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.wav"
+            analyzer = Path(directory) / ANALYZER.name
+            shutil.copy2(ANALYZER, analyzer)
+            recording(source)
+            checks = evidence.AnalyzerEvidence(analyzer, {
+                "note": (source, hashlib.sha256(source.read_bytes()).hexdigest())})
+            cache = evidence.NotePhaseCache()
+            first = cache.note_phases(checks, "note", 3200, 19200)
+            expected = copy.deepcopy(first.report)
+            first.phases["sustain"]["metrics"]["rms_dbfs"]["value"] = 123
+            with mock.patch.object(checks, "_run") as run:
+                self.assertEqual(cache.note_phases(checks, "note", 3200, 19200).report, expected)
+                run.assert_not_called()
+                recording(source, sustain_gain=0.15)
+                with self.assertRaisesRegex(evidence.EvidenceError, "changed"):
+                    cache.note_phases(checks, "note", 3200, 19200)
+                recording(source)
+                with analyzer.open("ab") as stream:
+                    stream.write(b"changed")
+                with self.assertRaisesRegex(evidence.EvidenceError, "changed"):
+                    cache.note_phases(checks, "note", 3200, 19200)
+                run.assert_not_called()
+
+    def test_phase_cache_separates_settings_spans_and_evicts_old_reports(self):
+        evidence = load_fit_tests().MODULE.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.wav"
+            recording(source)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {
+                "note": (source, hashlib.sha256(source.read_bytes()).hexdigest())})
+            cache = evidence.NotePhaseCache(max_entries=2)
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                cache.note_phases(checks, "note", 3200, 19200)
+                cache.note_phases(checks, "note", 3200, 19200,
+                                 options=evidence.note_phase_options())
+                self.assertEqual(run.call_count, 1)
+                cache.note_phases(checks, "note", 3200, 19200, options={"tail_limit_seconds": 4})
+                cache.note_phases(checks, "note", 3200, 19200)
+                cache.note_phases(checks, "note", 3200, 19328)
+                self.assertEqual(run.call_count, 3)
+                cache.note_phases(checks, "note", 3200, 19200)
+                self.assertEqual(run.call_count, 3)
+                cache.note_phases(checks, "note", 3200, 19200, options={"tail_limit_seconds": 4})
+                self.assertEqual(run.call_count, 4)
+
+    def test_phase_cache_separates_source_analyzer_and_process_context(self):
+        evidence = load_fit_tests().MODULE.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.wav"
+            recording(source)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            second = root / "second.wav"
+            shutil.copy2(source, second)
+            analyzer = root / ANALYZER.name
+            shutil.copy2(ANALYZER, analyzer)
+            cache = evidence.NotePhaseCache()
+            original_run = evidence.AnalyzerEvidence._run
+            rows = [(ANALYZER, source, {}, 1), (ANALYZER, source, {}, 1),
+                    (ANALYZER, second, {}, 2), (analyzer, source, {}, 3),
+                    (ANALYZER, source, {"cwd": root}, 4),
+                    (ANALYZER, source, {"environment": {"LC_ALL": "C"}}, 5)]
+            with mock.patch.object(evidence.AnalyzerEvidence, "_run", autospec=True,
+                                   side_effect=original_run) as run:
+                for index, (binary, path, options, count) in enumerate(rows):
+                    source_id = "alias-" + str(index)
+                    checks = evidence.AnalyzerEvidence(binary, {source_id: (path, digest)}, **options)
+                    cache.note_phases(checks, source_id, 3200, 19200)
+                    self.assertEqual(run.call_count, count)
 
     def test_checker_rejects_wrong_or_missing_phase_settings(self):
         evidence = load_fit_tests().MODULE.analyzer_evidence_module()
