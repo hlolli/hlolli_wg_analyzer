@@ -1498,6 +1498,73 @@ static void hwa_seg_release_ends(HWAItemBuilder *builder,
     *evidence = have_body != 0 ? HWA_ITEM_EVIDENCE_ENERGY : 0U;
 }
 
+int hwa_segmentation_note_bounds(
+    const HWAAnalysis *analysis, const HWASegmentationOptions *options,
+    uint64_t start_sample, uint64_t end_sample,
+    uint64_t bounds[5], double confidence[4],
+    char *error, size_t error_size)
+{
+    HWAItemBuilder builder;
+    HWABoundary onset;
+    uint64_t radius;
+    double release_start_confidence = 0.0;
+    double release_end_confidence = 0.0;
+    uint32_t evidence = 0U;
+    size_t index;
+
+    if (analysis == NULL || options == NULL || bounds == NULL ||
+        confidence == NULL || !hwa_seg_options_valid(options) ||
+        analysis->tracks == NULL || analysis->track_count == 0U ||
+        analysis->track_count > options->max_track_points ||
+        analysis->format.sample_rate_hz == 0U ||
+        analysis->options.hop_size == 0U ||
+        analysis->options.frame_size == 0U || start_sample >= end_sample ||
+        end_sample > analysis->format.frames) {
+        hwa_set_error(error, error_size, "invalid note phase bounds or options");
+        return -1;
+    }
+    memset(&builder, 0, sizeof(builder));
+    builder.options = options;
+    builder.sample_rate = analysis->format.sample_rate_hz;
+    builder.total_samples = analysis->format.frames;
+    radius = hwa_seg_seconds_count(options->boundary_search_seconds,
+                                    builder.sample_rate);
+    onset = hwa_seg_find_onset(&builder, analysis, start_sample, radius,
+                               end_sample);
+    if (onset.found < 0) goto limit;
+    bounds[0] = hwa_seg_attack_start(&builder, analysis, &onset, radius,
+                                      &confidence[0], &evidence);
+    if (confidence[0] < 0.0) goto limit;
+    bounds[1] = hwa_seg_body_start(&builder, analysis, &onset, end_sample,
+                                    &confidence[1], &evidence);
+    if (confidence[1] < 0.0) goto limit;
+    if (bounds[0] > bounds[1]) bounds[0] = bounds[1];
+    bounds[2] = hwa_seg_release_start(
+        &builder, analysis, end_sample, radius,
+        &release_start_confidence, &evidence);
+    if (release_start_confidence < 0.0) goto limit;
+    if (bounds[2] < bounds[1]) bounds[2] = bounds[1];
+    if (bounds[2] - bounds[1] < hwa_seg_seconds_count(
+            options->min_body_seconds, builder.sample_rate)) {
+        bounds[1] = bounds[2];
+        confidence[1] = 0.0;
+    }
+    hwa_seg_release_ends(&builder, analysis, bounds[2], bounds[1],
+                          &bounds[3], &bounds[4],
+                          &release_end_confidence, &evidence);
+    if (release_end_confidence < 0.0) goto limit;
+    confidence[2] = 0.5 * (release_start_confidence + release_end_confidence);
+    confidence[3] = release_end_confidence;
+    for (index = 0U; index < 4U; ++index) {
+        if (bounds[index] == bounds[index + 1U]) confidence[index] = 0.0;
+    }
+    return 0;
+
+limit:
+    hwa_set_error(error, error_size, "note phase boundary evaluation limit exceeded");
+    return -1;
+}
+
 static uint32_t hwa_seg_base_quality(const HWAItemEvent *event,
                                      double threshold)
 {

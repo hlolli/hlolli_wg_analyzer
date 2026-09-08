@@ -52,7 +52,7 @@ MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
 ANALYZER_EVIDENCE_SHA256 = (
-    "71031b2ec7b08cec061a5cc48c2b88906595120d18dfe5d9f380e44edd68b938"
+    "d55db1de35b076165239a0b18b4f9c83a17014280da19efc3de94e91cce51092"
 )
 _ANALYZER_EVIDENCE = None
 
@@ -277,8 +277,21 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
         kind = row.get("kind")
         if kind not in ("experiment-gap", "body-envelope", "passive-decay",
                         "passive-decay-shape", "harmonic-decay",
-                        "checked-note-harmonic-decay"):
+                        "checked-note-harmonic-decay", "note-phase"):
             raise FitError(f"objectives[{index}] has an unknown kind")
+        if kind == "note-phase":
+            if version != 1:
+                raise FitError("note-phase objectives require fit manifest v1")
+            if row.get("phase") not in ("attack", "sustain", "release", "clean-tail"):
+                raise FitError("note-phase objective has an invalid phase")
+            if row.get("metric") not in analyzer_evidence_module().NOTE_PHASE_UNITS:
+                raise FitError("note-phase objective has an invalid metric")
+            for field in ("reference_span", "model_span"):
+                span = row.get(field)
+                if (type(span) is not list or len(span) != 2 or
+                        any(type(v) is not int for v in span) or
+                        not 0 <= span[0] < span[1] <= 2000000000):
+                    raise FitError("note-phase objective has invalid " + field)
         if version == 2:
             objective_keys = {
                 "id", "kind", "case", "reference_binding", "resource_id",
@@ -970,6 +983,37 @@ def run_body_envelope(
     }
 
 
+def run_note_phase(
+        analyzer: Path, reference: Path, model: Path,
+        objective: dict[str, Any], analyzer_hash: str,
+        reference_hash: str, model_hash: str) -> dict[str, Any]:
+    evidence = analyzer_evidence_module()
+    try:
+        checks = evidence.AnalyzerEvidence(analyzer, {
+            "reference": (reference, reference_hash), "model": (model, model_hash),
+        }, analyzer_sha256=analyzer_hash)
+        reports = {
+            name: checks.note_phases(name, *objective[name + "_span"])
+            for name in ("reference", "model")
+        }
+    except evidence.EvidenceError as error:
+        raise FitError(str(error)) from error
+    values = {}
+    for name, report in reports.items():
+        phase = report.phases[objective["phase"]]
+        metric = phase["metrics"][objective["metric"]]
+        if phase["status"] != "valid" or metric["status"] != "valid":
+            raise FitError("{} note-phase {} is not usable: {}/{}".format(
+                name, objective["phase"], phase["status"], metric["status"]))
+        values[name + "_value"] = metric["value"]
+        values[name + "_start_sample"] = phase["start_sample"]
+        values[name + "_end_sample"] = phase["end_sample"]
+    return {"phase": objective["phase"], "metric": objective["metric"],
+            "unit": evidence.NOTE_PHASE_UNITS[objective["metric"]],
+            "absolute_delta": abs(values["model_value"] - values["reference_value"]),
+            **values}
+
+
 def checked_note_report(
         analyzer: Path, audio: Path, expected_hz: float,
         expected_sha256: str, field: str) -> dict[str, Any]:
@@ -1535,7 +1579,9 @@ def run_passive_decay(reference: Path, model: Path,
 
 def passive_decay_loss(kind: str, measure: dict[str, Any], scale: float) -> float:
     """Return the named passive objective without changing the v4 score."""
-    if kind == "harmonic-decay":
+    if kind == "note-phase":
+        field = "absolute_delta"
+    elif kind == "harmonic-decay":
         field = "mean_absolute_t60_error_octaves"
     elif kind == "checked-note-harmonic-decay":
         field = "rms_t60_error_octaves"
@@ -1555,6 +1601,8 @@ def selection_method_version(manifest: dict[str, Any]) -> str:
 def passive_method_versions(objectives: list[dict[str, Any]]) -> dict[str, str]:
     kinds = {row["kind"] for row in objectives}
     result: dict[str, str] = {}
+    if "note-phase" in kinds:
+        result["note_phases"] = "note-phases-1"
     if kinds.intersection({"passive-decay", "passive-decay-shape"}):
         result["passive_decay"] = PASSIVE_DECAY_METHOD_VERSION
     if "passive-decay-shape" in kinds:
@@ -2277,6 +2325,10 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                             "maximum_absolute_t60_error_octaves": comparison[
                                 "maximum_absolute_t60_error_octaves"],
                         }
+                    elif objective["kind"] == "note-phase":
+                        measure = run_note_phase(
+                            analyzer, reference, model, objective, analyzer_hash,
+                            binding_hashes[objective["reference_binding"]], model_hash)
                     elif objective["kind"] == "checked-note-harmonic-decay":
                         expected_hz = float(objective["expected_hz"])
                         measure = checked_note_harmonic_decay(

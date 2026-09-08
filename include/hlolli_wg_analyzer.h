@@ -1093,6 +1093,48 @@ typedef struct HWAMeasurementSet {
     size_t warning_count;
 } HWAMeasurementSet;
 
+#define HWA_NOTE_PHASE_COUNT 4U
+#define HWA_NOTE_PHASE_METRIC_COUNT 6U
+#define HWA_NOTE_PHASE_METHOD_VERSION "note-phases-1"
+
+typedef struct HWANotePhaseOptions {
+    uint64_t note_start_sample;
+    uint64_t note_end_sample;
+    HWAAnalysisOptions analysis;
+    HWASegmentationOptions segmentation;
+    HWAMeasurementOptions measurement;
+} HWANotePhaseOptions;
+
+typedef enum HWANotePhaseStatus {
+    HWA_NOTE_PHASE_VALID = 1,
+    HWA_NOTE_PHASE_NO_SIGNAL = 2,
+    HWA_NOTE_PHASE_TOO_SHORT = 3,
+    HWA_NOTE_PHASE_INTERRUPTED = 4,
+    HWA_NOTE_PHASE_TRUNCATED = 5
+} HWANotePhaseStatus;
+
+/* Order: attack, sustain (Stage 3 body), release, clean-tail (residual-tail).
+ * Metrics: RMS dBFS, peak dBFS, level slope dB/s, centroid Hz,
+ * centroid slope Hz/s, duration seconds. Invalid values have their own status.
+ */
+typedef struct HWANotePhase {
+    uint64_t start_sample;
+    uint64_t end_sample;
+    double boundary_confidence;
+    HWANotePhaseStatus status;
+    HWAMeasureObservation metrics[HWA_NOTE_PHASE_METRIC_COUNT];
+} HWANotePhase;
+
+typedef struct HWANotePhaseResult {
+    char *path;
+    char audio_sha256[HWA_SHA256_HEX_SIZE];
+    HWAFormat format;
+    HWANotePhaseOptions options;
+    uint64_t next_onset_sample;
+    int next_onset_valid;
+    HWANotePhase phases[HWA_NOTE_PHASE_COUNT];
+} HWANotePhaseResult;
+
 typedef struct HWAProfileComparisonOptions {
     uint64_t max_input_bytes;
     uint64_t max_work_bytes;
@@ -2725,6 +2767,21 @@ int hwa_measure_item_file_wav(const char *items_path,
                               size_t error_size);
 
 void hwa_measurement_set_free(HWAMeasurementSet *result);
+
+void hwa_note_phase_options_default(HWANotePhaseOptions *options);
+/* Analyze one note using approximate, caller-supplied sample bounds. Phase
+ * boundaries are inferred on the analysis grid, not physical control events.
+ * The named source is hashed before and after both read-only analysis passes.
+ * Options are copied before result initialization; a successful result owns
+ * its path. Free a successful result before reuse. Each pass has its own cap.
+ * Only channel KEEP is supported; frame features and raw levels use the core
+ * engines' existing channel rules. A tail is clean only against detected
+ * onsets and the stated noise floor, not against unknown room sound.
+ */
+int hwa_analyze_note_phases_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseResult *result, char *error, size_t error_size);
+void hwa_note_phase_result_free(HWANotePhaseResult *result);
 
 void hwa_profile_comparison_options_default(
     HWAProfileComparisonOptions *options);

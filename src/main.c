@@ -31,6 +31,7 @@
 #include "isolated_note_report.h"
 #include "measure_file.h"
 #include "measure_report.h"
+#include "note_phase_report.h"
 #include "output.h"
 #include "physical_file.h"
 #include "physical_report.h"
@@ -76,6 +77,9 @@ typedef struct HWACli {
     HWAGapReportOptions gap_report_options;
     HWAIsolatedNoteOptions isolated_note_options;
     HWAHarmonicDecayOptions harmonic_decay_options;
+    uint64_t note_start_sample;
+    uint64_t note_end_sample;
+    unsigned note_span_options;
     const char *positionals[5];
     size_t positional_count;
     const char *output_path;
@@ -145,6 +149,8 @@ static void hwa_print_usage(FILE *stream)
         "--output FILE.hwa-align\n"
         "  hlolli-wg-analyzer [OPTIONS] align --score SCORE.csv AUDIO.wav "
         "--output FILE.hwa-align\n"
+        "  hlolli-wg-analyzer note-phases INPUT.wav --note-start-sample N "
+        "--note-end-sample N\n"
         "  hlolli-wg-analyzer [OPTIONS] segment --alignment ALIGN.hwa-align "
         "AUDIO.wav --output FILE.hwa-items\n"
         "  hlolli-wg-analyzer [OPTIONS] measure --items ITEMS.hwa-items "
@@ -477,7 +483,15 @@ static int hwa_parse_option_with_value(HWACli *cli,
     size_t size_value;
     uint64_t u64_value;
 
-    if (strcmp(option, "--channel") == 0) {
+    if (strcmp(option, "--note-start-sample") == 0) {
+        if (hwa_parse_u64(value, &cli->note_start_sample) != 0 ||
+            (cli->note_span_options & 1U) != 0U) return -1;
+        cli->note_span_options |= 1U;
+    } else if (strcmp(option, "--note-end-sample") == 0) {
+        if (hwa_parse_u64(value, &cli->note_end_sample) != 0 ||
+            (cli->note_span_options & 2U) != 0U) return -1;
+        cli->note_span_options |= 2U;
+    } else if (strcmp(option, "--channel") == 0) {
         if (hwa_parse_u64(value, &u64_value) != 0 ||
             u64_value == 0U || u64_value > UINT16_MAX ||
             cli->options.channel_mode == HWA_CHANNEL_MIX) {
@@ -1702,6 +1716,40 @@ static int hwa_run_body_envelope(const HWACli *cli)
     }
     hwa_body_envelope_result_free(&body);
     return result;
+}
+
+static int hwa_run_note_phases(const HWACli *cli)
+{
+    HWANotePhaseOptions options;
+    HWANotePhaseResult phases;
+    char error[HWA_ERROR_SIZE] = {0};
+    int status = 1;
+    if (cli->positional_count != 2U || cli->note_span_options != 3U ||
+        cli->output_path != NULL || cli->replace || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->renderer_path != NULL || cli->resume_path != NULL || cli->allow_run ||
+        cli->analysis_only_option_set || cli->alignment_option_set ||
+        cli->comparison_option_set || cli->physical_option_set ||
+        cli->production_option_set || cli->run_option_set ||
+        cli->experiment_option_set || cli->gap_report_option_set ||
+        cli->physical_binding_count != 0U) return -1;
+    hwa_note_phase_options_default(&options);
+    options.note_start_sample = cli->note_start_sample;
+    options.note_end_sample = cli->note_end_sample;
+    options.analysis = cli->options;
+    options.segmentation = cli->segmentation_options;
+    options.measurement = cli->measurement_options;
+    if (hwa_analyze_note_phases_wav(cli->positionals[1], &options, &phases,
+                                    error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        return 1;
+    }
+    if (hwa_note_phase_report_json(stdout, &phases) == 0 &&
+        hwa_finish_stream(stdout, "standard output") == 0) status = 0;
+    hwa_note_phase_result_free(&phases);
+    return status;
 }
 
 static int hwa_run_isolated_note(const HWACli *cli)
@@ -3895,7 +3943,9 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
+    if (strcmp(cli.positionals[0], "note-phases") != 0 && cli.note_span_options != 0U) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
         strcmp(cli.positionals[0], "separate-instruments") != 0 &&
         strcmp(cli.positionals[0], "infer-stem-note-events") != 0 &&
         cli.inference_option_set) {
@@ -3926,6 +3976,8 @@ int main(int argc, char **argv)
         result = hwa_run_compare(&cli);
     } else if (strcmp(cli.positionals[0], "body-envelope") == 0) {
         result = hwa_run_body_envelope(&cli);
+    } else if (strcmp(cli.positionals[0], "note-phases") == 0) {
+        result = hwa_run_note_phases(&cli);
     } else if (strcmp(cli.positionals[0], "isolated-note") == 0) {
         result = hwa_run_isolated_note(&cli);
     } else if (strcmp(cli.positionals[0], "harmonic-decay") == 0) {

@@ -87,6 +87,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/measure_engine.c
   src/measure_file.c
   src/numeric_locale.c
+  src/note_phases.c
   src/physical_check.c
   src/physical_file.c
   src/production.c
@@ -152,6 +153,7 @@ add_executable(hlolli_wg_analyzer
   src/item_report.c
   src/isolated_note_report.c
   src/main.c
+  src/note_phase_report.c
   src/measure_report.c
   src/physical_report.c
   src/production_report.c

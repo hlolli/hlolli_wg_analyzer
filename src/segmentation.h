@@ -6,6 +6,13 @@
 
 #include <stddef.h>
 
+/* Use the Stage 3 boundary rules for one caller-supplied note span. */
+int hwa_segmentation_note_bounds(
+    const HWAAnalysis *analysis, const HWASegmentationOptions *options,
+    uint64_t start_sample, uint64_t end_sample,
+    uint64_t bounds[5], double confidence[4],
+    char *error, size_t error_size);
+
 /*
  * Build items from inputs that a caller has already loaded and checked. This
  * entry point exists so the bounded role and boundary engine can be tested

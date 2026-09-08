@@ -41,5 +41,16 @@ int main(void)
         return 1;
     }
     hwa_analysis_free(&analysis);
+    {
+        HWANotePhaseOptions options;
+        HWANotePhaseResult phases;
+        hwa_note_phase_options_default(&options);
+        memset(&phases, 0xA5, sizeof(phases));
+        if (hwa_analyze_note_phases_wav(NULL, &options, &phases,
+                                        error, sizeof(error)) == 0 ||
+            phases.path != NULL || error[0] == '\0') return 1;
+        hwa_note_phase_result_free(&phases);
+        hwa_note_phase_result_free(&phases);
+    }
     return 0;
 }

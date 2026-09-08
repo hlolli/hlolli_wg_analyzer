@@ -1452,6 +1452,11 @@ if(HWA_PYTHON3_EXECUTABLE)
       --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
   set_tests_properties(unit.analyzer-evidence PROPERTIES TIMEOUT 60)
 
+  add_test(NAME cli.note-phases COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_note_phases_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.note-phases PROPERTIES TIMEOUT 60)
+
   if(NOT WIN32)
     add_test(
       NAME unit.violin-fit-adapter

@@ -107,6 +107,19 @@ class BodyEnvelopeEvidence:
     confidence: Optional[float]
 
 
+NOTE_PHASE_UNITS = {
+    "rms_dbfs": "dBFS", "peak_dbfs": "dBFS",
+    "level_slope_db_per_second": "dB/s", "centroid_hz": "Hz",
+    "centroid_slope_hz_per_second": "Hz/s", "duration_seconds": "seconds",
+}
+
+
+@dataclass(frozen=True)
+class NotePhaseEvidence:
+    report: dict[str, Any]
+    phases: dict[str, dict[str, Any]]
+
+
 def _body_number(value: Any, expected: float, field: str) -> float:
     actual = _finite(value, field)
     if not math.isclose(actual, expected, rel_tol=1e-10, abs_tol=1e-9):
@@ -544,6 +557,94 @@ class AnalyzerEvidence:
         if type(value) is not dict:
             raise EvidenceError(label + " returned a non-object")
         return value
+
+    def note_phases(
+            self, source_id: str, start_sample: int,
+            end_sample: int) -> NotePhaseEvidence:
+        """Measure the phases around a caller-supplied note span."""
+        start = _count(start_sample, "note start sample")
+        end = _count(end_sample, "note end sample")
+        if start >= end or end > 2**64 - 1:
+            raise EvidenceError("note span must have increasing sample bounds")
+        path = self._source(source_id)
+        report = self._run([
+            "note-phases", str(path), "--note-start-sample", str(start),
+            "--note-end-sample", str(end)], source_id + " note phases")
+        if (report.get("schema") != "hwa-note-phases" or
+                type(report.get("schema_version")) is not int or
+                report["schema_version"] != 1 or
+                report.get("command") != "note-phases" or
+                report.get("method") != "note-phases-1" or
+                report.get("path") != str(path) or
+                report.get("audio_sha256") != self._sources[source_id][1] or
+                _count(report.get("note_start_sample"), "start") != start or
+                _count(report.get("note_end_sample"), "end") != end):
+            raise EvidenceError("note-phases returned an unknown contract")
+        rate = _count(report.get("sample_rate_hz"), "sample rate")
+        frames = _count(report.get("frames"), "source frames")
+        if rate == 0 or frames < end:
+            raise EvidenceError("note-phases has an invalid source clock")
+        for name, expected in (("boundary_frame_size", 2048),
+                ("boundary_hop_size", 512), ("measurement_fft_size", 4096),
+                ("measurement_hop_size", 256)):
+            if _count(report.get(name), name) != expected:
+                raise EvidenceError("note-phases analysis grid changed")
+        next_onset = report.get("next_onset_sample")
+        if next_onset is not None and _count(next_onset, "next onset") >= frames:
+            raise EvidenceError("note-phases next onset exceeds the source")
+        names = ("attack", "sustain", "release", "clean-tail")
+        rows = report.get("phases")
+        if type(rows) is not list or len(rows) != len(names):
+            raise EvidenceError("note-phases has an invalid phase set")
+        previous_end = None
+        phases = {}
+        for name, row in zip(names, rows):
+            if (type(row) is not dict or row.get("phase") != name or
+                    row.get("status") not in (
+                        "valid", "no-signal", "too-short", "interrupted", "truncated")):
+                raise EvidenceError("note-phases has an invalid phase")
+            first = _count(row.get("start_sample"), "phase start")
+            last = _count(row.get("end_sample"), "phase end")
+            confidence = _finite(row.get("boundary_confidence"), "boundary confidence")
+            if (first > last or last > frames or not 0.0 <= confidence <= 1.0 or
+                    (previous_end is not None and first != previous_end) or
+                    (row["status"] == "valid" and first == last) or
+                    not math.isclose(_finite(row.get("duration_seconds"), "duration"),
+                                     (last - first) / rate, rel_tol=1e-12, abs_tol=1e-12)):
+                raise EvidenceError("note-phases has inconsistent phase bounds")
+            if row["status"] == "interrupted" and (
+                    name not in ("release", "clean-tail") or
+                    next_onset is None or last <= next_onset):
+                raise EvidenceError("note-phases has inconsistent interruption")
+            metrics = row.get("metrics")
+            if type(metrics) is not dict or set(metrics) != set(NOTE_PHASE_UNITS):
+                raise EvidenceError("note-phases metric set changed")
+            for metric_name, unit in NOTE_PHASE_UNITS.items():
+                value = metrics[metric_name]
+                if (type(value) is not dict or value.get("unit") != unit or
+                        value.get("status") not in (
+                            "valid", "no-data", "unsupported-item", "empty-span",
+                            "too-short", "no-signal", "below-floor", "no-pitch",
+                            "multi-pitch", "no-reference")):
+                    raise EvidenceError("note-phases metric contract changed")
+                metric_confidence = _finite(value.get("confidence"), "metric confidence")
+                if not 0.0 <= metric_confidence <= 1.0:
+                    raise EvidenceError("note-phases has invalid confidence")
+                _count(value.get("quality_flags"), "metric quality")
+                if value["status"] == "valid":
+                    actual = _finite(value.get("value"), metric_name)
+                    if row["status"] != "valid":
+                        raise EvidenceError("rejected note phase contains valid measurements")
+                    if metric_name == "duration_seconds" and not math.isclose(
+                            actual, (last-first)/rate, rel_tol=1e-12, abs_tol=1e-12):
+                        raise EvidenceError("phase duration disagrees with its bounds")
+                    if metric_name == "centroid_hz" and not 0.0 <= actual <= rate/2:
+                        raise EvidenceError("phase centroid exceeds the source clock")
+                elif value.get("value") is not None:
+                    raise EvidenceError("invalid phase measurement must be null")
+            phases[name] = row
+            previous_end = last
+        return NotePhaseEvidence(report, phases)
 
     def body_envelope(
             self, reference_id: str,
