@@ -1150,6 +1150,34 @@ typedef struct HWANotePhaseEnvelopeResult {
     HWAMeasureObservation metrics[HWA_NOTE_PHASE_COUNT][HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT];
 } HWANotePhaseEnvelopeResult;
 
+#define HWA_NOTE_PHASE_FRAMES_METHOD_VERSION "note-phase-frames-1"
+
+/* Frames use the measurement grid anchored at source sample zero. The center
+ * selects the phase; [start_sample, end_sample) is the actual source support.
+ * The symmetric Hann window can cross phase bounds and pad past EOF. Levels use window
+ * energy normalization after arithmetic-mean channel mixing, with a -300 dBFS
+ * floor. Centroid uses one-sided power; flatness uses positive-frequency power
+ * bins, including Nyquist. Both are usable only when spectral_status is valid.
+ */
+typedef struct HWANotePhaseFrame {
+    size_t phase_index;
+    uint64_t start_sample;
+    uint64_t end_sample;
+    uint64_t center_sample;
+    double level_dbfs;
+    double centroid_hz;
+    double flatness;
+    HWAMeasureStatus spectral_status;
+    int crosses_phase_bounds;
+    int zero_padded;
+} HWANotePhaseFrame;
+
+typedef struct HWANotePhaseFramesResult {
+    HWANotePhaseEnvelopeResult envelope;
+    size_t frame_count;
+    HWANotePhaseFrame *frames;
+} HWANotePhaseFramesResult;
+
 typedef struct HWAProfileComparisonOptions {
     uint64_t max_input_bytes;
     uint64_t max_work_bytes;
@@ -2805,6 +2833,17 @@ int hwa_analyze_note_phase_envelope_wav(
     const char *path, const HWANotePhaseOptions *options,
     HWANotePhaseEnvelopeResult *result, char *error, size_t error_size);
 void hwa_note_phase_envelope_result_free(HWANotePhaseEnvelopeResult *result);
+
+/* Includes the envelope summary and every measurement-grid frame centered in
+ * a valid phase. Rejected phases have no frames. No additional FFT or audio
+ * pass; frame storage shares max_work_bytes and is capped by max_series_points.
+ * Options are copied before initialization. Free a successful result before
+ * reuse; failures clear it. The result owns both the source path and frames.
+ */
+int hwa_analyze_note_phase_frames_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseFramesResult *result, char *error, size_t error_size);
+void hwa_note_phase_frames_result_free(HWANotePhaseFramesResult *result);
 
 void hwa_profile_comparison_options_default(
     HWAProfileComparisonOptions *options);

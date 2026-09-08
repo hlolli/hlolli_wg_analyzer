@@ -144,6 +144,8 @@ typedef struct HWAMeasureEngine {
     size_t observation_capacity;
     size_t transform_count;
     uint64_t evaluations;
+    HWAMeasureFrameSink frame_sink;
+    void *frame_context;
 
     HWAMeasureItemAccumulator *accumulators;
     HWAMeasureItemOrder *start_order;
@@ -1693,6 +1695,9 @@ static int hwa_measure_process_frame(HWAMeasureEngine *engine,
                 ? flux_numerator / flux_denominator
                 : 0.0,
             band_power, pitch, pitch_reference);
+        if (engine->frame_sink != NULL && engine->frame_sink(
+                engine->frame_context, item_index, frame_start, level_db,
+                centroid, flatness, error, error_size) != 0) return -1;
         index++;
     }
     return 0;
@@ -3802,11 +3807,13 @@ cleanup:
     return status;
 }
 
-int hwa_measure_engine_wav(const HWAItemSet *items,
+int hwa_measure_engine_wav_frames(const HWAItemSet *items,
                            const char *explicit_audio_path,
                            const HWAMeasurementOptions *provided_options,
                            uint64_t retained_input_bytes,
                            HWAMeasurementSet *result,
+                           HWAMeasureFrameSink sink,
+                           void *context,
                            char *error,
                            size_t error_size)
 {
@@ -3860,6 +3867,8 @@ int hwa_measure_engine_wav(const HWAItemSet *items,
         goto cleanup;
     }
     result->audio_format = reader.format;
+    engine.frame_sink = sink;
+    engine.frame_context = context;
     if (copied_options.decode_block_frames >
         SIZE_MAX / reader.format.block_align) {
         hwa_set_error(error, error_size,
@@ -3932,6 +3941,15 @@ cleanup:
         result->options = copied_options;
     }
     return status;
+}
+
+int hwa_measure_engine_wav(const HWAItemSet *items,
+    const char *explicit_audio_path, const HWAMeasurementOptions *options,
+    uint64_t retained_input_bytes, HWAMeasurementSet *result,
+    char *error, size_t error_size)
+{
+    return hwa_measure_engine_wav_frames(items, explicit_audio_path, options,
+        retained_input_bytes, result, NULL, NULL, error, error_size);
 }
 
 static char *hwa_measure_result_copy(const char *text,

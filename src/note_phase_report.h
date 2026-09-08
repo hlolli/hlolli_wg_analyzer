@@ -4,4 +4,6 @@
 #include <stdio.h>
 int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result);
 int hwa_note_phase_envelope_report_json(FILE *stream, const HWANotePhaseEnvelopeResult *result);
+int hwa_note_phase_frames_report_json(FILE *stream, const HWANotePhaseFramesResult *result,
+                                     int include_envelope);
 #endif

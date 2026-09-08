@@ -18,6 +18,7 @@ from typing import Any, Mapping, NoReturn, Optional
 
 
 MAX_REPORT_BYTES = 1024 * 1024
+MAX_FRAME_REPORT_BYTES = 32 * 1024 * 1024
 MAX_ERROR_BYTES = 2000
 RUN_TIMEOUT_SECONDS = 120
 MIN_PITCH_CONFIDENCE = 0.65
@@ -187,9 +188,11 @@ class NotePhaseCache:
             self, checks: AnalyzerEvidence, source_id: str,
             start_sample: int, end_sample: int, *,
             options: Optional[dict[str, Any]] = None,
-            envelope: bool = False) -> NotePhaseEvidence:
+            envelope: bool = False, frames: bool = False) -> NotePhaseEvidence:
         if type(envelope) is not bool:
             raise EvidenceError("note-phase envelope must be a boolean")
+        if type(frames) is not bool:
+            raise EvidenceError("note-phase frames must be a boolean")
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -198,7 +201,7 @@ class NotePhaseCache:
         source = checks._source(source_id)
         key = (checks._analyzer, checks.analyzer_sha256,
                source, checks._sources[source_id][1], start, end,
-               tuple(settings.items()), envelope, checks._cwd or Path.cwd(),
+               tuple(settings.items()), envelope, frames, checks._cwd or Path.cwd(),
                tuple(sorted(checks._environment.items())))
         cached = self._reports.get(key)
         if cached is not None:
@@ -208,11 +211,69 @@ class NotePhaseCache:
             self._reports.move_to_end(key)
             return result
         result = checks.note_phases(source_id, start, end, options=settings,
-                                   envelope=envelope)
+                                   envelope=envelope, frames=frames)
+        # Large frame series remain caller-owned, outside the scalar fit cache.
+        if frames and len(result.report["frame_series"]["rows"]) > 2048:
+            return result
         self._reports[key] = copy.deepcopy(result)
         if len(self._reports) > self._max_entries:
             self._reports.popitem(last=False)
         return result
+
+
+def _note_phase_frames(report: dict[str, Any], phases: dict[str, Any]) -> None:
+    series = report.get("frame_series")
+    if (type(series) is not dict or series.get("method") != "note-phase-frames-1" or
+            series.get("window") != "symmetric-hann" or
+            series.get("spectrum_weighting") != "one-sided-power" or
+            series.get("flatness_excludes_dc") is not True or
+            series.get("channel_mix") != "arithmetic-mean" or
+            series.get("level_weighting") != "window-energy-normalized" or
+            _finite(series.get("level_floor_dbfs"), "frame level floor") != -300 or
+            _finite(series.get("spectral_floor_dbfs"), "frame spectral floor") != -100 or
+            series.get("units") != {"level_dbfs": "dBFS", "centroid_hz": "Hz", "flatness": "ratio"}):
+        raise EvidenceError("note-phase frames returned an unknown contract")
+    rows = series.get("rows")
+    if type(rows) is not list or len(rows) > 2000000:
+        raise EvidenceError("note-phase frames exceed the series limit")
+    size, hop = report["measurement_fft_size"], report["measurement_hop_size"]
+    half, source_frames = size // 2, report["frames"]
+    index = 0
+    for name, phase in phases.items():
+        if phase["status"] != "valid":
+            continue
+        first = max(0, (phase["start_sample"] - half + hop - 1) // hop)
+        for center in range(first * hop + half, phase["end_sample"], hop):
+            if index >= len(rows):
+                raise EvidenceError("note-phase frames have incomplete coverage")
+            row = rows[index]
+            index += 1
+            start, end = center - half, min(center + half, source_frames)
+            if (type(row) is not dict or row.get("phase") != name or
+                    _count(row.get("start_sample"), "frame start") != start or
+                    _count(row.get("end_sample"), "frame end") != end or
+                    _count(row.get("center_sample"), "frame center") != center or
+                    type(row.get("zero_padded")) is not bool or
+                    row["zero_padded"] != (center + half > source_frames) or
+                    type(row.get("crosses_phase_bounds")) is not bool or
+                    row["crosses_phase_bounds"] != (start < phase["start_sample"] or
+                                                    center + half > phase["end_sample"])):
+                raise EvidenceError("note-phase frame grid or support changed")
+            level = _finite(row.get("level_dbfs"), "frame level")
+            if level < -300:
+                raise EvidenceError("note-phase frame level is below the numeric floor")
+            expected_status = "no-signal" if level == -300 else "below-floor" if level < -100 else "valid"
+            if row.get("spectral_status") != expected_status:
+                raise EvidenceError("note-phase frame spectral status changed")
+            if expected_status == "valid":
+                centroid = _finite(row.get("centroid_hz"), "frame centroid")
+                flatness = _finite(row.get("flatness"), "frame flatness")
+                if not 0 <= centroid <= report["sample_rate_hz"]/2 or not 0 <= flatness <= 1 + 1e-10:
+                    raise EvidenceError("note-phase frame spectrum is out of range")
+            elif row.get("centroid_hz") is not None or row.get("flatness") is not None:
+                raise EvidenceError("rejected frame spectrum must be null")
+    if index != len(rows):
+        raise EvidenceError("note-phase frames contain extra rows")
 
 
 def _body_number(value: Any, expected: float, field: str) -> float:
@@ -595,7 +656,8 @@ class AnalyzerEvidence:
         except KeyError as error:
             raise EvidenceError("unknown source id: " + str(source_id)) from error
 
-    def _run(self, arguments: list[str], label: str) -> dict[str, Any]:
+    def _run(self, arguments: list[str], label: str, *,
+             max_report_bytes: int = MAX_REPORT_BYTES) -> dict[str, Any]:
         self._verify_inputs("before " + label)
         try:
             with tempfile.TemporaryFile(
@@ -625,11 +687,11 @@ class AnalyzerEvidence:
                             "utf-8", errors="replace").strip()
                     raise EvidenceError(
                         label + " failed" + (": " + detail if detail else ""))
-                if stdout_size > MAX_REPORT_BYTES:
+                if stdout_size > max_report_bytes:
                     raise EvidenceError(label + " output exceeds the byte limit")
                 stdout.seek(0)
-                source = stdout.read(MAX_REPORT_BYTES + 1)
-                if len(source) > MAX_REPORT_BYTES:
+                source = stdout.read(max_report_bytes + 1)
+                if len(source) > max_report_bytes:
                     raise EvidenceError(
                         label + " output exceeds the byte limit")
         except EvidenceError:
@@ -656,11 +718,14 @@ class AnalyzerEvidence:
     def note_phases(
             self, source_id: str, start_sample: int,
             end_sample: int, *, options: Optional[dict[str, Any]] = None,
-            envelope: bool = False
+            envelope: bool = False, frames: bool = False
             ) -> NotePhaseEvidence:
         """Measure the phases around a caller-supplied note span."""
         if type(envelope) is not bool:
             raise EvidenceError("note-phase envelope must be a boolean")
+        if type(frames) is not bool:
+            raise EvidenceError("note-phase frames must be a boolean")
+        want_frames = frames
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -672,10 +737,13 @@ class AnalyzerEvidence:
             "--note-end-sample", str(end)]
         if envelope:
             arguments.append("--phase-envelope")
+        if want_frames:
+            arguments.append("--phase-frames")
         for name, value in settings.items():
             arguments.extend([NOTE_PHASE_OPTIONS[name][0],
                               str(value) if type(value) is int else format(value, ".17g")])
-        report = self._run(arguments, source_id + " note phases")
+        report = (self._run(arguments, source_id + " note phases", max_report_bytes=MAX_FRAME_REPORT_BYTES)
+                  if want_frames else self._run(arguments, source_id + " note phases"))
         if (report.get("schema") != "hwa-note-phases" or
                 type(report.get("schema_version")) is not int or
                 report["schema_version"] != 1 or
@@ -694,8 +762,8 @@ class AnalyzerEvidence:
         elif "envelope_method" in report or "attack_envelope_bins" in report:
             raise EvidenceError("note-phases returned an unrequested envelope")
         rate = _count(report.get("sample_rate_hz"), "sample rate")
-        frames = _count(report.get("frames"), "source frames")
-        if rate == 0 or frames < end:
+        source_frames = _count(report.get("frames"), "source frames")
+        if rate == 0 or source_frames < end:
             raise EvidenceError("note-phases has an invalid source clock")
         for name, expected in settings.items():
             actual = (_count(report.get(name), name) if type(expected) is int
@@ -703,7 +771,7 @@ class AnalyzerEvidence:
             if actual != expected:
                 raise EvidenceError("note-phases analysis setting changed: " + name)
         next_onset = report.get("next_onset_sample")
-        if next_onset is not None and _count(next_onset, "next onset") >= frames:
+        if next_onset is not None and _count(next_onset, "next onset") >= source_frames:
             raise EvidenceError("note-phases next onset exceeds the source")
         names = ("attack", "sustain", "release", "clean-tail")
         rows = report.get("phases")
@@ -719,7 +787,7 @@ class AnalyzerEvidence:
             first = _count(row.get("start_sample"), "phase start")
             last = _count(row.get("end_sample"), "phase end")
             confidence = _finite(row.get("boundary_confidence"), "boundary confidence")
-            if (first > last or last > frames or not 0.0 <= confidence <= 1.0 or
+            if (first > last or last > source_frames or not 0.0 <= confidence <= 1.0 or
                     (previous_end is not None and first != previous_end) or
                     (row["status"] == "valid" and first == last) or
                     not math.isclose(_finite(row.get("duration_seconds"), "duration"),
@@ -779,6 +847,10 @@ class AnalyzerEvidence:
                                      expected, "phase attack slope")
             phases[name] = row
             previous_end = last
+        if want_frames:
+            _note_phase_frames(report, phases)
+        elif "frame_series" in report:
+            raise EvidenceError("note-phases returned unrequested frames")
         return NotePhaseEvidence(report, phases)
 
     def body_envelope(

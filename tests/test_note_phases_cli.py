@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Note-phase contract and acoustic fixtures through the public CLI."""
 import argparse
+import cmath
 import hashlib
 import copy
 import importlib.util
@@ -61,6 +62,142 @@ class NotePhasesTests(unittest.TestCase):
             *options], capture_output=True, text=True)
         self.assertEqual(process.returncode, expected, process.stderr)
         return json.loads(process.stdout) if expected == 0 else process
+
+    def test_frame_series_grid_and_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path, modulation_db=4)
+            flags = ("--measure-fft-size", "256", "--measure-hop-size", "64")
+            basic = self.run_report(path, *flags)
+            report = self.run_report(path, *flags, "--phase-frames")
+            series = report.pop("frame_series")
+            self.assertEqual(report, basic)
+            self.assertEqual(series["method"], "note-phase-frames-1")
+            self.assertEqual(series["window"], "symmetric-hann")
+            self.assertEqual(series["spectrum_weighting"], "one-sided-power")
+            self.assertIs(series["flatness_excludes_dc"], True)
+            self.assertEqual(series["channel_mix"], "arithmetic-mean")
+            self.assertEqual(series["level_weighting"], "window-energy-normalized")
+            self.assertEqual(series["level_floor_dbfs"], -300)
+            self.assertEqual(series["spectral_floor_dbfs"], -100)
+            rows = series["rows"]
+            expected = []
+            for phase in report["phases"]:
+                if phase["status"] != "valid":
+                    continue
+                expected.extend((phase["phase"], center) for center in range(128, report["frames"], 64)
+                                if phase["start_sample"] <= center < phase["end_sample"])
+            self.assertEqual([(r["phase"], r["center_sample"]) for r in rows], expected)
+            phases = {p["phase"]: p for p in report["phases"]}
+            for row in rows:
+                phase = phases[row["phase"]]
+                start = row["center_sample"] - 128
+                self.assertEqual(row["start_sample"], start)
+                self.assertEqual(row["end_sample"], min(start + 256, report["frames"]))
+                self.assertEqual(row["zero_padded"], start + 256 > report["frames"])
+                self.assertEqual(row["crosses_phase_bounds"],
+                    start < phase["start_sample"] or start + 256 > phase["end_sample"])
+            with wave.open(str(path)) as audio:
+                samples = struct.unpack("<" + str(audio.getnframes()) + "h",
+                                        audio.readframes(audio.getnframes()))
+            window = [0.5 * (1 - math.cos(math.tau * i / 255)) for i in range(256)]
+            energy = sum(w*w for w in window)
+            for row in (rows[0], rows[len(rows)//2], rows[-1]):
+                start = row["start_sample"]
+                values = [(samples[start+i] / 32768 if start+i < len(samples) else 0) * window[i]
+                          for i in range(256)]
+                power = [abs(sum(v * cmath.exp(-1j * math.tau * k * n / 256)
+                                 for n, v in enumerate(values))) ** 2 / (256 * energy)
+                         * (1 if k in (0, 128) else 2) for k in range(129)]
+                total = sum(power)
+                self.assertAlmostEqual(row["level_dbfs"],
+                    10 * math.log10(total) if total > 1e-30 else -300, places=8)
+                if row["spectral_status"] == "valid":
+                    self.assertAlmostEqual(row["centroid_hz"],
+                        sum(k * 16000 / 256 * p for k, p in enumerate(power)) / total, places=7)
+                    flatness = math.exp(sum(math.log(max(p, 1e-30)) for p in power[1:])/128) / (sum(power[1:])/128)
+                    self.assertAlmostEqual(row["flatness"], flatness, places=8)
+            envelope = self.run_report(path, *flags, "--phase-envelope")
+            both = self.run_report(path, *flags, "--phase-envelope", "--phase-frames")
+            self.assertEqual(both.pop("frame_series"), series)
+            self.assertEqual(both, envelope)
+            wider = self.run_report(path, "--phase-frames", "--measure-fft-size", "256",
+                                    "--measure-hop-size", "128")["frame_series"]["rows"]
+            self.assertEqual(wider, [r for r in rows if r["start_sample"] % 128 == 0])
+            sustain = [r for r in rows if r["phase"] == "sustain"]
+            mean = sum(r["level_dbfs"] for r in sustain) / len(sustain)
+            spread = math.sqrt(sum((r["level_dbfs"]-mean)**2 for r in sustain) / len(sustain))
+            self.assertAlmostEqual(spread,
+                envelope["phases"][1]["metrics"]["level_modulation_spread_db"]["value"], places=8)
+
+    def test_frame_series_rejections_limits_and_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            first = self.run_report(path, "--phase-frames", "--block-frames", "97")
+            self.assertEqual(first, self.run_report(path, "--phase-frames", "--block-frames", "4096"))
+            transforms = (first["frames"] - first["measurement_fft_size"]//2 +
+                          first["measurement_hop_size"] - 1) // first["measurement_hop_size"]
+            for flags in ((), ("--phase-frames",)):
+                self.run_report(path, *flags, "--max-measurement-transforms", str(transforms))
+                self.run_report(path, *flags, "--max-measurement-transforms", str(transforms-1), expected=1)
+            for limit in ("--max-work-bytes", "--max-measurement-series-points", "--max-measurements"):
+                self.run_report(path, "--phase-frames", limit, "1", expected=1)
+            for grid in (("--measure-hop-size", "0"), ("--measure-fft-size", "63")):
+                process = subprocess.run([str(ANALYZER), "note-phases", str(path),
+                    "--note-start-sample", "3200", "--note-end-sample", "19200",
+                    "--phase-frames", *grid], capture_output=True)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertEqual(process.stdout, b"")
+            self.run_report(path, "--phase-frames", "--phase-frames", expected=2)
+            process = subprocess.run([str(ANALYZER), "inspect", str(path), "--phase-frames"],
+                                     capture_output=True)
+            self.assertEqual(process.returncode, 2)
+            below = self.run_report(path, "--phase-frames", "--spectral-floor-dbfs", "0")
+            self.assertTrue(below["frame_series"]["rows"])
+            for row in below["frame_series"]["rows"]:
+                self.assertNotEqual(row["spectral_status"], "valid")
+                self.assertIsNone(row["centroid_hz"])
+                self.assertIsNone(row["flatness"])
+            for variant in ({"silence": True}, {"second": True}, {"tail_seconds": 0.35}):
+                recording(path, **variant)
+                report = self.run_report(path, "--phase-frames")
+                valid = {p["phase"] for p in report["phases"] if p["status"] == "valid"}
+                self.assertTrue(all(r["phase"] in valid for r in report["frame_series"]["rows"]))
+                if variant.get("silence"):
+                    self.assertEqual(report["frame_series"]["rows"], [])
+            recording(path, tail_seconds=0.05)
+            report = self.run_report(path, "--phase-frames")
+            padded = [r for r in report["frame_series"]["rows"] if r["zero_padded"]]
+            self.assertTrue(padded)
+            self.assertTrue(all(r["end_sample"] == report["frames"] for r in padded))
+
+    def test_frame_series_dense_grid_and_channel_mix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            dense = self.run_report(path, "--phase-frames", "--measure-fft-size", "256",
+                                    "--measure-hop-size", "8")
+            sustain = [r for r in dense["frame_series"]["rows"] if r["phase"] == "sustain"]
+            self.assertGreater(len(sustain), 512)
+            self.assertTrue(all(b["center_sample"] - a["center_sample"] == 8
+                                for a, b in zip(sustain, sustain[1:])))
+            with wave.open(str(path)) as audio:
+                samples = struct.unpack("<" + str(audio.getnframes()) + "h",
+                                        audio.readframes(audio.getnframes()))
+            stereo = Path(directory) / "stereo.wav"
+            with wave.open(str(stereo), "wb") as audio:
+                audio.setnchannels(2)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b"".join(struct.pack("<hh", s, -s) for s in samples))
+            report = self.run_report(stereo, "--phase-frames")
+            self.assertTrue(report["frame_series"]["rows"])
+            for row in report["frame_series"]["rows"]:
+                self.assertEqual(row["level_dbfs"], -300)
+                self.assertEqual(row["spectral_status"], "no-signal")
+                self.assertIsNone(row["centroid_hz"])
+                self.assertIsNone(row["flatness"])
 
     def test_phases_cover_a_note_with_known_envelope(self):
         with tempfile.TemporaryDirectory(prefix="hwa phase note ") as directory:
@@ -270,6 +407,92 @@ class NotePhasesTests(unittest.TestCase):
                         checks, "_run", return_value=report):
                     with self.assertRaises(evidence.EvidenceError):
                         checks.note_phases("note", 3200, 19200)
+
+    def test_frame_series_checked_evidence_and_cache(self):
+        fit = load_fit_tests().MODULE
+        evidence = fit.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {"note": (path, fit.sha256(path))})
+            cache = evidence.NotePhaseCache()
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                for frames, envelope in ((False, False), (True, False), (False, True), (True, True)):
+                    original = cache.note_phases(checks, "note", 3200, 19200,
+                                                 frames=frames, envelope=envelope)
+                    self.assertEqual(cache.note_phases(checks, "note", 3200, 19200,
+                                                       frames=frames, envelope=envelope), original)
+                self.assertEqual(run.call_count, 4)
+                cache.note_phases(checks, "note", 3200, 19200, frames=True,
+                                  options={"measurement_hop_size": 64})
+                self.assertEqual(run.call_count, 5)
+            original = checks.note_phases("note", 3200, 19200, frames=True).report
+            dense_options = {"measurement_fft_size": 256, "measurement_hop_size": 4}
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                for _ in range(2):
+                    dense = cache.note_phases(checks, "note", 3200, 19200,
+                                              frames=True, options=dense_options)
+                    self.assertGreater(len(json.dumps(dense.report)), evidence.MAX_REPORT_BYTES)
+                self.assertEqual(run.call_count, 2)
+            with mock.patch.object(evidence, "MAX_FRAME_REPORT_BYTES", 100):
+                with self.assertRaisesRegex(evidence.EvidenceError, "byte limit"):
+                    checks.note_phases("note", 3200, 19200, frames=True)
+            for change in ("method", "unit", "mix", "floor", "missing", "duplicate", "clock",
+                           "phase", "bounds", "padding", "crossing", "level", "centroid",
+                           "flatness", "status", "bool"):
+                report = copy.deepcopy(original)
+                series = report["frame_series"]
+                row = next(r for r in series["rows"] if r["spectral_status"] == "valid")
+                if change == "method":
+                    series["method"] = "unknown"
+                elif change == "unit":
+                    series["units"]["level_dbfs"] = "Hz"
+                elif change == "mix":
+                    series["channel_mix"] = "sum"
+                elif change == "floor":
+                    series["spectral_floor_dbfs"] = -90
+                elif change == "missing":
+                    series["rows"].pop()
+                elif change == "duplicate":
+                    series["rows"].append(copy.deepcopy(row))
+                elif change == "clock":
+                    row["center_sample"] += 1
+                elif change == "phase":
+                    row["phase"] = "clean-tail"
+                elif change == "bounds":
+                    row["end_sample"] -= 1
+                elif change == "padding":
+                    row["zero_padded"] = not row["zero_padded"]
+                elif change == "crossing":
+                    row["crosses_phase_bounds"] = not row["crosses_phase_bounds"]
+                elif change == "level":
+                    row["level_dbfs"] = float("nan")
+                elif change == "centroid":
+                    row["centroid_hz"] = 100000
+                elif change == "flatness":
+                    row["flatness"] = -1
+                elif change == "status":
+                    row["spectral_status"] = "below-floor"
+                else:
+                    row["start_sample"] = True
+                with self.subTest(change=change), mock.patch.object(checks, "_run", return_value=report):
+                    with self.assertRaises(evidence.EvidenceError):
+                        checks.note_phases("note", 3200, 19200, frames=True)
+            with mock.patch.object(checks, "_run", return_value=original):
+                with self.assertRaises(evidence.EvidenceError):
+                    checks.note_phases("note", 3200, 19200)
+            with self.assertRaises(evidence.EvidenceError):
+                checks.note_phases("note", 3200, 19200, frames=1)
+            with self.assertRaises(evidence.EvidenceError):
+                cache.note_phases(checks, "note", 3200, 19200, frames=1)
+            result = cache.note_phases(checks, "note", 3200, 19200, frames=True)
+            result.report["frame_series"]["rows"].clear()
+            self.assertTrue(cache.note_phases(checks, "note", 3200, 19200,
+                                             frames=True).report["frame_series"]["rows"])
+            for variant in ({"silence": True}, {"second": True}, {"tail_seconds": 0.05}):
+                recording(path, **variant)
+                current = evidence.AnalyzerEvidence(ANALYZER, {"note": (path, fit.sha256(path))})
+                current.note_phases("note", 3200, 19200, frames=True)
 
     def test_envelope_evidence_cache_and_fit(self):
         fit = load_fit_tests().MODULE
@@ -623,6 +846,12 @@ class NotePhasesTests(unittest.TestCase):
             fit.sha256(ANALYZER), fit.sha256(IOWA_RECORDING), fit.sha256(IOWA_RECORDING))
         self.assertEqual(result["absolute_delta"], 0.0)
         self.assertGreater(result["reference_value"], 0.0)
+        checks = fit.analyzer_evidence_module().AnalyzerEvidence(ANALYZER, {
+            "note": (IOWA_RECORDING, fit.sha256(IOWA_RECORDING))})
+        frames = checks.note_phases("note", 44100, 88200, frames=True,
+                                    options={"tail_limit_seconds": 4}).report["frame_series"]["rows"]
+        self.assertTrue(frames)
+        self.assertEqual({r["phase"] for r in frames}, {"attack", "sustain", "release", "clean-tail"})
 
 
 if __name__ == "__main__":

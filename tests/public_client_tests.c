@@ -52,6 +52,18 @@ int main(void)
         hwa_note_phase_result_free(&phases);
         hwa_note_phase_result_free(&phases);
         {
+            HWANotePhaseFramesResult frames;
+            memset(&frames, 0xA5, sizeof(frames));
+            if (hwa_analyze_note_phase_frames_wav(NULL, &options, &frames,
+                    error, sizeof(error)) == 0 || frames.envelope.summary.path != NULL ||
+                    frames.frames != NULL || frames.frame_count != 0U || error[0] == '\0') return 1;
+            hwa_note_phase_frames_result_free(&frames);
+            hwa_note_phase_frames_result_free(&frames);
+            if (hwa_analyze_note_phase_frames_wav(NULL, &options, NULL,
+                    error, sizeof(error)) == 0 || error[0] == '\0') return 1;
+            hwa_note_phase_frames_result_free(NULL);
+        }
+        {
             HWANotePhaseEnvelopeResult envelope;
             memset(&envelope, 0xA5, sizeof(envelope));
             if (hwa_analyze_note_phase_envelope_wav(NULL, &options, &envelope,
