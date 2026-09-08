@@ -23,12 +23,20 @@ int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
                 ",\"note_end_sample\":%" PRIu64
                 ",\"boundary_frame_size\":%zu,\"boundary_hop_size\":%zu"
                 ",\"measurement_fft_size\":%zu,\"measurement_hop_size\":%zu"
+                ",\"boundary_search_seconds\":%.17g,\"tail_limit_seconds\":%.17g"
+                ",\"min_phase_seconds\":%.17g,\"min_body_seconds\":%.17g"
+                ",\"silence_threshold_dbfs\":%.17g"
                 ",\"next_onset_sample\":",
                 result->audio_sha256, result->format.sample_rate_hz,
                 result->format.frames, result->options.note_start_sample,
                 result->options.note_end_sample, result->options.analysis.frame_size,
                 result->options.analysis.hop_size, result->options.measurement.fft_size,
-                result->options.measurement.hop_size) < 0) goto done;
+                result->options.measurement.hop_size,
+                result->options.segmentation.boundary_search_seconds,
+                result->options.segmentation.tail_limit_seconds,
+                result->options.segmentation.min_phase_seconds,
+                result->options.segmentation.min_body_seconds,
+                result->options.analysis.silence_threshold_dbfs) < 0) goto done;
     if (result->next_onset_valid) {
         if (fprintf(stream, "%" PRIu64, result->next_onset_sample) < 0) goto done;
     } else if (fputs("null", stream) == EOF) goto done;

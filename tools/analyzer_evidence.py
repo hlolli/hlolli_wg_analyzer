@@ -113,6 +113,39 @@ NOTE_PHASE_UNITS = {
     "centroid_slope_hz_per_second": "Hz/s", "duration_seconds": "seconds",
 }
 
+NOTE_PHASE_OPTIONS = {
+    "boundary_frame_size": ("--frame-size", 2048, 256, 16384),
+    "boundary_hop_size": ("--hop-size", 512, 1, 16384),
+    "measurement_fft_size": ("--measure-fft-size", 4096, 256, 16384),
+    "measurement_hop_size": ("--measure-hop-size", 256, 1, 16384),
+    "boundary_search_seconds": ("--boundary-search", 0.15, 0, 10),
+    "tail_limit_seconds": ("--tail-limit", 1.5, 0, 10),
+    "min_phase_seconds": ("--min-phase", 0.02, 0, 1),
+    "min_body_seconds": ("--min-body", 0.05, 0, 2),
+    "silence_threshold_dbfs": ("--silence-threshold", -60.0, -200, 0),
+}
+
+
+def note_phase_options(options: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Resolve phase settings without changing the caller's manifest."""
+    if options is None:
+        options = {}
+    if type(options) is not dict or set(options) - set(NOTE_PHASE_OPTIONS):
+        raise EvidenceError("note-phase options must contain only known settings")
+    result = {}
+    for name, (_, default, minimum, maximum) in NOTE_PHASE_OPTIONS.items():
+        raw = options.get(name, default)
+        value = _count(raw, name) if type(default) is int else _finite(raw, name)
+        if not minimum <= value <= maximum:
+            raise EvidenceError("note-phase option is out of range: " + name)
+        result[name] = value
+    for window, hop in (("boundary_frame_size", "boundary_hop_size"),
+                        ("measurement_fft_size", "measurement_hop_size")):
+        size = result[window]
+        if size & (size - 1) or result[hop] > size:
+            raise EvidenceError("note-phase window must be a power of two and contain its hop")
+    return result
+
 
 @dataclass(frozen=True)
 class NotePhaseEvidence:
@@ -560,16 +593,22 @@ class AnalyzerEvidence:
 
     def note_phases(
             self, source_id: str, start_sample: int,
-            end_sample: int) -> NotePhaseEvidence:
+            end_sample: int, *, options: Optional[dict[str, Any]] = None
+            ) -> NotePhaseEvidence:
         """Measure the phases around a caller-supplied note span."""
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
             raise EvidenceError("note span must have increasing sample bounds")
+        settings = note_phase_options(options)
         path = self._source(source_id)
-        report = self._run([
+        arguments = [
             "note-phases", str(path), "--note-start-sample", str(start),
-            "--note-end-sample", str(end)], source_id + " note phases")
+            "--note-end-sample", str(end)]
+        for name, value in settings.items():
+            arguments.extend([NOTE_PHASE_OPTIONS[name][0],
+                              str(value) if type(value) is int else format(value, ".17g")])
+        report = self._run(arguments, source_id + " note phases")
         if (report.get("schema") != "hwa-note-phases" or
                 type(report.get("schema_version")) is not int or
                 report["schema_version"] != 1 or
@@ -584,11 +623,11 @@ class AnalyzerEvidence:
         frames = _count(report.get("frames"), "source frames")
         if rate == 0 or frames < end:
             raise EvidenceError("note-phases has an invalid source clock")
-        for name, expected in (("boundary_frame_size", 2048),
-                ("boundary_hop_size", 512), ("measurement_fft_size", 4096),
-                ("measurement_hop_size", 256)):
-            if _count(report.get(name), name) != expected:
-                raise EvidenceError("note-phases analysis grid changed")
+        for name, expected in settings.items():
+            actual = (_count(report.get(name), name) if type(expected) is int
+                      else _finite(report.get(name), name))
+            if actual != expected:
+                raise EvidenceError("note-phases analysis setting changed: " + name)
         next_onset = report.get("next_onset_sample")
         if next_onset is not None and _count(next_onset, "next onset") >= frames:
             raise EvidenceError("note-phases next onset exceeds the source")

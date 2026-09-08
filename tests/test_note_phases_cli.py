@@ -26,13 +26,13 @@ def load_fit_tests():
 
 
 def recording(path, second=False, silence=False, sustain_gain=0.3,
-              tail_seconds=1.4, rate=16000):
+              tail_seconds=1.4, rate=16000, decay_seconds=0.18):
     raw = bytearray()
     for i in range(round((1.2 + tail_seconds) * rate)):
         t = i / rate
         envelope = min(1.0, max(0.0, (t - 0.2) / 0.08))
         if t > 1.2:
-            envelope *= math.exp(-(t - 1.2) / 0.18)
+            envelope *= math.exp(-(t - 1.2) / decay_seconds)
         value = sustain_gain * envelope * (
             math.sin(math.tau * 220.0 * t) +
             0.3 * math.sin(math.tau * 660.0 * t))
@@ -123,7 +123,9 @@ class NotePhasesTests(unittest.TestCase):
             original["objectives"][0].update(
                 kind="note-phase", phase="sustain", metric="rms_dbfs",
                 reference_span=[3200, 19200], model_span=[3200, 19200])
-            for change in ("phase", "metric", "reversed", "bool", "v2"):
+            for change in ("phase", "metric", "reversed", "bool", "v2",
+                           "settings-null", "settings-range", "settings-typo",
+                           "settings-other-kind"):
                 manifest = copy.deepcopy(original)
                 row = manifest["objectives"][0]
                 if change in ("phase", "metric"):
@@ -132,8 +134,16 @@ class NotePhasesTests(unittest.TestCase):
                     row["model_span"] = [19200, 3200]
                 elif change == "bool":
                     row["reference_span"] = [False, 19200]
-                else:
+                elif change == "v2":
                     manifest["schema_version"] = 2
+                elif change == "settings-null":
+                    row["phase_options"] = None
+                elif change == "settings-range":
+                    row["phase_options"] = {"tail_limit_seconds": 11}
+                elif change == "settings-typo":
+                    row["phase_options"] = {"tail_limit": 4}
+                else:
+                    row.update(kind="body-envelope", phase_options={})
                 fixture["manifest"].write_text(json.dumps(manifest))
                 with self.subTest(change=change):
                     with self.assertRaises(fixtures.MODULE.FitError):
@@ -196,12 +206,13 @@ class NotePhasesTests(unittest.TestCase):
                            reference_span=[3200, 19200], model_span=[3200, 19200])
             fixture["manifest"].write_text(json.dumps(manifest))
             for path in fixture["references"].values():
-                recording(path)
+                recording(path, tail_seconds=4, decay_seconds=0.6)
             experiment = json.loads(fixture["experiment"].read_text())
             for artifact in experiment["artifacts"]:
                 path = root / artifact["artifact"]["path"]
                 job = next(row for row in experiment["jobs"] if row["id"] == artifact["job_id"])
-                recording(path, sustain_gain=0.15 if job["point_id"] == 1 else 0.3)
+                recording(path, sustain_gain=0.15 if job["point_id"] == 1 else 0.3,
+                          tail_seconds=4, decay_seconds=0.6)
                 artifact["artifact"]["sha256"] = fixtures.MODULE.sha256(path)
                 artifact["file_bytes"] = path.stat().st_size
             fixture["experiment"].write_text(json.dumps(experiment))
@@ -211,6 +222,89 @@ class NotePhasesTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             result = json.loads(output.read_text())
             self.assertEqual(result["chosen_point_id"], 2)
+            settings = {"tail_limit_seconds": 4, "boundary_hop_size": 128,
+                        "measurement_fft_size": 2048, "measurement_hop_size": 128}
+            for row in manifest["objectives"]:
+                row.update(phase="clean-tail", phase_options=settings)
+            fixture["manifest"].write_text(json.dumps(manifest))
+            before = fixture["manifest"].read_bytes()
+            output = root / "tail-result.json"
+            process = subprocess.run(fixtures.select_v1_command(fixture, output),
+                                     capture_output=True, text=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(fixture["manifest"].read_bytes(), before)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["chosen_point_id"], 2)
+            expected = fixtures.MODULE.analyzer_evidence_module().note_phase_options(settings)
+            for point in result["points"]:
+                for row in point["evidence"]:
+                    self.assertEqual(row["phase_options"], expected)
+
+    def test_fit_can_measure_a_slow_tail_with_explicit_settings(self):
+        fit = load_fit_tests().MODULE
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.wav"
+            model = Path(directory) / "model.wav"
+            recording(reference, tail_seconds=4, decay_seconds=0.6)
+            recording(model, tail_seconds=4, decay_seconds=0.6)
+            objective = {"phase": "clean-tail", "metric": "level_slope_db_per_second",
+                         "reference_span": [3200, 19200], "model_span": [3200, 19200]}
+            def measure():
+                return fit.run_note_phase(ANALYZER, reference, model, objective,
+                    fit.sha256(ANALYZER), fit.sha256(reference), fit.sha256(model))
+            with self.assertRaisesRegex(fit.FitError, "truncated"):
+                measure()
+            objective["phase_options"] = {
+                "tail_limit_seconds": 4, "boundary_frame_size": 1024,
+                "boundary_hop_size": 128, "measurement_fft_size": 2048,
+                "measurement_hop_size": 128, "boundary_search_seconds": 0.1,
+                "silence_threshold_dbfs": -65, "min_phase_seconds": 0.01,
+                "min_body_seconds": 0.04,
+            }
+            result = measure()
+            self.assertEqual(result["absolute_delta"], 0.0)
+            self.assertEqual(result["phase_options"], objective["phase_options"])
+            self.assertLess(result["reference_value"], -10)
+
+    def test_phase_settings_are_validated_before_running(self):
+        evidence = load_fit_tests().MODULE.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {
+                "note": (path, hashlib.sha256(path.read_bytes()).hexdigest())})
+            invalid = [[], {"typo": 4}, {"tail_limit_seconds": True},
+                {"tail_limit_seconds": float("inf")}, {"tail_limit_seconds": 11},
+                {"tail_limit_seconds": -1}, {"boundary_frame_size": 1000},
+                {"boundary_frame_size": 1024.0}, {"boundary_hop_size": 4096},
+                {"measurement_fft_size": 128}, {"measurement_hop_size": 0},
+                {"silence_threshold_dbfs": -201}]
+            for options in invalid:
+                with self.subTest(options=options), mock.patch.object(checks, "_run") as run:
+                    with self.assertRaises(evidence.EvidenceError):
+                        checks.note_phases("note", 3200, 19200, options=options)
+                    run.assert_not_called()
+
+    def test_checker_rejects_wrong_or_missing_phase_settings(self):
+        evidence = load_fit_tests().MODULE.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {
+                "note": (path, hashlib.sha256(path.read_bytes()).hexdigest())})
+            options = {"tail_limit_seconds": 4}
+            original = checks.note_phases("note", 3200, 19200, options=options).report
+            for key in evidence.note_phase_options():
+                for missing in (False, True):
+                    report = copy.deepcopy(original)
+                    if missing:
+                        del report[key]
+                    else:
+                        report[key] += 0.125
+                    with self.subTest(key=key, missing=missing), mock.patch.object(
+                            checks, "_run", return_value=report):
+                        with self.assertRaises(evidence.EvidenceError):
+                            checks.note_phases("note", 3200, 19200, options=options)
 
     def test_iowa_recording_tail_limit(self):
         if IOWA_RECORDING is None:
@@ -229,6 +323,14 @@ class NotePhasesTests(unittest.TestCase):
             self.assertEqual(report["phases"][0]["status"], "valid")
         self.assertEqual(reports[0]["phases"][3]["status"], "truncated")
         self.assertEqual(reports[1]["phases"][3]["status"], "valid")
+        fit = load_fit_tests().MODULE
+        result = fit.run_note_phase(ANALYZER, IOWA_RECORDING, IOWA_RECORDING,
+            {"phase": "clean-tail", "metric": "level_slope_db_per_second",
+             "reference_span": [44100, 88200], "model_span": [44100, 88200],
+             "phase_options": {"tail_limit_seconds": 4}},
+            fit.sha256(ANALYZER), fit.sha256(IOWA_RECORDING), fit.sha256(IOWA_RECORDING))
+        self.assertEqual(result["absolute_delta"], 0.0)
+        self.assertEqual(result["reference_end_sample"], reports[1]["phases"][3]["end_sample"])
 
 
 if __name__ == "__main__":
