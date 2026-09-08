@@ -51,6 +51,17 @@ int main(void)
             phases.path != NULL || error[0] == '\0') return 1;
         hwa_note_phase_result_free(&phases);
         hwa_note_phase_result_free(&phases);
+        {
+            HWANotePhaseEnvelopeResult envelope;
+            memset(&envelope, 0xA5, sizeof(envelope));
+            if (hwa_analyze_note_phase_envelope_wav(NULL, &options, &envelope,
+                    error, sizeof(error)) == 0 || envelope.summary.path != NULL ||
+                    envelope.attack_envelope_bins != 0U || error[0] == '\0') return 1;
+            hwa_note_phase_envelope_result_free(&envelope);
+            hwa_note_phase_envelope_result_free(&envelope);
+            if (hwa_analyze_note_phase_envelope_wav(NULL, &options, NULL,
+                    error, sizeof(error)) == 0 || error[0] == '\0') return 1;
+        }
     }
     return 0;
 }

@@ -3,4 +3,5 @@
 #include "hlolli_wg_analyzer.h"
 #include <stdio.h>
 int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result);
+int hwa_note_phase_envelope_report_json(FILE *stream, const HWANotePhaseEnvelopeResult *result);
 #endif

@@ -115,6 +115,25 @@ NOTE_PHASE_UNITS = {
     "centroid_slope_hz_per_second": "Hz/s", "duration_seconds": "seconds",
 }
 
+NOTE_PHASE_ENVELOPE_UNITS = {
+    "crest_db": "dB", "level_modulation_spread_db": "dB",
+    "centroid_modulation_spread_hz": "Hz",
+}
+NOTE_PHASE_ATTACK_UNITS = {
+    "rise_10_seconds": "seconds", "rise_50_seconds": "seconds",
+    "rise_90_seconds": "seconds", "attack_slope_db_per_second": "dB/s",
+    "attack_overshoot_db": "dB",
+}
+
+
+def note_phase_metric_units(phase: str, *, envelope: bool = False) -> dict[str, str]:
+    result = dict(NOTE_PHASE_UNITS)
+    if envelope:
+        result.update(NOTE_PHASE_ENVELOPE_UNITS)
+        if phase == "attack":
+            result.update(NOTE_PHASE_ATTACK_UNITS)
+    return result
+
 NOTE_PHASE_OPTIONS = {
     "boundary_frame_size": ("--frame-size", 2048, 256, 16384),
     "boundary_hop_size": ("--hop-size", 512, 1, 16384),
@@ -167,7 +186,10 @@ class NotePhaseCache:
     def note_phases(
             self, checks: AnalyzerEvidence, source_id: str,
             start_sample: int, end_sample: int, *,
-            options: Optional[dict[str, Any]] = None) -> NotePhaseEvidence:
+            options: Optional[dict[str, Any]] = None,
+            envelope: bool = False) -> NotePhaseEvidence:
+        if type(envelope) is not bool:
+            raise EvidenceError("note-phase envelope must be a boolean")
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -176,7 +198,7 @@ class NotePhaseCache:
         source = checks._source(source_id)
         key = (checks._analyzer, checks.analyzer_sha256,
                source, checks._sources[source_id][1], start, end,
-               tuple(settings.items()), checks._cwd or Path.cwd(),
+               tuple(settings.items()), envelope, checks._cwd or Path.cwd(),
                tuple(sorted(checks._environment.items())))
         cached = self._reports.get(key)
         if cached is not None:
@@ -185,7 +207,8 @@ class NotePhaseCache:
             checks._verify_inputs("during cached note phases")
             self._reports.move_to_end(key)
             return result
-        result = checks.note_phases(source_id, start, end, options=settings)
+        result = checks.note_phases(source_id, start, end, options=settings,
+                                   envelope=envelope)
         self._reports[key] = copy.deepcopy(result)
         if len(self._reports) > self._max_entries:
             self._reports.popitem(last=False)
@@ -632,9 +655,12 @@ class AnalyzerEvidence:
 
     def note_phases(
             self, source_id: str, start_sample: int,
-            end_sample: int, *, options: Optional[dict[str, Any]] = None
+            end_sample: int, *, options: Optional[dict[str, Any]] = None,
+            envelope: bool = False
             ) -> NotePhaseEvidence:
         """Measure the phases around a caller-supplied note span."""
+        if type(envelope) is not bool:
+            raise EvidenceError("note-phase envelope must be a boolean")
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -644,6 +670,8 @@ class AnalyzerEvidence:
         arguments = [
             "note-phases", str(path), "--note-start-sample", str(start),
             "--note-end-sample", str(end)]
+        if envelope:
+            arguments.append("--phase-envelope")
         for name, value in settings.items():
             arguments.extend([NOTE_PHASE_OPTIONS[name][0],
                               str(value) if type(value) is int else format(value, ".17g")])
@@ -658,6 +686,13 @@ class AnalyzerEvidence:
                 _count(report.get("note_start_sample"), "start") != start or
                 _count(report.get("note_end_sample"), "end") != end):
             raise EvidenceError("note-phases returned an unknown contract")
+        if envelope:
+            if (report.get("envelope_method") != "note-phase-envelope-1" or
+                    type(report.get("attack_envelope_bins")) is not int or
+                    report["attack_envelope_bins"] != 16):
+                raise EvidenceError("note-phase envelope returned an unknown contract")
+        elif "envelope_method" in report or "attack_envelope_bins" in report:
+            raise EvidenceError("note-phases returned an unrequested envelope")
         rate = _count(report.get("sample_rate_hz"), "sample rate")
         frames = _count(report.get("frames"), "source frames")
         if rate == 0 or frames < end:
@@ -695,9 +730,10 @@ class AnalyzerEvidence:
                     next_onset is None or last <= next_onset):
                 raise EvidenceError("note-phases has inconsistent interruption")
             metrics = row.get("metrics")
-            if type(metrics) is not dict or set(metrics) != set(NOTE_PHASE_UNITS):
+            units = note_phase_metric_units(name, envelope=envelope)
+            if type(metrics) is not dict or set(metrics) != set(units):
                 raise EvidenceError("note-phases metric set changed")
-            for metric_name, unit in NOTE_PHASE_UNITS.items():
+            for metric_name, unit in units.items():
                 value = metrics[metric_name]
                 if (type(value) is not dict or value.get("unit") != unit or
                         value.get("status") not in (
@@ -718,8 +754,29 @@ class AnalyzerEvidence:
                         raise EvidenceError("phase duration disagrees with its bounds")
                     if metric_name == "centroid_hz" and not 0.0 <= actual <= rate/2:
                         raise EvidenceError("phase centroid exceeds the source clock")
+                    if metric_name not in NOTE_PHASE_UNITS and actual < 0:
+                        raise EvidenceError("phase envelope measurement is negative")
+                    if metric_name.startswith("rise_") and actual > (last-first)/rate:
+                        raise EvidenceError("phase rise time exceeds its bounds")
                 elif value.get("value") is not None:
                     raise EvidenceError("invalid phase measurement must be null")
+            if envelope:
+                def valid_values(*keys: str) -> bool:
+                    return all(metrics[key]["status"] == "valid" for key in keys)
+
+                if valid_values("crest_db", "peak_dbfs", "rms_dbfs"):
+                    _body_number(metrics["crest_db"]["value"],
+                                 metrics["peak_dbfs"]["value"] - metrics["rms_dbfs"]["value"],
+                                 "phase crest")
+                rises = ("rise_10_seconds", "rise_50_seconds", "rise_90_seconds")
+                if name == "attack" and valid_values(*rises):
+                    times = [metrics[key]["value"] for key in rises]
+                    if times != sorted(times):
+                        raise EvidenceError("phase rise times are out of order")
+                    if valid_values("attack_slope_db_per_second"):
+                        expected = 20 * math.log10(9) / (times[2] - times[0]) if times[2] > times[0] else 0
+                        _body_number(metrics["attack_slope_db_per_second"]["value"],
+                                     expected, "phase attack slope")
             phases[name] = row
             previous_end = last
         return NotePhaseEvidence(report, phases)

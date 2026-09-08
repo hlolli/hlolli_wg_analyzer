@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ def load_fit_tests():
 
 
 def recording(path, second=False, silence=False, sustain_gain=0.3,
-              tail_seconds=1.4, rate=16000, decay_seconds=0.18):
+              tail_seconds=1.4, rate=16000, decay_seconds=0.18,
+              modulation_db=0.0):
     raw = bytearray()
     for i in range(round((1.2 + tail_seconds) * rate)):
         t = i / rate
@@ -37,6 +39,8 @@ def recording(path, second=False, silence=False, sustain_gain=0.3,
         value = sustain_gain * envelope * (
             math.sin(math.tau * 220.0 * t) +
             0.3 * math.sin(math.tau * 660.0 * t))
+        if 0.4 <= t <= 1.1:
+            value *= 10 ** (modulation_db * math.sin(math.tau * 5 * (t - 0.4)) / 20)
         if second and t >= 1.45:
             value += 0.45 * math.exp(-(t - 1.45) / 0.2) * math.sin(math.tau * 330.0 * t)
         if silence:
@@ -82,6 +86,90 @@ class NotePhasesTests(unittest.TestCase):
             self.assertLess(phases[2]["metrics"]["level_slope_db_per_second"]["value"], 0.0)
             self.assertGreater(phases[1]["metrics"]["centroid_hz"]["value"], 200.0)
 
+    def test_attack_window_contains_the_known_rise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            report = self.run_report(path)
+            attack = report["phases"][0]
+            self.assertGreater(attack["end_sample"], 3200,
+                             "attack ends before the first nonzero sample")
+            self.assertGreaterEqual(attack["end_sample"], 4480,
+                                    "fallback cuts off the known 80 ms rise")
+            self.assertEqual(report["phases"][1]["boundary_confidence"], 0.0)
+            self.assertEqual(attack["metrics"]["rms_dbfs"]["status"], "valid")
+
+    def test_envelope_metrics_match_samples_and_preserve_basic_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            basic = self.run_report(path)
+            extended = self.run_report(path, "--phase-envelope")
+            self.assertEqual(extended.pop("envelope_method"), "note-phase-envelope-1")
+            bins = extended.pop("attack_envelope_bins")
+            self.assertEqual(bins, 16)
+            attack = extended["phases"][0]
+            first, last = attack["start_sample"], attack["end_sample"]
+            with wave.open(str(path)) as audio:
+                samples = struct.unpack("<" + str(audio.getnframes()) + "h",
+                                        audio.readframes(audio.getnframes()))
+            rms = []
+            for index in range(bins):
+                span = samples[first + (last-first)*index//bins:
+                               first + (last-first)*(index+1)//bins]
+                rms.append(math.sqrt(sum(x*x for x in span) / len(span)) / 32768)
+            peak = max(rms)
+            rises = []
+            for percent in (10, 50, 90):
+                index = next(i for i, value in enumerate(rms) if value >= peak * percent/100)
+                expected = (index + 0.5) * (last-first) / bins / 16000
+                value = attack["metrics"]["rise_" + str(percent) + "_seconds"]
+                self.assertEqual(value["status"], "valid")
+                self.assertAlmostEqual(value["value"], expected, places=12)
+                rises.append(value["value"])
+            self.assertAlmostEqual(attack["metrics"]["attack_slope_db_per_second"]["value"],
+                                   20 * math.log10(9) / (rises[2] - rises[0]), places=8)
+            overshoot = 20 * math.log10(peak) - sum(20 * math.log10(v) for v in rms[-4:])/4
+            self.assertAlmostEqual(attack["metrics"]["attack_overshoot_db"]["value"],
+                                   overshoot, places=8)
+            for before, after in zip(basic["phases"], extended["phases"]):
+                for name in set(after["metrics"]) - set(before["metrics"]):
+                    del after["metrics"][name]
+            self.assertEqual(extended, basic)
+
+    def test_envelope_rejections_and_variation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            steady = self.run_report(path, "--phase-envelope")
+            recording(path, modulation_db=4)
+            varying = self.run_report(path, "--phase-envelope")
+            key = "level_modulation_spread_db"
+            self.assertGreater(varying["phases"][1]["metrics"][key]["value"],
+                               steady["phases"][1]["metrics"][key]["value"] + 0.5)
+            for phase in varying["phases"]:
+                metrics = phase["metrics"]
+                if metrics["crest_db"]["status"] == "valid":
+                    self.assertAlmostEqual(metrics["crest_db"]["value"],
+                        metrics["peak_dbfs"]["value"] - metrics["rms_dbfs"]["value"], places=8)
+                if phase["phase"] != "attack":
+                    self.assertNotIn("rise_90_seconds", metrics)
+            recording(path, second=True)
+            interrupted = self.run_report(path, "--phase-envelope")
+            self.assertTrue(all(v["value"] is None for v in interrupted["phases"][3]["metrics"].values()))
+            self.run_report(path, "--phase-envelope", "--phase-envelope", expected=2)
+            process = subprocess.run([str(ANALYZER), "inspect", str(path), "--phase-envelope"],
+                                     capture_output=True)
+            self.assertEqual(process.returncode, 2)
+            recording(path, silence=True)
+            silent = self.run_report(path, "--phase-envelope")
+            self.assertTrue(all(v["value"] is None for phase in silent["phases"]
+                                for v in phase["metrics"].values()))
+            recording(path, tail_seconds=0.35)
+            truncated = self.run_report(path, "--phase-envelope")["phases"][3]
+            self.assertEqual(truncated["status"], "truncated")
+            self.assertTrue(all(v["value"] is None for v in truncated["metrics"].values()))
+
     def test_next_note_rejects_tail_and_exposes_no_score(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interrupted.wav"
@@ -109,6 +197,11 @@ class NotePhasesTests(unittest.TestCase):
             first = self.run_report(path, "--block-frames", "97")
             second = self.run_report(path, "--block-frames", "4096")
             self.assertEqual(first, second)
+            self.assertEqual(
+                self.run_report(path, "--phase-envelope", "--block-frames", "97"),
+                self.run_report(path, "--phase-envelope", "--block-frames", "4096"))
+            for limit in ("--max-work-bytes", "--max-boundary-evaluations", "--max-measurements"):
+                self.run_report(path, "--phase-envelope", limit, "1", expected=1)
             self.run_report(path, "--max-work-bytes", "1", expected=1)
             self.run_report(path, "--max-boundary-evaluations", "1", expected=1)
             self.run_report(path, "--max-measurements", "1", expected=1)
@@ -126,7 +219,7 @@ class NotePhasesTests(unittest.TestCase):
                 reference_span=[3200, 19200], model_span=[3200, 19200])
             for change in ("phase", "metric", "reversed", "bool", "v2",
                            "settings-null", "settings-range", "settings-typo",
-                           "settings-other-kind"):
+                           "settings-other-kind", "attack-only"):
                 manifest = copy.deepcopy(original)
                 row = manifest["objectives"][0]
                 if change in ("phase", "metric"):
@@ -143,6 +236,8 @@ class NotePhasesTests(unittest.TestCase):
                     row["phase_options"] = {"tail_limit_seconds": 11}
                 elif change == "settings-typo":
                     row["phase_options"] = {"tail_limit": 4}
+                elif change == "attack-only":
+                    row["metric"] = "rise_90_seconds"
                 else:
                     row.update(kind="body-envelope", phase_options={})
                 fixture["manifest"].write_text(json.dumps(manifest))
@@ -175,6 +270,58 @@ class NotePhasesTests(unittest.TestCase):
                         checks, "_run", return_value=report):
                     with self.assertRaises(evidence.EvidenceError):
                         checks.note_phases("note", 3200, 19200)
+
+    def test_envelope_evidence_cache_and_fit(self):
+        fit = load_fit_tests().MODULE
+        evidence = fit.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.wav"
+            model = Path(directory) / "model.wav"
+            recording(reference)
+            recording(model, modulation_db=4)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {
+                "note": (reference, fit.sha256(reference))})
+            cache = evidence.NotePhaseCache()
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                basic = cache.note_phases(checks, "note", 3200, 19200)
+                extra = cache.note_phases(checks, "note", 3200, 19200, envelope=True)
+                self.assertEqual(cache.note_phases(checks, "note", 3200, 19200), basic)
+                self.assertEqual(cache.note_phases(checks, "note", 3200, 19200,
+                                                  envelope=True), extra)
+                self.assertEqual(run.call_count, 2)
+            for change in ("method", "bins", "crest", "negative", "rise", "slope"):
+                report = copy.deepcopy(extra.report)
+                metrics = report["phases"][0]["metrics"]
+                if change == "method":
+                    report["envelope_method"] = "invented"
+                elif change == "bins":
+                    report["attack_envelope_bins"] = 32
+                elif change == "crest":
+                    metrics["crest_db"]["value"] += 1
+                elif change == "negative":
+                    metrics["level_modulation_spread_db"]["value"] = -1
+                elif change == "rise":
+                    metrics["rise_10_seconds"]["value"] = 10
+                else:
+                    metrics["attack_slope_db_per_second"]["value"] += 1
+                with self.subTest(change=change), mock.patch.object(checks, "_run", return_value=report):
+                    with self.assertRaises(evidence.EvidenceError):
+                        checks.note_phases("note", 3200, 19200, envelope=True)
+            for runner in (checks, cache):
+                args = ("note", 3200, 19200) if runner is checks else (checks, "note", 3200, 19200)
+                with self.assertRaises(evidence.EvidenceError):
+                    runner.note_phases(*args, envelope=1)
+            objective = {"kind": "note-phase", "phase": "sustain",
+                         "metric": "level_modulation_spread_db",
+                         "reference_span": [3200, 19200], "model_span": [3200, 19200]}
+            def measure():
+                return fit.run_note_phase(ANALYZER, reference, model, objective,
+                    fit.sha256(ANALYZER), fit.sha256(reference), fit.sha256(model), cache=cache)
+            self.assertGreater(measure()["absolute_delta"], 0.5)
+            objective.update(phase="attack", metric="rise_90_seconds")
+            self.assertEqual(measure()["absolute_delta"], 0)
+            self.assertEqual(fit.passive_method_versions([objective]), {
+                "note_phases": "note-phases-1", "note_phase_envelope": "note-phase-envelope-1"})
 
     def test_fit_measures_gain_and_rejects_interrupted_tail(self):
         fit = load_fit_tests().MODULE
@@ -263,6 +410,20 @@ class NotePhasesTests(unittest.TestCase):
                 results.append(json.loads(output.read_text()))
             self.assertEqual(results[0], results[1])
             self.assertEqual(results[0], results[2])
+            for row in manifest["objectives"]:
+                row.update(phase="attack", metric="rise_90_seconds")
+            fixture["manifest"].write_text(json.dumps(manifest))
+            output = root / "envelope-result.json"
+            process = subprocess.run(fixtures.select_v1_command(fixture, output),
+                                     capture_output=True, text=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["method_versions"]["note_phase_envelope"],
+                             "note-phase-envelope-1")
+            for point in result["points"]:
+                for row in point["evidence"]:
+                    self.assertEqual(row["metric"], "rise_90_seconds")
+                    self.assertEqual(row["unit"], "seconds")
 
     def test_fit_can_measure_a_slow_tail_with_explicit_settings(self):
         fit = load_fit_tests().MODULE
@@ -456,6 +617,12 @@ class NotePhasesTests(unittest.TestCase):
             fit.sha256(ANALYZER), fit.sha256(IOWA_RECORDING), fit.sha256(IOWA_RECORDING))
         self.assertEqual(result["absolute_delta"], 0.0)
         self.assertEqual(result["reference_end_sample"], reports[1]["phases"][3]["end_sample"])
+        result = fit.run_note_phase(ANALYZER, IOWA_RECORDING, IOWA_RECORDING,
+            {"phase": "attack", "metric": "rise_90_seconds",
+             "reference_span": [44100, 88200], "model_span": [44100, 88200]},
+            fit.sha256(ANALYZER), fit.sha256(IOWA_RECORDING), fit.sha256(IOWA_RECORDING))
+        self.assertEqual(result["absolute_delta"], 0.0)
+        self.assertGreater(result["reference_value"], 0.0)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
 ANALYZER_EVIDENCE_SHA256 = (
-    "5961eb3b493c16c281c809793ed222547a79f7f048866ed7a1773782ccfa7c06"
+    "8320bd9058f81a3ead6b7c20396363f1d730d66eb7275c7b65eecdb300108be5"
 )
 _ANALYZER_EVIDENCE = None
 
@@ -286,7 +286,8 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
                 raise FitError("note-phase objectives require fit manifest v1")
             if row.get("phase") not in ("attack", "sustain", "release", "clean-tail"):
                 raise FitError("note-phase objective has an invalid phase")
-            if row.get("metric") not in analyzer_evidence_module().NOTE_PHASE_UNITS:
+            if row.get("metric") not in analyzer_evidence_module().note_phase_metric_units(
+                    row["phase"], envelope=True):
                 raise FitError("note-phase objective has an invalid metric")
             if "phase_options" in row:
                 if type(row["phase_options"]) is not dict:
@@ -1000,13 +1001,16 @@ def run_note_phase(
     evidence = analyzer_evidence_module()
     try:
         settings = evidence.note_phase_options(objective.get("phase_options"))
+        envelope = objective["metric"] not in evidence.NOTE_PHASE_UNITS
         checks = evidence.AnalyzerEvidence(analyzer, {
             "reference": (reference, reference_hash), "model": (model, model_hash),
         }, analyzer_sha256=analyzer_hash)
         reports = {
-            name: (checks.note_phases(name, *objective[name + "_span"], options=settings)
+            name: (checks.note_phases(name, *objective[name + "_span"], options=settings,
+                                     envelope=envelope)
                    if cache is None else cache.note_phases(
-                       checks, name, *objective[name + "_span"], options=settings))
+                       checks, name, *objective[name + "_span"], options=settings,
+                       envelope=envelope))
             for name in ("reference", "model")
         }
     except evidence.EvidenceError as error:
@@ -1023,7 +1027,8 @@ def run_note_phase(
         values[name + "_end_sample"] = phase["end_sample"]
     return {"phase": objective["phase"], "metric": objective["metric"],
             "phase_options": settings,
-            "unit": evidence.NOTE_PHASE_UNITS[objective["metric"]],
+            "unit": evidence.note_phase_metric_units(
+                objective["phase"], envelope=envelope)[objective["metric"]],
             "absolute_delta": abs(values["model_value"] - values["reference_value"]),
             **values}
 
@@ -1617,6 +1622,10 @@ def passive_method_versions(objectives: list[dict[str, Any]]) -> dict[str, str]:
     result: dict[str, str] = {}
     if "note-phase" in kinds:
         result["note_phases"] = "note-phases-1"
+        if any(row["kind"] == "note-phase" and
+               row["metric"] not in analyzer_evidence_module().NOTE_PHASE_UNITS
+               for row in objectives):
+            result["note_phase_envelope"] = "note-phase-envelope-1"
     if kinds.intersection({"passive-decay", "passive-decay-shape"}):
         result["passive_decay"] = PASSIVE_DECAY_METHOD_VERSION
     if "passive-decay-shape" in kinds:

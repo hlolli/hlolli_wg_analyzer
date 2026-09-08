@@ -1011,8 +1011,54 @@ static void test_mode_and_bad_edit_rejection(void)
           "label work-size overflow was accepted");
 }
 
+static void test_unsettled_attack_fallback(void)
+{
+    HWAAnalysis analysis;
+    HWASegmentationOptions options;
+    HWAFrameMetrics tracks[80];
+    uint64_t bounds[5];
+    double confidence[4];
+    char error[HWA_ERROR_SIZE];
+    size_t index;
+
+    memset(&analysis, 0, sizeof(analysis));
+    memset(tracks, 0, sizeof(tracks));
+    hwa_segmentation_options_default(&options);
+    analysis.format.sample_rate_hz = 1000U;
+    analysis.format.frames = 800U;
+    analysis.options.frame_size = 40U;
+    analysis.options.hop_size = 10U;
+    analysis.options.silence_threshold_dbfs = -60.0;
+    analysis.tracks = tracks;
+    analysis.track_count = 80U;
+    for (index = 0U; index < 80U; ++index) {
+        tracks[index].rms_dbfs = index < 18U ? -120.0 : -30.0;
+        tracks[index].combined_onset_strength = index < 18U ? 0.0 : 0.8;
+    }
+    tracks[18].combined_onset_strength = 1.0;
+    CHECK(hwa_segmentation_note_bounds(&analysis, &options, 200U, 700U,
+                                      bounds, confidence, error, sizeof(error)) == 0,
+          "unsettled attack failed: %s", error);
+    CHECK(bounds[1] == 350U && confidence[1] == 0.0,
+          "unsettled body should start at the search end with no confidence");
+
+    options.min_phase_seconds = 0.2;
+    CHECK(hwa_segmentation_note_bounds(&analysis, &options, 200U, 700U,
+                                      bounds, confidence, error, sizeof(error)) == 0,
+          "minimum phase failed: %s", error);
+    CHECK(bounds[1] == 400U && confidence[1] == 0.0,
+          "fallback did not honor the longer minimum phase");
+
+    options.min_phase_seconds = 0.02;
+    CHECK(hwa_segmentation_note_bounds(&analysis, &options, 200U, 300U,
+                                      bounds, confidence, error, sizeof(error)) == 0,
+          "short note fallback failed: %s", error);
+    CHECK(bounds[1] <= 300U, "fallback exceeded the note end");
+}
+
 int main(void)
 {
+    test_unsettled_attack_fallback();
     test_score_roles_and_phases();
     test_typed_gestures();
     test_isolated_score_chord_once();

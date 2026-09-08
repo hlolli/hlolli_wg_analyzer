@@ -4,7 +4,21 @@
 #include "output.h"
 #include <inttypes.h>
 
-int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
+static int write_metric(FILE *stream, const HWAMeasureObservation *observation, int comma)
+{
+    if (fprintf(stream, "%s\"%s\":{\"unit\":\"%s\",\"status\":\"%s\",\"value\":",
+                comma ? "," : "", hwa_measure_kind_name(observation->kind),
+                hwa_measure_unit_name(observation->unit),
+                hwa_measure_status_name(observation->status)) < 0) return -1;
+    if (observation->status == HWA_MEASURE_STATUS_VALID) {
+        if (fprintf(stream, "%.17g", observation->value) < 0) return -1;
+    } else if (fputs("null", stream) == EOF) return -1;
+    return fprintf(stream, ",\"confidence\":%.17g,\"quality_flags\":%" PRIu32 "}",
+                   observation->confidence, observation->quality_flags) < 0 ? -1 : 0;
+}
+
+static int write_report(FILE *stream, const HWANotePhaseResult *result,
+                        const HWANotePhaseEnvelopeResult *envelope)
 {
     const char *names[4] = {"attack", "sustain", "release", "clean-tail"};
     const char *statuses[6] = {
@@ -40,6 +54,10 @@ int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
     if (result->next_onset_valid) {
         if (fprintf(stream, "%" PRIu64, result->next_onset_sample) < 0) goto done;
     } else if (fputs("null", stream) == EOF) goto done;
+    if (envelope != NULL && fprintf(stream,
+            ",\"envelope_method\":\"" HWA_NOTE_PHASE_ENVELOPE_METHOD_VERSION
+            "\",\"attack_envelope_bins\":%" PRIu32,
+            envelope->attack_envelope_bins) < 0) goto done;
     if (fputs(",\"phases\":[", stream) == EOF) goto done;
     for (index = 0U; index < HWA_NOTE_PHASE_COUNT; ++index) {
         const HWANotePhase *phase = &result->phases[index];
@@ -52,16 +70,13 @@ int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
                     (double)(phase->end_sample - phase->start_sample) / result->format.sample_rate_hz,
                     phase->boundary_confidence, statuses[phase->status]) < 0) goto done;
         for (metric = 0U; metric < HWA_NOTE_PHASE_METRIC_COUNT; ++metric) {
-            const HWAMeasureObservation *observation = &phase->metrics[metric];
-            if (fprintf(stream, "%s\"%s\":{\"unit\":\"%s\",\"status\":\"%s\",\"value\":",
-                        metric != 0U ? "," : "", hwa_measure_kind_name(observation->kind),
-                        hwa_measure_unit_name(observation->unit),
-                        hwa_measure_status_name(observation->status)) < 0) goto done;
-            if (observation->status == HWA_MEASURE_STATUS_VALID) {
-                if (fprintf(stream, "%.17g", observation->value) < 0) goto done;
-            } else if (fputs("null", stream) == EOF) goto done;
-            if (fprintf(stream, ",\"confidence\":%.17g,\"quality_flags\":%" PRIu32 "}",
-                        observation->confidence, observation->quality_flags) < 0) goto done;
+            if (write_metric(stream, &phase->metrics[metric], metric != 0U) != 0) goto done;
+        }
+        if (envelope != NULL) {
+            size_t count = index == 0U ? HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT : 3U;
+            for (metric = 0U; metric < count; ++metric) {
+                if (write_metric(stream, &envelope->metrics[index][metric], 1) != 0) goto done;
+            }
         }
         if (fputs("}}", stream) == EOF) goto done;
     }
@@ -69,4 +84,14 @@ int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
 done:
     if (hwa_c_numeric_locale_end(&locale) != 0) status = -1;
     return status;
+}
+
+int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
+{
+    return write_report(stream, result, NULL);
+}
+
+int hwa_note_phase_envelope_report_json(FILE *stream, const HWANotePhaseEnvelopeResult *result)
+{
+    return result != NULL ? write_report(stream, &result->summary, result) : -1;
 }

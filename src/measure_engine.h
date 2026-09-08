@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define HWA_MEASURE_ATTACK_SHAPE_BINS 16U
+
 /*
  * Run the Stage 4 scalar engine on an already checked Stage 3 item set. The
  * engine reads only explicit_audio_path. It fills audio facts, item contexts,

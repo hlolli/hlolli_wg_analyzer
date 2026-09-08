@@ -1360,7 +1360,8 @@ static uint64_t hwa_seg_body_start(HWAItemBuilder *builder,
     }
     *confidence = 0.0;
     *evidence = 0U;
-    return earliest < note_end ? earliest : note_end;
+    if (search_end < earliest) search_end = earliest;
+    return search_end < note_end ? search_end : note_end;
 }
 
 static uint64_t hwa_seg_release_start(HWAItemBuilder *builder,

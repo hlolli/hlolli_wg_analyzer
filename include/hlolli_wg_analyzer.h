@@ -1135,6 +1135,21 @@ typedef struct HWANotePhaseResult {
     HWANotePhase phases[HWA_NOTE_PHASE_COUNT];
 } HWANotePhaseResult;
 
+#define HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT 8U
+#define HWA_NOTE_PHASE_ENVELOPE_METHOD_VERSION "note-phase-envelope-1"
+
+/* Metrics: crest dB, level spread dB, centroid spread Hz, rise 10/50/90
+ * seconds, attack slope dB/s, overshoot dB. Rise times are offsets from the
+ * estimated attack start, using equal-length RMS bins. Spreads are frame
+ * population standard deviations, including trend. The last five metrics
+ * apply only to the attack.
+ */
+typedef struct HWANotePhaseEnvelopeResult {
+    HWANotePhaseResult summary;
+    uint32_t attack_envelope_bins;
+    HWAMeasureObservation metrics[HWA_NOTE_PHASE_COUNT][HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT];
+} HWANotePhaseEnvelopeResult;
+
 typedef struct HWAProfileComparisonOptions {
     uint64_t max_input_bytes;
     uint64_t max_work_bytes;
@@ -2782,6 +2797,14 @@ int hwa_analyze_note_phases_wav(
     const char *path, const HWANotePhaseOptions *options,
     HWANotePhaseResult *result, char *error, size_t error_size);
 void hwa_note_phase_result_free(HWANotePhaseResult *result);
+
+/* Uses the same passes and limits as note-phases; no extra audio read.
+ * Ownership, initialization, and option-copy rules match the basic result.
+ */
+int hwa_analyze_note_phase_envelope_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseEnvelopeResult *result, char *error, size_t error_size);
+void hwa_note_phase_envelope_result_free(HWANotePhaseEnvelopeResult *result);
 
 void hwa_profile_comparison_options_default(
     HWAProfileComparisonOptions *options);

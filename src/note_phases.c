@@ -18,6 +18,18 @@ static const HWAMeasureUnit phase_units[HWA_NOTE_PHASE_METRIC_COUNT] = {
     HWA_MEASURE_UNIT_HZ_PER_SECOND, HWA_MEASURE_UNIT_SECONDS
 };
 
+static const HWAMeasureKind envelope_metrics[HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT] = {
+    HWA_MEASURE_CREST_DB, HWA_MEASURE_LEVEL_MODULATION_SPREAD_DB,
+    HWA_MEASURE_CENTROID_MODULATION_SPREAD_HZ, HWA_MEASURE_RISE_10_SECONDS,
+    HWA_MEASURE_RISE_50_SECONDS, HWA_MEASURE_RISE_90_SECONDS,
+    HWA_MEASURE_ATTACK_SLOPE_DB_PER_SECOND, HWA_MEASURE_ATTACK_OVERSHOOT_DB
+};
+static const HWAMeasureUnit envelope_units[HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT] = {
+    HWA_MEASURE_UNIT_DB, HWA_MEASURE_UNIT_DB, HWA_MEASURE_UNIT_HZ,
+    HWA_MEASURE_UNIT_SECONDS, HWA_MEASURE_UNIT_SECONDS, HWA_MEASURE_UNIT_SECONDS,
+    HWA_MEASURE_UNIT_DB_PER_SECOND, HWA_MEASURE_UNIT_DB
+};
+
 void hwa_note_phase_options_default(HWANotePhaseOptions *options)
 {
     if (options == NULL) return;
@@ -81,9 +93,10 @@ static void check_tail(const HWAAnalysis *analysis, HWANotePhaseResult *result)
     }
 }
 
-int hwa_analyze_note_phases_wav(
+static int analyze_note_phases(
     const char *path, const HWANotePhaseOptions *options,
-    HWANotePhaseResult *result, char *error, size_t error_size)
+    HWANotePhaseResult *result, HWANotePhaseEnvelopeResult *envelope,
+    char *error, size_t error_size)
 {
     HWANotePhaseOptions copied;
     HWAAnalysis analysis;
@@ -108,6 +121,10 @@ int hwa_analyze_note_phases_wav(
     if (options != NULL) copied = *options;
     else hwa_note_phase_options_default(&copied);
     memset(result, 0, sizeof(*result));
+    if (envelope != NULL) {
+        envelope->attack_envelope_bins = 0U;
+        memset(envelope->metrics, 0, sizeof(envelope->metrics));
+    }
     memset(&analysis, 0, sizeof(analysis));
     memset(&measures, 0, sizeof(measures));
     memset(&items, 0, sizeof(items));
@@ -164,6 +181,15 @@ int hwa_analyze_note_phases_wav(
             result->phases[index].metrics[metric].unit = phase_units[metric];
             result->phases[index].metrics[metric].status = HWA_MEASURE_STATUS_NO_DATA;
         }
+        if (envelope != NULL) {
+            for (metric = 0U; metric < HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT; ++metric) {
+                HWAMeasureObservation *observation = &envelope->metrics[index][metric];
+                observation->kind = envelope_metrics[metric];
+                observation->unit = envelope_units[metric];
+                observation->status = index != 0U && metric >= 3U
+                    ? HWA_MEASURE_STATUS_UNSUPPORTED_ITEM : HWA_MEASURE_STATUS_NO_DATA;
+            }
+        }
     }
     if (hwa_measure_engine_wav(&items, path, &copied.measurement,
                                 (uint64_t)strlen(result->path) + 1U,
@@ -179,6 +205,13 @@ int hwa_analyze_note_phases_wav(
                 result->phases[observation->item_id - 1U].metrics[metric] = *observation;
             }
         }
+        if (envelope != NULL) {
+            for (metric = 0U; metric < HWA_NOTE_PHASE_ENVELOPE_METRIC_COUNT; ++metric) {
+                if (observation->kind == envelope_metrics[metric]) {
+                    envelope->metrics[observation->item_id - 1U][metric] = *observation;
+                }
+            }
+        }
     }
     if (hwa_sha256_file(path, copied.analysis.max_input_bytes, digest,
                         error, error_size) != 0) goto cleanup;
@@ -187,9 +220,38 @@ int hwa_analyze_note_phases_wav(
         goto cleanup;
     }
     status = 0;
+    if (envelope != NULL) envelope->attack_envelope_bins = HWA_MEASURE_ATTACK_SHAPE_BINS;
 cleanup:
     hwa_analysis_free(&analysis);
     hwa_measurement_set_free(&measures);
-    if (status != 0) hwa_note_phase_result_free(result);
+    if (status != 0) {
+        hwa_note_phase_result_free(result);
+        if (envelope != NULL) memset(envelope, 0, sizeof(*envelope));
+    }
     return status;
+}
+
+int hwa_analyze_note_phases_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseResult *result, char *error, size_t error_size)
+{
+    return analyze_note_phases(path, options, result, NULL, error, error_size);
+}
+
+int hwa_analyze_note_phase_envelope_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseEnvelopeResult *result, char *error, size_t error_size)
+{
+    if (result == NULL) {
+        hwa_set_error(error, error_size, "note phase envelope result is required");
+        return -1;
+    }
+    return analyze_note_phases(path, options, &result->summary, result, error, error_size);
+}
+
+void hwa_note_phase_envelope_result_free(HWANotePhaseEnvelopeResult *result)
+{
+    if (result == NULL) return;
+    hwa_note_phase_result_free(&result->summary);
+    memset(result, 0, sizeof(*result));
 }
