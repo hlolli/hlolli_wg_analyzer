@@ -1459,8 +1459,11 @@ if(HWA_PYTHON3_EXECUTABLE)
         ${HWA_PYTHON3_EXECUTABLE}
         -B
         ${CMAKE_CURRENT_SOURCE_DIR}/test_violin_fit_adapter.py
-        --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
-    set_tests_properties(unit.violin-fit-adapter PROPERTIES TIMEOUT 120)
+        --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>
+        --verbose)
+    # This suite includes a full render, analysis, selection, and profile write.
+    # Linux Debug builds need more than the former 120-second suite budget.
+    set_tests_properties(unit.violin-fit-adapter PROPERTIES TIMEOUT 240)
 
     add_test(
       NAME unit.viola-fit-adapter
