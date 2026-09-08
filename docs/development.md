@@ -40,6 +40,16 @@ method versions. Strings such as `stage1-1` through `stage9-1` are serialized
 method IDs. Keep them stable when code, test, target, or document names change.
 Changing a method ID requires a matching reader and compatibility plan.
 
+The fit tools share report checks through `tools/analyzer_evidence.py`.
+Each caller pins the helper's SHA-256 in its own source and runs the same bytes
+that it hashes. This keeps existing selector, builder, and renderer hashes
+bound to the helper without changing receipt schemas. When the helper changes,
+update `ANALYZER_EVIDENCE_SHA256` in `tools/instrument_fit.py`, the violin
+adapter, and the double-bass manifest builder. The caller tests check these
+pins. The helper's body-envelope method accepts the native command's default
+grid and method; its checks do not assert that a radiated envelope measures an
+instrument body alone.
+
 Keep enum values and public struct fields stable within the 1.x API. Add new
 fields only with a clear initialization, validation, save, load, report, and
 free path. A writer must emit one canonical form. A reader may accept an older

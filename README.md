@@ -307,6 +307,13 @@ only after all saved and recomputed gates pass.
 real recordings. Keep private recordings outside the repository and pass each
 one with `--recording`.
 
+Both body-envelope fit scores and recording checks use the shared evidence
+checker in `tools/analyzer_evidence.py`. It binds each run to the analyzer and
+audio hashes, checks the default report grid and support counts, and verifies
+comparison scores against their points. Low-support reports remain readable;
+each caller decides whether they meet its needs. The body-envelope curve still
+includes effects from the room, microphone, strings, and playing.
+
 ## Supported input
 
 The built-in reader accepts seekable, little-endian RIFF/WAVE and RF64 files.

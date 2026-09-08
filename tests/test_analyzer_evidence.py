@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import json
 import math
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -80,6 +82,88 @@ def write_pitch_analyzer(path: Path, mutation: str = "") -> None:
     path.chmod(0o700)
 
 
+def write_body_analyzer(
+        path: Path, mutation: str = "", supported: int = 8) -> None:
+    source = '''import json, math, pathlib, sys
+a = sys.argv[1:]
+if len(a) not in (3, 4) or a[:2] != ['--json', 'body-envelope']:
+    raise SystemExit(9)
+count = SUPPORTED
+def profile(path, model=False):
+    points = []
+    for i in range(160):
+        valid = i < count
+        points.append({
+            'frequency_hz': 120.0 * 2.0**(i / 24.0),
+            'relative_db': (2.0*i + 5.0 if model else float(i)) if valid else 0.0,
+            'residual_spread_db': 0.0,
+            'observation_count': 20 if valid else 0,
+            'pitch_cell_count': 4 if valid else 0,
+            'harmonic_count': 4 if valid else 0,
+            'quality_flags': 0 if valid else 7,
+            'confidence': 1.0 if valid else 0.0, 'valid': valid,
+        })
+    return {
+        'path': path,
+        'status': 'valid' if count >= 8 else 'low-support' if count else 'no-support',
+        'confidence': 1.0 if count else 0.0,
+        'frames_seen': 20, 'frames_used': 20 if count else 0,
+        'frames_rejected_pitch': 0 if count else 20,
+        'pitch_min_hz': 110.0 if count else 0.0,
+        'pitch_max_hz': 220.0 if count else 0.0,
+        'observation_count': 20*count, 'points': points,
+    }
+report = {
+    'schema_version': 1, 'command': 'body-envelope',
+    'method': 'crossed-harmonic-response-1',
+    'shape_constraints': ['zero-mean', 'zero-log-frequency-slope'],
+    'reference': profile(a[2]), 'fit_evaluations': 100,
+    'retained_work_bytes': 1000,
+}
+if len(a) == 4:
+    report['model'] = profile(a[3], model=True)
+    valid = count >= 3
+    deltas = [i - (count - 1)/2.0 for i in range(count)] if valid else []
+    report['comparison'] = {
+        'valid': valid,
+        'shape_rmse_db': math.sqrt(sum(d*d for d in deltas)/count) if valid else 0.0,
+        'shape_correlation': 1.0 if valid else 0.0,
+        'confidence': 1.0 if valid else 0.0,
+        'gaps': [{
+            'frequency_hz': point['frequency_hz'],
+            'model_minus_reference_db': deltas[i] if valid and i < count else 0.0,
+            'confidence': 1.0 if valid and i < count else 0.0,
+            'valid': valid and i < count,
+        } for i, point in enumerate(report['reference']['points'])],
+    }
+MUTATION
+print(json.dumps(report))
+'''
+    path.write_text(
+        "#!{} -I\n".format(Path(sys.executable).resolve()) +
+        source.replace("SUPPORTED", str(supported)).replace("MUTATION", mutation),
+        encoding="utf-8")
+    path.chmod(0o700)
+
+
+def write_body_phrase(path: Path, silent: bool = False) -> None:
+    rate = 16000
+    frequencies = (220.0, 293.664767917408, 329.627556912870, 440.0)
+    raw = bytearray()
+    for frame in range(4 * rate):
+        frequency = frequencies[frame // rate]
+        time = frame / rate
+        value = 0.0 if silent else sum(
+            math.sin(math.tau * harmonic * frequency * time) / harmonic
+            for harmonic in range(1, 13))
+        raw.extend(round(2600.0 * value).to_bytes(2, "little", signed=True))
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(rate)
+        stream.writeframes(raw)
+
+
 def write_harmonic_analyzer(
         path: Path, valid_band_count: int = 3,
         profile_mutation: str = "") -> None:
@@ -121,6 +205,232 @@ def write_harmonic_comparison_analyzer(
 
 
 class AnalyzerEvidenceTests(unittest.TestCase):
+    def test_body_recording_command_preserves_receipt_and_rejects_bad_evidence(self):
+        tool = ROOT / "tools" / "instrument_fit.py"
+        for mutation, expected_status in (
+                ("", 0), ("report['reference']['confidence']=0.1", 1)):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                analyzer, source = root / "analyzer.py", root / "phrase.wav"
+                output = root / "recordings.json"
+                write_body_analyzer(analyzer, mutation)
+                write_body_phrase(source)
+                completed = subprocess.run([
+                    sys.executable, "-I", str(tool), "check-recordings",
+                    "--analyzer", str(analyzer), "--recording", str(source),
+                    "--excerpt-seconds", "5", "--output", str(output),
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                self.assertEqual(completed.returncode, expected_status,
+                                 completed.stderr)
+                if expected_status:
+                    self.assertFalse(output.exists())
+                    self.assertIn("confidence", completed.stderr)
+                else:
+                    receipt = json.loads(output.read_text(encoding="utf-8"))
+                    self.assertEqual(set(receipt), {
+                        "schema", "schema_version", "analyzer_sha256", "recordings",
+                    })
+                    self.assertEqual(receipt["schema"], "hwa-body-envelope-recording-check")
+                    self.assertEqual(receipt["schema_version"], 1)
+                    self.assertEqual(receipt["analyzer_sha256"], sha256(analyzer))
+                    self.assertEqual(receipt["recordings"], [{
+                        "name": source.name, "source_sha256": sha256(source),
+                        "excerpt_sha256": sha256(source), "excerpt_start_frame": 0,
+                        "excerpt_frames": 64000, "confidence": 1.0,
+                        "frames_seen": 20, "frames_used": 20, "valid_points": 8,
+                    }])
+
+    def test_body_recording_command_rejects_source_changed_during_analysis(self):
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            analyzer, source = root / "analyzer.py", root / "phrase.wav"
+            output = root / "recordings.json"
+            write_body_phrase(source)
+            write_body_analyzer(analyzer,
+                "pathlib.Path({!r}).write_bytes(b'changed')".format(str(source)))
+            completed = subprocess.run([
+                sys.executable, "-I", str(ROOT / "tools" / "instrument_fit.py"),
+                "check-recordings", "--analyzer", str(analyzer),
+                "--recording", str(source), "--output", str(output),
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertIn("recording-0 changed", completed.stderr)
+            self.assertFalse(output.exists())
+
+    def test_body_fit_caller_keeps_result_fields_and_translates_evidence_errors(self):
+        specification = importlib.util.spec_from_file_location(
+            "hwa_body_fit_test", ROOT / "tools" / "instrument_fit.py")
+        fit = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(fit)
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            analyzer, reference = root / "analyzer.py", root / "reference.wav"
+            reference.write_bytes(b"reference")
+            for mutation, supported in (("", 8), ("", 2), (
+                    "report['comparison']['shape_rmse_db']=0.0", 8)):
+                write_body_analyzer(analyzer, mutation, supported)
+                arguments = {
+                    "analyzer_sha256": sha256(analyzer),
+                    "reference_sha256": sha256(reference),
+                    "model_sha256": sha256(reference),
+                }
+                if mutation or supported < 3:
+                    with self.assertRaises(fit.FitError):
+                        fit.run_body_envelope(analyzer, reference, reference, **arguments)
+                else:
+                    result = fit.run_body_envelope(
+                        analyzer, reference, reference, **arguments)
+                    self.assertEqual(result, {
+                        "shape_rmse_db": math.sqrt(5.25),
+                        "shape_correlation": 1.0, "confidence": 1.0,
+                    })
+                    arguments["reference_sha256"] = "0" * 64
+                    with self.assertRaisesRegex(fit.FitError, "hash changed"):
+                        fit.run_body_envelope(analyzer, reference, reference, **arguments)
+
+    def test_body_envelope_returns_checked_profile_and_comparison(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory(prefix="hwa body evidence ") as text:
+            root = Path(text)
+            analyzer = root / "analyzer.py"
+            reference = root / "reference.wav"
+            model = root / "model.wav"
+            reference.write_bytes(b"reference")
+            model.write_bytes(b"model")
+            write_body_analyzer(analyzer)
+            checks = module.AnalyzerEvidence(analyzer, {
+                "reference": (reference, sha256(reference)),
+                "model": (model, sha256(model)),
+            })
+            single = checks.body_envelope("reference")
+            self.assertEqual(single.reference.status, "valid")
+            self.assertEqual(single.reference.valid_point_count, 8)
+            self.assertEqual(single.reference.frames_used, 20)
+            self.assertIsNone(single.comparison_valid)
+            self.assertNotIn("model", single.report)
+            pair = checks.body_envelope("reference", "model")
+            self.assertTrue(pair.comparison_valid)
+            self.assertAlmostEqual(pair.shape_rmse_db, math.sqrt(5.25))
+            self.assertAlmostEqual(pair.shape_correlation, 1.0)
+            self.assertEqual(pair.confidence, 1.0)
+
+    def test_body_envelope_rejects_forged_reports(self):
+        changes = {
+            "method": "report['method']='changed'",
+            "boolean version": "report['schema_version']=True",
+            "path": "report['reference']['path']='wrong.wav'",
+            "constraints": "report['shape_constraints']=[]",
+            "profile support": "report['reference']['frames_used']=21",
+            "point support": "report['reference']['points'][0]['observation_count']=0",
+            "point confidence": "report['reference']['points'][0]['confidence']=0.5",
+            "profile status": "report['reference']['status']='no-support'",
+            "grid": "report['model']['points'][0]['frequency_hz']=123.0",
+            "comparison validity": "report['comparison']['valid']=False",
+            "rmse": "report['comparison']['shape_rmse_db']=0.0",
+            "correlation": "report['comparison']['shape_correlation']=0.0",
+            "confidence": "report['comparison']['confidence']=0.1",
+            "gap": "report['comparison']['gaps'][0]['model_minus_reference_db']=0.0",
+            "negative rmse": "report['comparison']['shape_rmse_db']=-1.0",
+            "NaN": "report['comparison']['shape_rmse_db']=float('nan')",
+            "missing model": "del report['model']",
+        }
+        module = load_module()
+        for name, mutation in changes.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                analyzer = root / "analyzer.py"
+                reference = root / "reference.wav"
+                reference.write_bytes(b"reference")
+                write_body_analyzer(analyzer, mutation)
+                checks = module.AnalyzerEvidence(analyzer, {
+                    "reference": (reference, sha256(reference)),
+                })
+                with self.assertRaises(module.EvidenceError):
+                    checks.body_envelope("reference", "reference")
+
+    def test_body_envelope_uses_confidence_weighted_offset(self):
+        module = load_module()
+        mutation = '''for name in ('reference', 'model'):
+    report[name]['points'][0]['residual_spread_db'] = 12.0 * math.log(2.0)
+    report[name]['points'][0]['confidence'] = 0.5
+    report[name]['confidence'] = 7.5 / 8.0
+for i in range(8):
+    report['comparison']['gaps'][i]['model_minus_reference_db'] -= 7.0 / 30.0
+report['comparison']['gaps'][0]['confidence'] = 0.5
+report['comparison']['confidence'] = 7.5 / 8.0
+report['comparison']['shape_rmse_db'] = math.sqrt(5.25 + (7.0 / 30.0)**2)
+'''
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            analyzer, source = root / "analyzer.py", root / "source.wav"
+            write_body_analyzer(analyzer, mutation)
+            source.write_bytes(b"source")
+            checks = module.AnalyzerEvidence(
+                analyzer, {"source": (source, sha256(source))})
+            pair = checks.body_envelope("source", "source")
+            self.assertAlmostEqual(pair.shape_rmse_db,
+                                   math.sqrt(5.25 + (7.0 / 30.0)**2))
+            self.assertEqual(pair.confidence, 0.9375)
+
+    def test_body_envelope_high_residual_is_a_quality_flag(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as text:
+            root = Path(text)
+            analyzer, source = root / "analyzer.py", root / "source.wav"
+            write_body_analyzer(analyzer, "\n".join((
+                "point = report['reference']['points'][0]",
+                "point['residual_spread_db'] = 24.0",
+                "point['confidence'] = math.exp(-2.0)",
+                "point['quality_flags'] = 8",
+                "report['reference']['confidence'] = (7.0 + point['confidence']) / 8.0",
+            )))
+            source.write_bytes(b"source")
+            checks = module.AnalyzerEvidence(
+                analyzer, {"source": (source, sha256(source))})
+            profile = checks.body_envelope("source").reference
+            self.assertEqual(profile.status, "valid")
+            self.assertEqual(profile.valid_point_count, 8)
+
+    def test_body_envelope_preserves_low_and_no_support_results(self):
+        module = load_module()
+        for count, status, comparison_valid in (
+                (0, "no-support", False), (2, "low-support", False),
+                (3, "low-support", True)):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as text:
+                root = Path(text)
+                analyzer = root / "analyzer.py"
+                source = root / "note.wav"
+                source.write_bytes(b"source")
+                write_body_analyzer(analyzer, supported=count)
+                checks = module.AnalyzerEvidence(
+                    analyzer, {"note": (source, sha256(source))})
+                single = checks.body_envelope("note")
+                pair = checks.body_envelope("note", "note")
+                self.assertEqual(single.reference.status, status)
+                self.assertEqual(pair.comparison_valid, comparison_valid)
+
+    def test_real_body_envelope_and_silence_match_shared_contract(self):
+        if ANALYZER is None:
+            self.skipTest("analyzer executable was not supplied")
+        module = load_module()
+        with tempfile.TemporaryDirectory(prefix="hwa real body ") as text:
+            root = Path(text)
+            phrase, silence = root / "phrase.wav", root / "silence.wav"
+            write_body_phrase(phrase)
+            write_body_phrase(silence, silent=True)
+            checks = module.AnalyzerEvidence(ANALYZER, {
+                "phrase": (phrase, sha256(phrase)),
+                "silence": (silence, sha256(silence)),
+            })
+            pair = checks.body_envelope("phrase", "phrase")
+            self.assertEqual(pair.reference.status, "valid")
+            self.assertTrue(pair.comparison_valid)
+            self.assertAlmostEqual(pair.shape_rmse_db, 0.0)
+            quiet = checks.body_envelope("silence")
+            self.assertEqual(quiet.reference.status, "no-support")
+            mismatch = checks.body_envelope("phrase", "silence")
+            self.assertFalse(mismatch.comparison_valid)
+
     def test_checked_run_uses_supplied_environment_and_scratch(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory(

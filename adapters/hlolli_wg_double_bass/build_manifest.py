@@ -98,7 +98,7 @@ class ManifestError(ValueError):
 
 
 ANALYZER_EVIDENCE_SHA256 = (
-    "5a848ce2b2b533f1a1e7cbedffd6c112a68299e71790082865b58b9cbeea9e1c"
+    "71031b2ec7b08cec061a5cc48c2b88906595120d18dfe5d9f380e44edd68b938"
 )
 _ANALYZER_EVIDENCE = None
 

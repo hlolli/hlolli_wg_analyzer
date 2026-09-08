@@ -87,6 +87,162 @@ class HarmonicDecayEvidence:
     median_t60_log_bias_db: Optional[float]
 
 
+@dataclass(frozen=True)
+class BodyEnvelopeProfile:
+    status: str
+    confidence: float
+    frames_seen: int
+    frames_used: int
+    valid_point_count: int
+
+
+@dataclass(frozen=True)
+class BodyEnvelopeEvidence:
+    report: dict[str, Any]
+    reference: BodyEnvelopeProfile
+    model: Optional[BodyEnvelopeProfile]
+    comparison_valid: Optional[bool]
+    shape_rmse_db: Optional[float]
+    shape_correlation: Optional[float]
+    confidence: Optional[float]
+
+
+def _body_number(value: Any, expected: float, field: str) -> float:
+    actual = _finite(value, field)
+    if not math.isclose(actual, expected, rel_tol=1e-10, abs_tol=1e-9):
+        raise EvidenceError(field + " disagrees with its supporting points")
+    return actual
+
+
+def _body_profile(value: Any, path: Path) -> BodyEnvelopeProfile:
+    field = "body-envelope profile"
+    if (type(value) is not dict or value.get("path") != str(path) or
+            type(value.get("points")) is not list or
+            len(value["points"]) != 160):
+        raise EvidenceError(field + " returned an unknown contract")
+    seen = _count(value.get("frames_seen"), field + " frames_seen")
+    used = _count(value.get("frames_used"), field + " frames_used")
+    rejected = _count(
+        value.get("frames_rejected_pitch"), field + " frames_rejected_pitch")
+    observations = _count(
+        value.get("observation_count"), field + " observation_count")
+    pitch_min = _finite(value.get("pitch_min_hz"), field + " pitch_min_hz")
+    pitch_max = _finite(value.get("pitch_max_hz"), field + " pitch_max_hz")
+    if (seen > 500000 or observations > 2000000 or
+            used + rejected > seen or not used <= observations <= used * 32 or
+            (used == 0 and (pitch_min != 0.0 or pitch_max != 0.0)) or
+            (used > 0 and not 0.0 < pitch_min <= pitch_max)):
+        raise EvidenceError(field + " has inconsistent support")
+    valid_confidences = []
+    total_observations = 0
+    for index, point in enumerate(value["points"]):
+        if type(point) is not dict or type(point.get("valid")) is not bool:
+            raise EvidenceError(field + " has an invalid point")
+        _body_number(point.get("frequency_hz"),
+                     120.0 * 2.0 ** (index / 24.0), field + " frequency_hz")
+        _finite(point.get("relative_db"), field + " relative_db")
+        spread = _finite(
+            point.get("residual_spread_db"), field + " residual_spread_db")
+        count = _count(point.get("observation_count"), field + " point count")
+        cells = _count(point.get("pitch_cell_count"), field + " pitch cells")
+        harmonics = _count(point.get("harmonic_count"), field + " harmonics")
+        if (spread < 0.0 or count > observations or
+                cells > min(count, used, 256) or
+                harmonics > min(count, 32) or
+                (count > 0 and (cells == 0 or harmonics == 0))):
+            raise EvidenceError(field + " has inconsistent point support")
+        flags = ((1 if count < 6 else 0) | (2 if cells < 2 else 0) |
+                 (4 if harmonics < 2 else 0) | (8 if spread > 12.0 else 0))
+        if (_count(point.get("quality_flags"), field + " quality_flags") !=
+                flags or point["valid"] !=
+                (count >= 6 and cells >= 2 and harmonics >= 2)):
+            raise EvidenceError(field + " has inconsistent point validity")
+        expected_confidence = (
+            min(count / 20.0, 1.0) * min(cells / 4.0, 1.0) *
+            min(harmonics / 4.0, 1.0) * math.exp(-spread / 12.0))
+        confidence = _body_number(
+            point.get("confidence"), expected_confidence,
+            field + " point confidence")
+        if not 0.0 <= confidence <= 1.0:
+            raise EvidenceError(field + " confidence is outside 0..1")
+        if point["valid"]:
+            valid_confidences.append(confidence)
+        total_observations += count
+    valid_count = len(valid_confidences)
+    status = ("valid" if valid_count >= 8 else
+              "low-support" if observations else "no-support")
+    if (total_observations != observations or value.get("status") != status):
+        raise EvidenceError(field + " has inconsistent status or support")
+    confidence = _body_number(
+        value.get("confidence"),
+        math.fsum(valid_confidences) / valid_count if valid_count else 0.0,
+        field + " confidence")
+    if not 0.0 <= confidence <= 1.0:
+        raise EvidenceError(field + " confidence is outside 0..1")
+    return BodyEnvelopeProfile(status, confidence, seen, used, valid_count)
+
+
+def _body_comparison(
+        value: Any, reference: list[dict[str, Any]],
+        model: list[dict[str, Any]]) -> tuple[bool, float, float, float]:
+    field = "body-envelope comparison"
+    if (type(value) is not dict or type(value.get("valid")) is not bool or
+            type(value.get("gaps")) is not list or
+            len(value["gaps"]) != len(reference)):
+        raise EvidenceError(field + " returned an unknown contract")
+    common = [index for index, (r, m) in enumerate(zip(reference, model))
+              if r["valid"] and m["valid"] and
+              min(r["confidence"], m["confidence"]) > 0.0]
+    valid = len(common) >= 3
+    if value["valid"] != valid:
+        raise EvidenceError(field + " has inconsistent validity")
+    gaps = {}
+    rmse = correlation = confidence = 0.0
+    if valid:
+        weights = [min(reference[i]["confidence"], model[i]["confidence"])
+                   for i in common]
+        deltas = [model[i]["relative_db"] - reference[i]["relative_db"]
+                  for i in common]
+        offset = math.fsum(d * w for d, w in zip(deltas, weights)) / math.fsum(
+            weights)
+        centered = [d - offset for d in deltas]
+        r_mean = math.fsum(reference[i]["relative_db"] for i in common) / len(
+            common)
+        m_mean = math.fsum(model[i]["relative_db"] for i in common) / len(common)
+        r_values = [reference[i]["relative_db"] - r_mean for i in common]
+        m_values = [model[i]["relative_db"] - m_mean for i in common]
+        r_norm = math.sqrt(math.fsum(v * v for v in r_values))
+        m_norm = math.sqrt(math.fsum(v * v for v in m_values))
+        if r_norm > 0.0 and m_norm > 0.0:
+            correlation = math.fsum(
+                (r / r_norm) * (m / m_norm)
+                for r, m in zip(r_values, m_values))
+        rmse = math.sqrt(math.fsum(d * d for d in centered) / len(common))
+        confidence = math.fsum(weights) / len(common)
+        gaps = {i: (delta, weight)
+                for i, delta, weight in zip(common, centered, weights)}
+    for index, gap in enumerate(value["gaps"]):
+        if (type(gap) is not dict or type(gap.get("valid")) is not bool or
+                gap["valid"] != (index in gaps)):
+            raise EvidenceError(field + " has inconsistent gap validity")
+        _body_number(gap.get("frequency_hz"), reference[index]["frequency_hz"],
+                     field + " gap frequency_hz")
+        delta, weight = gaps.get(index, (0.0, 0.0))
+        _body_number(gap.get("model_minus_reference_db"), delta,
+                     field + " gap value")
+        _body_number(gap.get("confidence"), weight, field + " gap confidence")
+    reported_rmse = _body_number(
+        value.get("shape_rmse_db"), rmse, field + " shape_rmse_db")
+    reported_correlation = _body_number(
+        value.get("shape_correlation"), correlation, field + " shape_correlation")
+    reported_confidence = _body_number(
+        value.get("confidence"), confidence, field + " confidence")
+    if (reported_rmse < 0.0 or abs(reported_correlation) > 1.0 + 1e-12 or
+            not 0.0 <= reported_confidence <= 1.0):
+        raise EvidenceError(field + " has an out-of-range score")
+    return valid, reported_rmse, reported_correlation, reported_confidence
+
+
 def _reject_constant(value: str) -> NoReturn:
     raise EvidenceError("analyzer returned a non-finite JSON number: " + value)
 
@@ -388,6 +544,42 @@ class AnalyzerEvidence:
         if type(value) is not dict:
             raise EvidenceError(label + " returned a non-object")
         return value
+
+    def body_envelope(
+            self, reference_id: str,
+            model_id: Optional[str] = None) -> BodyEnvelopeEvidence:
+        """Check the default pitch-conditioned radiated envelope report."""
+        reference_path = self._source(reference_id)
+        arguments = ["body-envelope", str(reference_path)]
+        model_path = None if model_id is None else self._source(model_id)
+        if model_path is not None:
+            arguments.append(str(model_path))
+        report = self._run(arguments, reference_id + " body-envelope")
+        if (type(report.get("schema_version")) is not int or
+                report["schema_version"] != 1 or
+                report.get("command") != "body-envelope" or
+                report.get("method") != "crossed-harmonic-response-1" or
+                report.get("shape_constraints") !=
+                ["zero-mean", "zero-log-frequency-slope"]):
+            raise EvidenceError("body-envelope returned an unknown contract")
+        reference = _body_profile(report.get("reference"), reference_path)
+        if model_path is None:
+            if "model" in report or "comparison" in report:
+                raise EvidenceError("body-envelope returned an unexpected model")
+            return BodyEnvelopeEvidence(
+                report, reference, None, None, None, None, None)
+        model = _body_profile(report.get("model"), model_path)
+        try:
+            valid, rmse, correlation, confidence = _body_comparison(
+                report.get("comparison"), report["reference"]["points"],
+                report["model"]["points"])
+        except EvidenceError:
+            raise
+        except (OverflowError, ValueError) as error:
+            raise EvidenceError(
+                "body-envelope comparison cannot be checked") from error
+        return BodyEnvelopeEvidence(
+            report, reference, model, valid, rmse, correlation, confidence)
 
     def isolated_note(
             self, source_id: str, expected_hz: float) -> IsolatedNoteEvidence:

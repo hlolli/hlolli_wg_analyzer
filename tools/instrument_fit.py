@@ -52,7 +52,7 @@ MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
 MAX_HARMONIC_BANDS = 16
 ANALYZER_EVIDENCE_SHA256 = (
-    "5a848ce2b2b533f1a1e7cbedffd6c112a68299e71790082865b58b9cbeea9e1c"
+    "71031b2ec7b08cec061a5cc48c2b88906595120d18dfe5d9f380e44edd68b938"
 )
 _ANALYZER_EVIDENCE = None
 
@@ -948,32 +948,26 @@ def artifact_path(root: Path, row: dict[str, Any]) -> Path:
     return path
 
 
-def run_body_envelope(analyzer: Path, reference: Path, model: Path) -> dict[str, Any]:
-    completed = subprocess.run(
-        [*tool_command(analyzer), "--json", "body-envelope",
-         str(reference), str(model)],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"},
-    )
-    if completed.returncode != 0:
-        raise FitError(
-            "body-envelope failed: " + completed.stderr.strip()
-        )
+def run_body_envelope(
+        analyzer: Path, reference: Path, model: Path, *,
+        analyzer_sha256: str, reference_sha256: str,
+        model_sha256: str) -> dict[str, Any]:
+    evidence = analyzer_evidence_module()
     try:
-        result = json.loads(completed.stdout, object_pairs_hook=object_pairs)
-    except (json.JSONDecodeError, FitError) as error:
-        raise FitError("body-envelope returned invalid JSON") from error
-    comparison = result.get("comparison")
-    if type(comparison) is not dict or comparison.get("valid") is not True:
+        checks = evidence.AnalyzerEvidence(analyzer, {
+            "reference": (reference, reference_sha256),
+            "model": (model, model_sha256),
+        }, analyzer_sha256=analyzer_sha256)
+        comparison = checks.body_envelope("reference", "model")
+    except evidence.EvidenceError as error:
+        raise FitError(str(error)) from error
+    if not comparison.comparison_valid:
         raise FitError("body-envelope comparison has too little support")
-    rmse = finite(comparison.get("shape_rmse_db"), "shape_rmse_db")
-    correlation = finite(comparison.get("shape_correlation"), "shape_correlation")
-    confidence = finite(comparison.get("confidence"), "body confidence")
-    return {"shape_rmse_db": rmse, "shape_correlation": correlation,
-            "confidence": confidence}
+    return {
+        "shape_rmse_db": comparison.shape_rmse_db,
+        "shape_correlation": comparison.shape_correlation,
+        "confidence": comparison.confidence,
+    }
 
 
 def checked_note_report(
@@ -2241,14 +2235,12 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                     model = artifact_path(bundle_root, artifact)
                     model_hash = artifact["artifact"]["sha256"]
                     if objective["kind"] == "body-envelope":
-                        measure = run_body_envelope(analyzer, reference, model)
-                        if (sha256(analyzer) != analyzer_hash or
-                                sha256(reference) != binding_hashes[
-                                objective["reference_binding"]] or
-                                sha256(model) != model_hash):
-                            raise FitError(
-                                "body-envelope input changed during analysis"
-                            )
+                        measure = run_body_envelope(
+                            analyzer, reference, model,
+                            analyzer_sha256=analyzer_hash,
+                            reference_sha256=binding_hashes[
+                                objective["reference_binding"]],
+                            model_sha256=model_hash)
                     elif objective["kind"] == "harmonic-decay":
                         fundamental = float(objective["fundamental_hz"])
                         count = int(objective["harmonic_count"])
@@ -2953,15 +2945,19 @@ def write_profile(arguments: argparse.Namespace) -> None:
 
 def check_recordings(arguments: argparse.Namespace) -> None:
     analyzer = regular(arguments.analyzer, "analyzer")
+    analyzer_hash = sha256(analyzer)
+    evidence = analyzer_evidence_module()
     if (not math.isfinite(arguments.excerpt_seconds) or
             arguments.excerpt_seconds < 5.0 or
             arguments.excerpt_seconds > 120.0):
         raise FitError("excerpt-seconds must be from 5 through 120")
     rows = []
+    sources = {}
     with tempfile.TemporaryDirectory(prefix="hwa-body-recording-check-") as text:
         temporary = Path(text)
         for index, source_text in enumerate(arguments.recording):
             path = regular(Path(source_text), "recording")
+            source_hash = sha256(path)
             excerpt = temporary / f"recording-{index}.wav"
             with wave.open(str(path), "rb") as input_stream:
                 rate = input_stream.getframerate()
@@ -2977,34 +2973,35 @@ def check_recordings(arguments: argparse.Namespace) -> None:
                 output_stream.setparams(parameters)
                 output_stream.setnframes(count)
                 output_stream.writeframes(audio)
-            completed = subprocess.run(
-                [*tool_command(analyzer), "--json", "body-envelope",
-                 str(excerpt)],
-                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env={"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
-            )
-            if completed.returncode != 0:
-                raise FitError("body-envelope failed: " + completed.stderr.strip())
-            report = json.loads(completed.stdout, object_pairs_hook=object_pairs)
-            reference = report.get("reference")
-            if type(reference) is not dict or reference.get("status") != "valid":
+            excerpt_hash = sha256(excerpt)
+            source_id = "recording-{}".format(index)
+            excerpt_id = "excerpt-{}".format(index)
+            sources[source_id] = (path, source_hash)
+            sources[excerpt_id] = (excerpt, excerpt_hash)
+            try:
+                checks = evidence.AnalyzerEvidence(
+                    analyzer, sources, analyzer_sha256=analyzer_hash,
+                    scratch=temporary)
+                reference = checks.body_envelope(excerpt_id).reference
+            except evidence.EvidenceError as error:
+                raise FitError(str(error)) from error
+            if reference.status != "valid":
                 raise FitError(f"recording has too little body-envelope support: {path}")
             rows.append({
                 "name": path.name,
-                "source_sha256": sha256(path),
-                "excerpt_sha256": sha256(excerpt),
+                "source_sha256": source_hash,
+                "excerpt_sha256": excerpt_hash,
                 "excerpt_start_frame": start,
                 "excerpt_frames": count,
-                "confidence": finite(reference.get("confidence"), "confidence"),
-                "frames_seen": int(reference.get("frames_seen")),
-                "frames_used": int(reference.get("frames_used")),
-                "valid_points": sum(1 for point in reference.get("points", [])
-                                    if point.get("valid") is True),
+                "confidence": reference.confidence,
+                "frames_seen": reference.frames_seen,
+                "frames_used": reference.frames_used,
+                "valid_points": reference.valid_point_count,
             })
     write_new_json(arguments.output, {
         "schema": "hwa-body-envelope-recording-check",
         "schema_version": 1,
-        "analyzer_sha256": sha256(analyzer),
+        "analyzer_sha256": analyzer_hash,
         "recordings": rows,
     })
 

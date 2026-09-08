@@ -1450,7 +1450,7 @@ if(HWA_PYTHON3_EXECUTABLE)
       -B
       ${CMAKE_CURRENT_SOURCE_DIR}/test_analyzer_evidence.py
       --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
-  set_tests_properties(unit.analyzer-evidence PROPERTIES TIMEOUT 30)
+  set_tests_properties(unit.analyzer-evidence PROPERTIES TIMEOUT 60)
 
   if(NOT WIN32)
     add_test(
