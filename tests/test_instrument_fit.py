@@ -210,7 +210,7 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
          "split": "audit", "weight": 1, "scale": 1},
     ]
     changes = [{
-        "parameter": "loss_time_constant_%s_seconds" % letter,
+        "parameter": "component_%s_decay" % letter,
         "path": ["strings", index, "loss_time_constant_seconds"],
         "before": 0.25, "after": value, "minimum": 0.08,
         "maximum": 1.5, "unit": "seconds",
@@ -253,6 +253,11 @@ def make_v2_fixture(root, *, candidate_tau=0.40,
                 "c-fit": expected_loss, "c-check": expected_loss,
             },
             "profile_changes": changes,
+            "profile_change_contract": [
+                {"parameter": row["parameter"], "path": row["path"],
+                 "source_group": "component-" + str(index)}
+                for index, row in enumerate(changes)
+            ],
             "profile_adapter_sha256": MODULE.sha256(adapter_path),
         },
     }
@@ -642,6 +647,46 @@ class InstrumentFitTests(unittest.TestCase):
                              if not row["baseline"])
             self.assertFalse(baseline["eligible"])
             self.assertFalse(candidate["eligible"])
+
+    def test_v2_profile_change_contract_is_generic_and_enforced(self):
+        with tempfile.TemporaryDirectory() as text:
+            fixture = make_v2_fixture(Path(text))
+            original = json.loads(fixture["manifest"].read_text())
+            # A two-component model is valid; string count and field names are
+            # instrument policy, not shared selector policy.
+            generic = json.loads(json.dumps(original))
+            candidate = generic["candidate"]
+            candidate["profile_changes"] = candidate["profile_changes"][:2]
+            candidate["profile_change_contract"] = (
+                candidate["profile_change_contract"][:2])
+            for index, (change, rule) in enumerate(zip(
+                    generic["candidate"]["profile_changes"],
+                    generic["candidate"]["profile_change_contract"])):
+                change["path"] = ["resonators", index, "decay"]
+                rule["path"] = change["path"]
+            fixture["manifest"].write_text(json.dumps(generic))
+            MODULE.fit_manifest(fixture["manifest"])
+            for kind in ("missing", "path", "order", "group", "extra", "duplicate"):
+                value = json.loads(json.dumps(original))
+                candidate = value["candidate"]
+                changes = candidate["profile_changes"]
+                contract = candidate["profile_change_contract"]
+                if kind == "missing":
+                    del candidate["profile_change_contract"]
+                elif kind == "path":
+                    changes[0]["path"] = ["other"]
+                elif kind == "order":
+                    changes.reverse()
+                elif kind == "group":
+                    contract[1]["source_group"] = contract[0]["source_group"]
+                elif kind == "extra":
+                    contract[0]["unexpected"] = True
+                else:
+                    changes[1] = changes[0]
+                    contract[1] = contract[0]
+                fixture["manifest"].write_text(json.dumps(value))
+                with self.subTest(kind=kind), self.assertRaises(MODULE.FitError):
+                    MODULE.fit_manifest(fixture["manifest"])
 
     def test_v2_manifest_validates_the_candidate_block(self):
         with tempfile.TemporaryDirectory() as text:

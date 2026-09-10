@@ -560,10 +560,13 @@ def validate_verify_candidate_manifest(
 
     if type(candidate) is not dict:
         raise FitError("fit manifest needs a candidate")
-    exact_keys(candidate, {
+    candidate_keys = {
         "parameters", "expected_objective_losses", "profile_changes",
         "profile_adapter_sha256",
-    }, "candidate")
+    }
+    if "profile_change_contract" in candidate:
+        candidate_keys.add("profile_change_contract")
+    exact_keys(candidate, candidate_keys, "candidate")
     digest(candidate.get("profile_adapter_sha256"),
            "candidate.profile_adapter_sha256")
     candidate_parameters = candidate.get("parameters")
@@ -598,33 +601,6 @@ def validate_verify_candidate_manifest(
         raise FitError("candidate expected loss has an unknown objective")
 
     changes = candidate.get("profile_changes")
-    cello_changes = {
-        4: [
-            ("loss_time_constant_c_seconds",
-             ["strings", 0, "loss_time_constant_seconds"]),
-            ("loss_time_constant_g_seconds",
-             ["strings", 1, "loss_time_constant_seconds"]),
-            ("loss_time_constant_d_seconds",
-             ["strings", 2, "loss_time_constant_seconds"]),
-            ("loss_time_constant_a_seconds",
-             ["strings", 3, "loss_time_constant_seconds"]),
-        ],
-        7: [
-            ("loss_time_constant_c_seconds",
-             ["strings", 0, "loss_time_constant_seconds"]),
-            ("bridge_cutoff_g_hz", ["strings", 1, "bridge_cutoff_hz"]),
-            ("bridge_loss_peak_bandwidth_g_hz",
-             ["strings", 1, "bridge_loss_peak_bandwidth_hz"]),
-            ("bridge_loss_peak_g_fraction",
-             ["strings", 1, "bridge_loss_peak_fraction"]),
-            ("loss_time_constant_g_seconds",
-             ["strings", 1, "loss_time_constant_seconds"]),
-            ("loss_time_constant_d_seconds",
-             ["strings", 2, "loss_time_constant_seconds"]),
-            ("loss_time_constant_a_seconds",
-             ["strings", 3, "loss_time_constant_seconds"]),
-        ],
-    }
     double_bass_changes = [
         ("string_e_loss_seconds",
          ["strings", 0, "loss_time_constant_seconds"]),
@@ -636,22 +612,35 @@ def validate_verify_candidate_manifest(
         ("string_g_loss_seconds",
          ["strings", 3, "loss_time_constant_seconds"]),
     ]
-    if manifest["adapter_id"] in {
-            "hlolli_wg_double_bass-passive-joint-validation-v1",
-            "hlolli_wg_double_bass-passive-joint-validation-v2",
-    }:
-        expected_rows = double_bass_changes
-    elif type(changes) is list:
-        expected_rows = cello_changes.get(len(changes), [])
-    else:
-        expected_rows = []
-    if type(changes) is not list or len(changes) != len(expected_rows):
-        raise FitError(
-            "candidate.profile_changes must contain one checked change set"
-        )
+    contract = candidate.get("profile_change_contract")
+    legacy_double_bass = manifest["adapter_id"] in {
+        "hlolli_wg_double_bass-passive-joint-validation-v1",
+        "hlolli_wg_double_bass-passive-joint-validation-v2",
+    }
+    if legacy_double_bass:
+        # Older double-bass manifests do not declare their change contract.
+        expected_contract = [
+            {"parameter": parameter, "path": path, "source_group": str(path[1])}
+            for parameter, path in double_bass_changes
+        ]
+        if contract is not None and contract != expected_contract:
+            raise FitError("legacy candidate profile change contract differs")
+        contract = expected_contract
+    if type(contract) is not list or not contract or len(contract) > 128:
+        raise FitError("candidate requires a bounded profile_change_contract")
+    if type(changes) is not list or len(changes) != len(contract):
+        raise FitError("candidate.profile_changes differs from its contract")
+    for index, rule in enumerate(contract):
+        if type(rule) is not dict:
+            raise FitError("profile change contract rule must be an object")
+        exact_keys(rule, {"parameter", "path", "source_group"},
+                   f"profile_change_contract[{index}]")
+        token(rule.get("parameter"), "contract parameter")
+        validate_profile_path(rule.get("path"), "contract path")
+        token(rule.get("source_group"), "contract source group")
     seen_paths: set[str] = set()
     seen_change_parameters: set[str] = set()
-    sources_by_string: dict[int, str] = {}
+    sources_by_group: dict[str, str] = {}
     for index, row in enumerate(changes):
         if type(row) is not dict:
             raise FitError(f"candidate.profile_changes[{index}] must be an object")
@@ -663,17 +652,18 @@ def validate_verify_candidate_manifest(
             row.get("parameter"),
             f"candidate.profile_changes[{index}].parameter",
         )
-        expected_parameter, expected_path = expected_rows[index]
+        rule = contract[index]
+        expected_parameter, expected_path = rule["parameter"], rule["path"]
         if (change_parameter != expected_parameter or
                 change_parameter in seen_change_parameters):
-            raise FitError("candidate profile changes have the wrong string order")
+            raise FitError("candidate profile changes differ from the contract order")
         seen_change_parameters.add(change_parameter)
         token(row.get("unit"), f"candidate.profile_changes[{index}].unit")
         path = validate_profile_path(
             row.get("path"), f"candidate.profile_changes[{index}].path"
         )
         if path != expected_path:
-            raise FitError("candidate profile changes have the wrong string paths")
+            raise FitError("candidate profile changes differ from the contract paths")
         path_key = json.dumps(path, separators=(",", ":"), ensure_ascii=True)
         if path_key in seen_paths:
             raise FitError("candidate.profile_changes has a duplicate path")
@@ -696,16 +686,14 @@ def validate_verify_candidate_manifest(
             row.get("source_fit_result_sha256"),
             f"candidate.profile_changes[{index}].source_fit_result_sha256",
         )
-        string_index = int(path[1])
-        prior_source = sources_by_string.get(string_index)
+        group = rule["source_group"]
+        prior_source = sources_by_group.get(group)
         if prior_source is not None and prior_source != source_digest:
-            raise FitError("one string reuses different fit results")
+            raise FitError("one source group reuses different fit results")
         if (prior_source is None and
-                source_digest in sources_by_string.values()):
+                source_digest in sources_by_group.values()):
             raise FitError("candidate profile changes reuse a fit result")
-        sources_by_string[string_index] = source_digest
-    if set(sources_by_string) != {0, 1, 2, 3}:
-        raise FitError("candidate profile changes do not cover four strings")
+        sources_by_group[group] = source_digest
 
 
 def v1_objective_passes_absolute_limits(

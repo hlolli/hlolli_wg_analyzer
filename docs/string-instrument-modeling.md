@@ -32,12 +32,25 @@ The analyzer owns:
   sensitivity checks;
 - checked model writing, receipts, reports, and clip export.
 
-Each analyzer-side instrument adapter owns:
+Each instrument adapter owns:
 
 - the Csound render command and model-specific controls;
 - the map from fit parameters to its fixed model-data file;
 - plug-in build and model validation;
 - instrument-specific safety bounds.
 
-The plug-in repository receives only the selected fixed data and a receipt
-safe to publish. Raw recordings and local fit output stay outside Git.
+Instrument adapters, fit manifests, model-specific rules, diagnostics, tests,
+and instrument documentation belong in their plug-in repositories under
+`tools/analyzer_adapter/`. All four instruments use explicit shared-tool paths;
+checkouts need not be siblings. Keep recordings, generated audio, fit output,
+scratch notes, verification dumps, and commit/hash logs outside source control.
+Public documentation should describe supported use, not local execution history.
+
+For version-2 candidate verification, an instrument declares
+`candidate.profile_change_contract`: an ordered list of `parameter`, `path`,
+and `source_group` rules. Shared validation requires an exact match to the
+change rows, bounded numeric edits, distinct paths/parameters, and one distinct
+fit-result hash per source group. The instrument owns the supported paths and
+group layout. Model writing still requires the hash-bound profile adapter and
+rechecks the selected result. Legacy double-bass manifests retain their
+existing protocol; other joint manifests must declare this contract.

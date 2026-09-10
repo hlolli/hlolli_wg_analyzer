@@ -254,32 +254,15 @@ It reads the saved `result.hwa-experiment`, joins fit and validation scores, and
 can add a pitch-conditioned body-shape score or a gain-independent passive
 decay score. Instrument adapters own rendering and any profile rules. The
 selector owns neither Csound nor a model profile. The
-[violin fit adapter](adapters/hlolli_wg_violin/README.md) tests the model's
-five existing controls through this shared path. It checks four open-string
-pitches and records the exact hashes of all six references. The
-[cello open-string adapter](adapters/hlolli_wg_cello/README.md) gives a full
-rerun command. The
-[viola passive-string adapter](adapters/hlolli_wg_viola/README.md) documents
-its four targets and checked multi-tail roster. The
-[double-bass adapter](adapters/hlolli_wg_double_bass/README.md) replaces its
-historical four-parameter random trial with four fit-only scalar grids whose
-model artifacts are scored by the native isolated-note pitch gate and native
-harmonic-decay comparison. Its D-only successor extends that string's fit to
-the existing first-order bridge termination cutoff without adding DSP or
-changing the fixed model. Its joint paths freeze one baseline/candidate
-choice and verify native checked-note harmonic objectives through fit, check,
-and untouched audit
-splits; a failed reference preflight cannot publish a bundle or silently
-replace the declared roster. Its physical-dynamics path also checks one frozen
-twelve-file OrchideaSOL roster against declared bowed level, dynamic-spectrum,
-pitch, clipping, and contact-state gates without fitting or exposing private
-paths. The version-2 path accepts four whole 48 kHz WAVE members from one
-externally declared MTG Good-sounds source group without
-conversion. Because Good-sounds reports `string=null`, it records those E1,
-A1, D2, and G2 rows as an open-pitch transfer proxy rather than physical-string
-proof; the Iowa-specific version-1 declaration remains strict and unchanged.
-The checker preserves the source's conflicting license claims; it does not
-present them as one clear grant.
+[violin fit adapter](https://github.com/hlolli/hlolli_wg_violin/tree/main/tools/analyzer_adapter)
+lives in the violin repository and uses this shared path. The
+[cello open-string adapter](https://github.com/hlolli/hlolli_wg_cello/tree/main/tools/analyzer_adapter)
+lives in the cello repository with its manifests, diagnostic tools, and tests. The
+[viola passive-string adapter](https://github.com/hlolli/hlolli_wg_viola/tree/main/tools/analyzer_adapter)
+lives in the viola repository with its manifests, diagnostics, and tests. The
+[double-bass adapter](https://github.com/hlolli/hlolli_wg_double_bass/tree/main/tools/analyzer_adapter)
+lives in the double-bass repository, including its fit manifests and tests.
+It takes explicit paths to this repository's shared tools and analyzer binary.
 See [Shared string-instrument modeling](docs/string-instrument-modeling.md) for
 the violin, viola, cello, and double-bass work split.
 

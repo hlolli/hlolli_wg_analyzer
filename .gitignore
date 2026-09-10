@@ -58,3 +58,5 @@ oom-*
 timeout-*
 slow-unit-*
 .learnings
+__pycache__/
+*.py[cod]
