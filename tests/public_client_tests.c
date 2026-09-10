@@ -42,6 +42,22 @@ int main(void)
     }
     hwa_analysis_free(&analysis);
     {
+        HWASeparationEvaluation evaluation;
+        HWASeparationEvalOptions options;
+        hwa_separation_eval_options_default(&options);
+        if (hwa_evaluate_separation_samples(NULL, NULL, NULL, 0U, 0U,
+                &options, &evaluation, error, sizeof(error)) == 0 ||
+            hwa_evaluate_separation_wav(NULL, NULL, NULL, &options,
+                &evaluation, error, sizeof(error)) == 0) return 1;
+    }
+    {
+        HWAEventScoreOptions score_options;
+        hwa_event_score_options_default(&score_options);
+        if (score_options.kind != HWA_EVENT_SCORE_CSOUND || score_options.tempo_bpm != 0U ||
+            hwa_event_score_write(NULL, NULL, 0U, &score_options, error, sizeof(error)) == 0 ||
+            error[0] == '\0') return 1;
+    }
+    {
         HWANotePhaseOptions options;
         HWANotePhaseResult phases;
         hwa_note_phase_options_default(&options);
@@ -51,6 +67,19 @@ int main(void)
             phases.path != NULL || error[0] == '\0') return 1;
         hwa_note_phase_result_free(&phases);
         hwa_note_phase_result_free(&phases);
+        {
+            HWANotePhaseSpectraResult spectra;
+            memset(&spectra, 0xA5, sizeof(spectra));
+            if (hwa_analyze_note_phase_spectra_wav(NULL, &options, &spectra,
+                    error, sizeof(error)) == 0 || spectra.series.envelope.summary.path != NULL ||
+                    spectra.series.frames != NULL || spectra.bin_powers != NULL ||
+                    spectra.bin_count != 0U || error[0] == '\0') return 1;
+            hwa_note_phase_spectra_result_free(&spectra);
+            hwa_note_phase_spectra_result_free(&spectra);
+            if (hwa_analyze_note_phase_spectra_wav(NULL, &options, NULL,
+                    error, sizeof(error)) == 0 || error[0] == '\0') return 1;
+            hwa_note_phase_spectra_result_free(NULL);
+        }
         {
             HWANotePhaseFramesResult frames;
             memset(&frames, 0xA5, sizeof(frames));

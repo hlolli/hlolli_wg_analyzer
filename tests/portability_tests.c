@@ -315,6 +315,33 @@ static void test_native_path_parity(void)
 }
 #endif
 
+static void test_separation_evaluation(void)
+{
+    const double reference[] = {1.0, -1.0, 1.0, -1.0};
+    const double estimate[] = {1.5, -0.5, 0.5, -1.5};
+    const double mixture[] = {2.0, 0.0, 0.0, -2.0};
+    const double tiny[] = {1e-300, -1e-300, 1e-300, -1e-300};
+    const double silent[] = {0.0, 0.0, 0.0, 0.0};
+    HWASeparationEvaluation result;
+    char error[HWA_ERROR_SIZE];
+    CHECK(hwa_evaluate_separation_samples(reference, estimate, mixture, 4U, 1U,
+        NULL, &result, error, sizeof(error)) == 0);
+    CHECK(result.estimate.si_sdr.status == HWA_SEPARATION_RATIO_FINITE);
+    CHECK(fabs(result.estimate.si_sdr.db - 10.0 * log10(4.0)) < 1e-12);
+    CHECK(result.si_sdr_improvement_valid &&
+        fabs(result.si_sdr_improvement_db - 10.0 * log10(4.0)) < 1e-12);
+    CHECK(fabs(result.estimate.estimate_level_dbfs.db - 10.0 * log10(1.25)) < 1e-12);
+    CHECK(hwa_evaluate_separation_samples(tiny, silent, NULL, 4U, 1U,
+        NULL, &result, error, sizeof(error)) == 0);
+    CHECK(result.estimate.snr.status == HWA_SEPARATION_RATIO_FINITE && result.estimate.snr.db == 0.0);
+    CHECK(fabs(result.estimate.error_level_dbfs.db + 6000.0) < 1e-9);
+    CHECK(hwa_evaluate_separation_samples(silent, tiny, NULL, 4U, 1U,
+        NULL, &result, error, sizeof(error)) == 0);
+    CHECK(result.estimate.si_sdr.status == HWA_SEPARATION_RATIO_UNDEFINED);
+    CHECK(result.estimate.reference_level_dbfs.status == HWA_SEPARATION_RATIO_NEGATIVE_INFINITY);
+    CHECK(fabs(result.estimate.estimate_level_dbfs.db + 6000.0) < 1e-9);
+}
+
 #if defined(HWA_WASM_REACTOR)
 __attribute__((export_name("hwa_portability_test")))
 int hwa_portability_test(void)
@@ -326,6 +353,7 @@ int main(void)
     test_source_analysis();
     test_limits_and_failure();
     test_virtual_long_source();
+    test_separation_evaluation();
 #if !defined(HWA_WASM_REACTOR)
     test_native_path_parity();
 #endif

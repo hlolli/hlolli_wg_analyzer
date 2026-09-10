@@ -19,7 +19,9 @@ static int write_metric(FILE *stream, const HWAMeasureObservation *observation, 
 
 static int write_report(FILE *stream, const HWANotePhaseResult *result,
                         const HWANotePhaseEnvelopeResult *envelope,
-                        const HWANotePhaseFramesResult *frames)
+                        const HWANotePhaseFramesResult *frames,
+                        const HWANotePhaseSpectraResult *spectra,
+                        const HWAPartialTracks *tracks)
 {
     const char *names[4] = {"attack", "sustain", "release", "clean-tail"};
     const char *statuses[6] = {
@@ -27,6 +29,7 @@ static int write_report(FILE *stream, const HWANotePhaseResult *result,
     };
     HWANumericLocale locale;
     size_t index;
+    size_t point_index = 0U;
     int status = -1;
     if (stream == NULL || result == NULL || hwa_c_numeric_locale_begin(&locale) != 0) return -1;
     if (fputs("{\"schema\":\"hwa-note-phases\",\"schema_version\":1,"
@@ -88,8 +91,27 @@ static int write_report(FILE *stream, const HWANotePhaseResult *result,
                 "\"spectrum_weighting\":\"one-sided-power\",\"flatness_excludes_dc\":true,"
                 "\"channel_mix\":\"arithmetic-mean\",\"level_weighting\":\"window-energy-normalized\","
                 "\"level_floor_dbfs\":-300,\"spectral_floor_dbfs\":%.17g,"
-                "\"units\":{\"level_dbfs\":\"dBFS\",\"centroid_hz\":\"Hz\",\"flatness\":\"ratio\"},"
-                "\"rows\":[", result->options.measurement.spectral_floor_dbfs) < 0) goto done;
+                "\"units\":{\"level_dbfs\":\"dBFS\",\"centroid_hz\":\"Hz\",\"flatness\":\"ratio\"}",
+                result->options.measurement.spectral_floor_dbfs) < 0) goto done;
+        if (spectra != NULL && fprintf(stream,
+                ",\"spectra\":{\"method\":\"" HWA_NOTE_PHASE_SPECTRA_METHOD_VERSION "\","
+                "\"bin_count\":%zu,\"first_bin_hz\":0,\"bin_step_hz\":%.17g,"
+                "\"power_unit\":\"full-scale-squared\","
+                "\"normalization\":\"edge_factor*abs(DFT(window*mono))^2/(fft_size*sum(window^2))\","
+                "\"interior_bin_factor\":2,\"dc_nyquist_bin_factor\":1,\"includes_below_floor\":true}",
+                spectra->bin_count, (double)result->format.sample_rate_hz /
+                (double)result->options.measurement.fft_size) < 0) goto done;
+        if (tracks != NULL && fprintf(stream,
+            ",\"partial_tracking\":{\"method\":\"" HWA_PARTIAL_TRACK_METHOD_VERSION "\","
+            "\"frequency_method\":\"three-bin-log-power-parabola\","
+            "\"frequency_state\":\"estimated\",\"frequency_unit\":\"Hz\",\"bin_power_unit\":\"full-scale-squared\","
+            "\"link_method\":\"strongest-first-nearest-cents\",\"identity\":\"spectral-peaks-not-harmonics\","
+            "\"max_peaks\":%zu,\"min_peak_dbfs\":%.17g,\"relative_floor_db\":%.17g,\"max_step_cents\":%.17g,"
+            "\"track_count\":%" PRIu64 ",\"omitted_peak_count\":%" PRIu64 ",\"evaluations\":%" PRIu64 "}",
+            tracks->options.max_peaks, tracks->options.min_peak_dbfs, tracks->options.relative_floor_db,
+            tracks->options.max_step_cents, tracks->track_count, tracks->omitted_peak_count,
+            tracks->evaluations) < 0) goto done;
+        if (fputs(",\"rows\":[", stream) == EOF) goto done;
         for (index = 0U; index < frames->frame_count; ++index) {
             const HWANotePhaseFrame *frame = &frames->frames[index];
             if (fprintf(stream, "%s{\"phase\":\"%s\",\"start_sample\":%" PRIu64
@@ -102,9 +124,33 @@ static int write_report(FILE *stream, const HWANotePhaseResult *result,
                     frame->zero_padded ? "true" : "false", frame->level_dbfs,
                     hwa_measure_status_name(frame->spectral_status)) < 0) goto done;
             if (frame->spectral_status == HWA_MEASURE_STATUS_VALID) {
-                if (fprintf(stream, "%.17g,\"flatness\":%.17g}",
+                if (fprintf(stream, "%.17g,\"flatness\":%.17g",
                             frame->centroid_hz, frame->flatness) < 0) goto done;
-            } else if (fputs("null,\"flatness\":null}", stream) == EOF) goto done;
+            } else if (fputs("null,\"flatness\":null", stream) == EOF) goto done;
+            if (spectra != NULL) {
+                size_t bin;
+                const double *powers = spectra->bin_powers + index * spectra->bin_count;
+                if (fputs(",\"bin_powers\":[", stream) == EOF) goto done;
+                for (bin = 0U; bin < spectra->bin_count; ++bin) {
+                    if (fprintf(stream, "%s%.17g", bin != 0U ? "," : "", powers[bin]) < 0)
+                        goto done;
+                }
+                if (fputs("]", stream) == EOF) goto done;
+            }
+            if (tracks != NULL) {
+                size_t first = point_index;
+                if (fputs(",\"partials\":[", stream) == EOF) goto done;
+                while (point_index < tracks->point_count && tracks->points[point_index].frame_index == index) {
+                    const HWAPartialTrackPoint *point = &tracks->points[point_index];
+                    if (fprintf(stream, "%s{\"track_id\":%" PRIu64 ",\"bin_index\":%zu,"
+                            "\"frequency_hz\":%.17g,\"bin_power\":%.17g,\"continued\":%s}",
+                            point_index != first ? "," : "", point->track_id, point->bin_index,
+                            point->frequency_hz, point->bin_power, point->continued ? "true" : "false") < 0) goto done;
+                    point_index++;
+                }
+                if (fputs("]", stream) == EOF) goto done;
+            }
+            if (fputs("}", stream) == EOF) goto done;
         }
         if (fputs("]}", stream) == EOF) goto done;
     }
@@ -116,17 +162,32 @@ done:
 
 int hwa_note_phase_report_json(FILE *stream, const HWANotePhaseResult *result)
 {
-    return write_report(stream, result, NULL, NULL);
+    return write_report(stream, result, NULL, NULL, NULL, NULL);
 }
 
 int hwa_note_phase_envelope_report_json(FILE *stream, const HWANotePhaseEnvelopeResult *result)
 {
-    return result != NULL ? write_report(stream, &result->summary, result, NULL) : -1;
+    return result != NULL ? write_report(stream, &result->summary, result, NULL, NULL, NULL) : -1;
 }
 
 int hwa_note_phase_frames_report_json(FILE *stream, const HWANotePhaseFramesResult *result,
                                      int include_envelope)
 {
     return result != NULL ? write_report(stream, &result->envelope.summary,
-        include_envelope ? &result->envelope : NULL, result) : -1;
+        include_envelope ? &result->envelope : NULL, result, NULL, NULL) : -1;
+}
+
+int hwa_note_phase_spectra_report_json(FILE *stream, const HWANotePhaseSpectraResult *result,
+                                      int include_envelope)
+{
+    return result != NULL ? write_report(stream, &result->series.envelope.summary,
+        include_envelope ? &result->series.envelope : NULL, &result->series, result, NULL) : -1;
+}
+
+int hwa_note_phase_partials_report_json(FILE *stream, const HWANotePhaseSpectraResult *result,
+    const HWAPartialTracks *tracks, int include_envelope, int include_spectra)
+{
+    return result != NULL && tracks != NULL ? write_report(stream, &result->series.envelope.summary,
+        include_envelope ? &result->series.envelope : NULL, &result->series,
+        include_spectra ? result : NULL, tracks) : -1;
 }

@@ -132,6 +132,17 @@ stable IDs, labels, hashes, and provenance. See
 
 ### Align, segment, and measure
 
+For one known note span, `note-phases` estimates attack, sustain, release, and
+tail bounds without a score. It reports levels, spectral centroid, their rates
+of change, and duration. An interrupted or unfinished tail has no usable
+measurements. See [Note phases](docs/note-phases.md) for the JSON contract,
+limits, and optional fitting objective.
+
+```sh
+build/hlolli-wg-analyzer note-phases solo.wav \
+  --note-start-sample 44100 --note-end-sample 88200
+```
+
 ```sh
 build/hlolli-wg-analyzer align reference.wav candidate.wav \
   --output reference-candidate.hwa-align
@@ -267,9 +278,8 @@ externally declared MTG Good-sounds source group without
 conversion. Because Good-sounds reports `string=null`, it records those E1,
 A1, D2, and G2 rows as an open-pitch transfer proxy rather than physical-string
 proof; the Iowa-specific version-1 declaration remains strict and unchanged.
-The frozen Good-sounds run passed reference preflight but rejected the
-candidate on E, A, and D; G alone passed. Its current checker also preserves
-the source's conflicting license claims instead of presenting one clean grant.
+The checker preserves the source's conflicting license claims; it does not
+present them as one clear grant.
 See [Shared string-instrument modeling](docs/string-instrument-modeling.md) for
 the violin, viola, cello, and double-bass work split.
 

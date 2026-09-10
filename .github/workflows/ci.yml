@@ -13,6 +13,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  event-score-renderers:
+    name: Csound and LilyPond event score checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install score renderers
+        run: sudo apt-get update && sudo apt-get install -y csound lilypond
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DHLOLLI_WG_ANALYZER_STRICT=ON -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel 2 --target hlolli_wg_analyzer hlolli_wg_analyzer_event_score_tests
+      - name: Check score export and rendered notes
+        run: ctest --test-dir build --output-on-failure -R '^(unit|cli)\.event-score$'
+
   native-unix:
     name: ${{ matrix.name }} ${{ matrix.build_type }}
     strategy:
@@ -229,6 +245,28 @@ jobs:
         run: >-
           ctest --test-dir build-wasm --output-on-failure
           -R '^wasm\.'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install browser test runtime
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/hwa-web-deps" --ignore-scripts --no-audit --no-fund \
+            onnxruntime-web@1.29.0 playwright@1.62.1
+          node "$RUNNER_TEMP/hwa-web-deps/node_modules/playwright/cli.js" install --with-deps chromium
+          curl -fsSL \
+            https://raw.githubusercontent.com/spotify/basic-pitch/fa5997af0a8210982619003269994a1be25eddf3/basic_pitch/saved_models/icassp_2022/nmp.onnx \
+            -o "$RUNNER_TEMP/nmp.onnx"
+      - name: Check browser model and C decoder
+        shell: bash
+        run: |
+          HWA_BROWSER="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' "$RUNNER_TEMP/hwa-web-deps/node_modules/playwright")"
+          node tests/browser_basic_pitch_tests.mjs \
+            --browser "$HWA_BROWSER" \
+            --ort-dist "$RUNNER_TEMP/hwa-web-deps/node_modules/onnxruntime-web/dist" \
+            --model "$RUNNER_TEMP/nmp.onnx" \
+            --decoder-wasm "$PWD/build-wasm/hwa_basic_pitch_browser_tests.wasm" \
+            --playwright-module "$RUNNER_TEMP/hwa-web-deps/node_modules/playwright"
 
   sanitizer-regression:
     name: Clang ASan UBSan malformed WAVE regression

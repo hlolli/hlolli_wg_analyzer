@@ -147,6 +147,27 @@ NOTE_PHASE_OPTIONS = {
     "silence_threshold_dbfs": ("--silence-threshold", -60.0, -200, 0),
 }
 
+NOTE_PARTIAL_OPTIONS = {
+    "max_peaks": ("--max-partials", 12, 1, 32),
+    "relative_floor_db": ("--partial-relative-floor-db", -30.0, -300, 0),
+    "max_step_cents": ("--partial-link-cents", 100.0, 0, 1200),
+}
+
+
+def note_partial_options(options: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    if options is None:
+        options = {}
+    if type(options) is not dict or set(options) - set(NOTE_PARTIAL_OPTIONS):
+        raise EvidenceError("partial options must contain only known settings")
+    result = {}
+    for name, (_, default, minimum, maximum) in NOTE_PARTIAL_OPTIONS.items():
+        raw = options.get(name, default)
+        value = _count(raw, name) if type(default) is int else _finite(raw, name)
+        if not minimum <= value <= maximum or (name == "max_step_cents" and value == 0):
+            raise EvidenceError("partial option is out of range: " + name)
+        result[name] = value
+    return result
+
 
 def note_phase_options(options: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Resolve phase settings without changing the caller's manifest."""
@@ -188,11 +209,21 @@ class NotePhaseCache:
             self, checks: AnalyzerEvidence, source_id: str,
             start_sample: int, end_sample: int, *,
             options: Optional[dict[str, Any]] = None,
-            envelope: bool = False, frames: bool = False) -> NotePhaseEvidence:
+            envelope: bool = False, frames: bool = False,
+            spectra: bool = False, partials: bool = False,
+            partial_options: Optional[dict[str, Any]] = None) -> NotePhaseEvidence:
         if type(envelope) is not bool:
             raise EvidenceError("note-phase envelope must be a boolean")
         if type(frames) is not bool:
             raise EvidenceError("note-phase frames must be a boolean")
+        if type(spectra) is not bool:
+            raise EvidenceError("note-phase spectra must be a boolean")
+        if type(partials) is not bool:
+            raise EvidenceError("note-phase partials must be a boolean")
+        if partial_options is not None and not partials:
+            raise EvidenceError("partial options require partial tracking")
+        tracking = note_partial_options(partial_options) if partials else None
+        frames = frames or spectra or partials
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -201,7 +232,8 @@ class NotePhaseCache:
         source = checks._source(source_id)
         key = (checks._analyzer, checks.analyzer_sha256,
                source, checks._sources[source_id][1], start, end,
-               tuple(settings.items()), envelope, frames, checks._cwd or Path.cwd(),
+               tuple(settings.items()), envelope, frames, spectra, partials,
+               tuple(tracking.items()) if tracking is not None else (), checks._cwd or Path.cwd(),
                tuple(sorted(checks._environment.items())))
         cached = self._reports.get(key)
         if cached is not None:
@@ -211,9 +243,10 @@ class NotePhaseCache:
             self._reports.move_to_end(key)
             return result
         result = checks.note_phases(source_id, start, end, options=settings,
-                                   envelope=envelope, frames=frames)
+                                   envelope=envelope, frames=frames, spectra=spectra,
+                                   partials=partials, partial_options=tracking)
         # Large frame series remain caller-owned, outside the scalar fit cache.
-        if frames and len(result.report["frame_series"]["rows"]) > 2048:
+        if spectra or partials or (frames and len(result.report["frame_series"]["rows"]) > 2048):
             return result
         self._reports[key] = copy.deepcopy(result)
         if len(self._reports) > self._max_entries:
@@ -221,7 +254,8 @@ class NotePhaseCache:
         return result
 
 
-def _note_phase_frames(report: dict[str, Any], phases: dict[str, Any]) -> None:
+def _note_phase_frames(report: dict[str, Any], phases: dict[str, Any], *,
+                       spectra: bool = False) -> None:
     series = report.get("frame_series")
     if (type(series) is not dict or series.get("method") != "note-phase-frames-1" or
             series.get("window") != "symmetric-hann" or
@@ -237,6 +271,21 @@ def _note_phase_frames(report: dict[str, Any], phases: dict[str, Any]) -> None:
     if type(rows) is not list or len(rows) > 2000000:
         raise EvidenceError("note-phase frames exceed the series limit")
     size, hop = report["measurement_fft_size"], report["measurement_hop_size"]
+    if spectra:
+        metadata = series.get("spectra")
+        if (type(metadata) is not dict or metadata.get("method") != "note-phase-spectra-1" or
+                _count(metadata.get("bin_count"), "spectrum bin count") != size // 2 + 1 or
+                _finite(metadata.get("first_bin_hz"), "first bin") != 0 or
+                _finite(metadata.get("bin_step_hz"), "bin spacing") != report["sample_rate_hz"] / size or
+                metadata.get("power_unit") != "full-scale-squared" or
+                metadata.get("normalization") !=
+                "edge_factor*abs(DFT(window*mono))^2/(fft_size*sum(window^2))" or
+                _count(metadata.get("interior_bin_factor"), "interior bin factor") != 2 or
+                _count(metadata.get("dc_nyquist_bin_factor"), "edge bin factor") != 1 or
+                metadata.get("includes_below_floor") is not True):
+            raise EvidenceError("note-phase spectra returned an unknown contract")
+    elif "spectra" in series:
+        raise EvidenceError("note-phases returned unrequested spectra")
     half, source_frames = size // 2, report["frames"]
     index = 0
     for name, phase in phases.items():
@@ -272,8 +321,113 @@ def _note_phase_frames(report: dict[str, Any], phases: dict[str, Any]) -> None:
                     raise EvidenceError("note-phase frame spectrum is out of range")
             elif row.get("centroid_hz") is not None or row.get("flatness") is not None:
                 raise EvidenceError("rejected frame spectrum must be null")
+            if spectra:
+                powers = row.get("bin_powers")
+                if type(powers) is not list or len(powers) != size // 2 + 1:
+                    raise EvidenceError("note-phase spectrum bin count changed")
+                for power in powers:
+                    if _finite(power, "bin power") < 0:
+                        raise EvidenceError("note-phase spectrum power is negative")
+                total = sum(powers)
+                if not math.isfinite(total):
+                    raise EvidenceError("note-phase spectrum total is not finite")
+                _body_number(level, 10 * math.log10(total) if total > 1e-30 else -300,
+                             "spectrum frame level")
+                if expected_status == "valid":
+                    _body_number(row["centroid_hz"], sum(k * report["sample_rate_hz"] / size * p
+                        for k, p in enumerate(powers)) / total, "spectrum centroid")
+                    positive = sum(powers[1:])
+                    flatness = (math.exp(sum(math.log(max(p, 1e-30)) for p in powers[1:]) /
+                                        (len(powers)-1)) / (positive / (len(powers)-1))
+                                if positive > 0 else 0)
+                    _body_number(row["flatness"], flatness, "spectrum flatness")
+            elif "bin_powers" in row:
+                raise EvidenceError("note-phase frame has unrequested bin powers")
     if index != len(rows):
         raise EvidenceError("note-phase frames contain extra rows")
+
+
+def _note_partial_tracks(report: dict[str, Any], settings: dict[str, Any]) -> None:
+    series = report["frame_series"]
+    meta = series.get("partial_tracking")
+    if (type(meta) is not dict or meta.get("method") != "spectral-peak-tracks-1" or
+            meta.get("frequency_method") != "three-bin-log-power-parabola" or
+            meta.get("frequency_state") != "estimated" or meta.get("frequency_unit") != "Hz" or
+            meta.get("bin_power_unit") != "full-scale-squared" or
+            meta.get("link_method") != "strongest-first-nearest-cents" or
+            meta.get("identity") != "spectral-peaks-not-harmonics" or
+            _finite(meta.get("min_peak_dbfs"), "partial floor") != -100):
+        raise EvidenceError("partial tracking returned an unknown contract")
+    for name, expected in settings.items():
+        value = _count(meta.get(name), name) if type(expected) is int else _finite(meta.get(name), name)
+        if value != expected:
+            raise EvidenceError("partial tracking setting changed: " + name)
+    size = report["measurement_fft_size"]
+    step = report["sample_rate_hz"] / size
+    previous = []
+    previous_center = None
+    next_id = 0
+    evaluations = 0
+    observed_omitted = 0
+    for row in series["rows"]:
+        points = row.get("partials")
+        if type(points) is not list or len(points) > settings["max_peaks"]:
+            raise EvidenceError("partial tracking has an invalid point set")
+        if previous_center is None or row["center_sample"] - previous_center != report["measurement_hop_size"]:
+            previous = []
+        evaluations += size + len(points) * len(previous)
+        previous_bin = 0
+        powers = row.get("bin_powers")
+        for point in points:
+            if type(point) is not dict:
+                raise EvidenceError("partial tracking point must be an object")
+            k = _count(point.get("bin_index"), "partial bin")
+            track_id = _count(point.get("track_id"), "partial track id")
+            frequency = _finite(point.get("frequency_hz"), "partial frequency")
+            power = _finite(point.get("bin_power"), "partial power")
+            if (not previous_bin < k < size//2 or track_id == 0 or
+                    not (k-0.5)*step <= frequency <= (k+0.5)*step or power < 1e-10 or
+                    type(point.get("continued")) is not bool):
+                raise EvidenceError("partial tracking point is out of range")
+            previous_bin = k
+            if powers is not None:
+                if power != powers[k] or power <= powers[k-1] or power < powers[k+1]:
+                    raise EvidenceError("partial tracking point is not a spectral peak")
+                left, middle, right = [math.log(max(v, 1e-300)) for v in powers[k-1:k+2]]
+                curve = left - 2*middle + right
+                offset = max(-0.5, min(0.5, 0.5*(left-right)/curve if curve < 0 else 0))
+                _body_number(frequency, (k+offset)*step, "partial peak frequency")
+        if powers is not None:
+            threshold = max(1e-10, max(powers) * 10**(settings["relative_floor_db"]/10))
+            candidates = [k for k in range(1, len(powers)-1)
+                          if powers[k] >= threshold and powers[k] > powers[k-1] and powers[k] >= powers[k+1]]
+            selected = sorted(candidates, key=lambda k: (-powers[k], k))[:settings["max_peaks"]]
+            if sorted(selected) != [p["bin_index"] for p in points]:
+                raise EvidenceError("partial peak selection disagrees with the spectrum")
+            observed_omitted += max(0, len(candidates)-len(selected))
+        available = {p["track_id"]: p for p in previous}
+        for point in sorted(points, key=lambda p: (-p["bin_power"], p["bin_index"])):
+            choices = [(abs(1200*math.log2(point["frequency_hz"]/p["frequency_hz"])), track_id)
+                       for track_id, p in available.items()]
+            choices = [v for v in choices if v[0] <= settings["max_step_cents"]]
+            if choices:
+                expected_id = min(choices)[1]
+                del available[expected_id]
+                continued = True
+            else:
+                next_id += 1
+                expected_id = next_id
+                continued = False
+            if point["track_id"] != expected_id or point["continued"] != continued:
+                raise EvidenceError("partial track link disagrees with adjacent frames")
+        previous = points
+        previous_center = row["center_sample"]
+    if (_count(meta.get("track_count"), "track count") != next_id or
+            _count(meta.get("evaluations"), "tracking evaluations") != evaluations or evaluations > 100000000):
+        raise EvidenceError("partial tracking counts changed")
+    omitted = _count(meta.get("omitted_peak_count"), "omitted peaks")
+    if omitted > len(series["rows"]) * (size//2-1) or ("spectra" in series and omitted != observed_omitted):
+        raise EvidenceError("partial tracking omitted count changed")
 
 
 def _body_number(value: Any, expected: float, field: str) -> float:
@@ -718,14 +872,22 @@ class AnalyzerEvidence:
     def note_phases(
             self, source_id: str, start_sample: int,
             end_sample: int, *, options: Optional[dict[str, Any]] = None,
-            envelope: bool = False, frames: bool = False
+            envelope: bool = False, frames: bool = False, spectra: bool = False,
+            partials: bool = False, partial_options: Optional[dict[str, Any]] = None
             ) -> NotePhaseEvidence:
         """Measure the phases around a caller-supplied note span."""
         if type(envelope) is not bool:
             raise EvidenceError("note-phase envelope must be a boolean")
         if type(frames) is not bool:
             raise EvidenceError("note-phase frames must be a boolean")
-        want_frames = frames
+        if type(spectra) is not bool:
+            raise EvidenceError("note-phase spectra must be a boolean")
+        if type(partials) is not bool:
+            raise EvidenceError("note-phase partials must be a boolean")
+        if partial_options is not None and not partials:
+            raise EvidenceError("partial options require partial tracking")
+        tracking = note_partial_options(partial_options) if partials else None
+        want_frames = frames or spectra or partials
         start = _count(start_sample, "note start sample")
         end = _count(end_sample, "note end sample")
         if start >= end or end > 2**64 - 1:
@@ -739,6 +901,12 @@ class AnalyzerEvidence:
             arguments.append("--phase-envelope")
         if want_frames:
             arguments.append("--phase-frames")
+        if spectra:
+            arguments.append("--phase-spectra")
+        if partials:
+            arguments.append("--phase-partials")
+            for name, value in tracking.items():
+                arguments.extend([NOTE_PARTIAL_OPTIONS[name][0], str(value)])
         for name, value in settings.items():
             arguments.extend([NOTE_PHASE_OPTIONS[name][0],
                               str(value) if type(value) is int else format(value, ".17g")])
@@ -848,9 +1016,14 @@ class AnalyzerEvidence:
             phases[name] = row
             previous_end = last
         if want_frames:
-            _note_phase_frames(report, phases)
+            _note_phase_frames(report, phases, spectra=spectra)
         elif "frame_series" in report:
             raise EvidenceError("note-phases returned unrequested frames")
+        if partials:
+            _note_partial_tracks(report, tracking)
+        elif want_frames and ("partial_tracking" in report["frame_series"] or
+                              any("partials" in row for row in report["frame_series"]["rows"])):
+            raise EvidenceError("note-phases returned unrequested partial tracks")
         return NotePhaseEvidence(report, phases)
 
     def body_envelope(

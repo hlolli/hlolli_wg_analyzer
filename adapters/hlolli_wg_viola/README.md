@@ -128,18 +128,13 @@ The four target contracts are separate:
 | D4 | `strings[2].loss_time_constant_seconds` | 3 | 292.96845778349154 Hz | 438.95671359865264 Hz |
 | A4 | `strings[3].loss_time_constant_seconds` | 4 | 441.08823856808476 Hz | 441.08823856808476 Hz |
 
-The table's pitches come from the fixed Iowa pizzicato fit cuts in the Stage 3
-source receipt. Each roster case has its own measured pitch. The adapter sets
+The table gives the pitches used by the legacy Iowa fit cuts. Each roster case has its own measured pitch. The adapter sets
 the constructor value to `440 * case pitch / nominal open pitch` and renders
 that same pitch. The probe checks that the tuned open string and render pitch
 agree. Cases do not share tuning.
 
-The current C, G, D, and A loss baselines are 1.15, 1.90, 0.85, and 0.45
-seconds. A 2026-09-03 cross-corpus experiment chose them as perceptual
-whole-tail duration compromises, not as measurements of physical string loss.
-The older Stage 3 receipts and their frozen bundles retain the former
-0.25-second baseline and remain valid historical runs. New bundles use the
-current model values above.
+Read baseline values from the supplied model. Tail-duration fits are not
+measurements of physical string loss.
 
 For each scalar search job, the frozen renderer:
 
@@ -209,7 +204,7 @@ The adapter divides each total by that family's case count. The fit score then
 gives Iowa and RWC variation 1 equal weight. The selector's check weight is
 0.5, so RWC variation 2 has the same final coefficient as either fit family.
 
-The checked Stage 3 receipts fix these case counts:
+The roster contract requires these case counts:
 
 | Target | Iowa 2012 fit | RWC variation 1 fit | RWC variation 2 check | BEST MUSIC TOOLS check |
 | --- | ---: | ---: | ---: | ---: |
@@ -253,12 +248,7 @@ use this fixed loss-time grid in seconds:
 1.45 1.60 1.75 1.90 2.05 2.20 2.50 3.00 4.00 5.00
 ```
 
-Fit-side decay times set the range before the check search. A real C-string
-render preflight then rejected 0.02 and 0.05 seconds because each gave less
-than the scorer's fixed 0.20 seconds of tail support. The 0.10-second render
-passed with 0.269 seconds of support, 35.66 dB of range, and 1.12 dB line
-residual. This keeps every search point valid without changing the shared
-decay rule.
+Every rendered tail must meet the scorer's minimum 0.20 seconds of support.
 
 The output adds a sorted `roster.json` to the usual `experiment.json`,
 `fit.json`, `bindings.json`, `renderer`, and `receipt.json`. The experiment,
@@ -345,10 +335,8 @@ grid with every binding from `bindings.json`:
 ```
 
 Keep the higher run-visit cap in the saved command. Sixteen-second jobs can
-exceed the default two-billion total. One three-case G roster makes 252
-renders and about 0.994 GiB of raw PCM24 WAVE files. The checked four-roster,
-20-case set makes 1,680 renders and 7,112,521,920 bytes, or about 6.624 GiB,
-before other result files.
+exceed the default two-billion total. Allow space for every rendered WAVE
+and the result files.
 
 Use these renders only to inspect the joint grid. Do not pass this bundle to
 selection or profile writing. After choosing fixed values with a named test,
@@ -400,16 +388,11 @@ The bundle hashes the Csound executable and its named core library. At build
 time, it also checks the library path reported by the Darwin loader or `ldd`
 on Linux. The current builder supports Darwin and Linux toolchains.
 
-## Current limit
+## Limits
 
 The fit manifest scores aligned decay shape and ignores gain, polarity, and
-leading silence. RWC variation 2 supplies accepted C, D, and A check tails.
-All three RWC variation 2 G tails fail the fixed 20 dB range gate and stay
-rejected. The accepted Best Music Tools A442 open-G tail supplies the one G
-check for the older directional diagnostic. One fit and one check tail would
-still be insufficient for a physical G-loss claim; another controlled G tail
-would be needed before making that claim. The 2026-09-03 fixed-model update
-instead used a separately frozen perceptual whole-tail criterion with equal
-Iowa, RWC, and OrchideaSOL corpus weight, and it makes no physical-loss claim.
-RWC variation 3 stays sealed. The scalar adapter writes one chosen string
-value at a time. The joint diagnostic does not choose or write values.
+leading silence. Inputs must pass the declared signal-quality gates. Use
+independent sources to test whether a selected value holds across recordings;
+one fit and one check tail cannot establish physical string loss.
+The scalar adapter writes one chosen string value at a time. The joint
+diagnostic does not choose or write values.

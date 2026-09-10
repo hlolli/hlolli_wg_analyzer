@@ -14,7 +14,8 @@
  */
 typedef int (*HWAMeasureFrameSink)(void *context, size_t item_index,
     uint64_t start_sample, double level_dbfs, double centroid_hz,
-    double flatness, char *error, size_t error_size);
+    double flatness, const double *bin_powers, size_t bin_count,
+    char *error, size_t error_size);
 
 int hwa_measure_engine_wav_frames(const HWAItemSet *items,
     const char *explicit_audio_path, const HWAMeasurementOptions *options,

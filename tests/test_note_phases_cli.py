@@ -63,6 +63,159 @@ class NotePhasesTests(unittest.TestCase):
         self.assertEqual(process.returncode, expected, process.stderr)
         return json.loads(process.stdout) if expected == 0 else process
 
+    def test_partial_tracks_follow_tones_and_preserve_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            base = self.run_report(path, "--phase-frames")
+            report = self.run_report(path, "--phase-partials")
+            metadata = report["frame_series"]["partial_tracking"]
+            self.assertEqual(metadata["method"], "spectral-peak-tracks-1")
+            self.assertEqual(metadata["frequency_state"], "estimated")
+            self.assertEqual(metadata["bin_power_unit"], "full-scale-squared")
+            steady = [r for r in report["frame_series"]["rows"] if 8000 <= r["center_sample"] <= 14000]
+            self.assertTrue(steady)
+            for frequency in (220, 660):
+                peaks = [min(r["partials"], key=lambda p: abs(p["frequency_hz"]-frequency)) for r in steady]
+                self.assertTrue(all(abs(p["frequency_hz"]-frequency) < 0.2 for p in peaks))
+                self.assertEqual(len({p["track_id"] for p in peaks}), 1)
+                self.assertTrue(all(p["continued"] for p in peaks[1:]))
+            both = self.run_report(path, "--phase-partials", "--phase-spectra")
+            both["frame_series"].pop("spectra")
+            for row in both["frame_series"]["rows"]:
+                powers = row.pop("bin_powers")
+                for point in row["partials"]:
+                    k = point["bin_index"]
+                    self.assertEqual(point["bin_power"], powers[k])
+                    self.assertGreater(powers[k], powers[k-1])
+                    self.assertGreaterEqual(powers[k], powers[k+1])
+            self.assertEqual(both, report)
+            report["frame_series"].pop("partial_tracking")
+            for row in report["frame_series"]["rows"]:
+                row.pop("partials")
+            self.assertEqual(report, base)
+            limited = self.run_report(path, "--phase-partials", "--max-partials", "1")
+            self.assertGreater(limited["frame_series"]["partial_tracking"]["omitted_peak_count"], 0)
+            self.assertTrue(all(len(r["partials"]) <= 1 for r in limited["frame_series"]["rows"]))
+            custom = self.run_report(path, "--phase-partials", "--partial-link-cents", "50",
+                                      "--partial-relative-floor-db", "-10")
+            self.assertEqual(custom["frame_series"]["partial_tracking"]["max_step_cents"], 50)
+            for flags in (("--partial-link-cents", "0"), ("--partial-relative-floor-db", "1"),
+                          ("--partial-link-cents", "50")):
+                self.run_report(path, *flags, expected=2)
+            self.run_report(path, "--phase-partials", "--phase-partials", expected=2)
+            for limit in ("--max-measurement-work-bytes", "--max-measurement-series-points"):
+                self.run_report(path, "--phase-partials", limit, "1", expected=1)
+            for variant in ({"silence": True}, {"second": True}, {"tail_seconds": 0.35}):
+                recording(path, **variant)
+                report = self.run_report(path, "--phase-partials")
+                valid = {p["phase"] for p in report["phases"] if p["status"] == "valid"}
+                self.assertTrue(all(r["phase"] in valid for r in report["frame_series"]["rows"]))
+                if variant.get("silence"):
+                    self.assertEqual(report["frame_series"]["partial_tracking"]["track_count"], 0)
+
+    def test_spectra_match_dft_and_preserve_reports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            flags = ("--measure-fft-size", "256", "--measure-hop-size", "128")
+            for fixture in ("note", "edges", "padded"):
+                recording(path, tail_seconds=0.05 if fixture == "padded" else 1.4)
+                if fixture == "edges":
+                    with wave.open(str(path), "wb") as audio:
+                        audio.setnchannels(1)
+                        audio.setsampwidth(2)
+                        audio.setframerate(16000)
+                        audio.writeframes(b"".join(struct.pack("<h", round(32768 * (0.2 +
+                            0.2 * (-1)**i + 0.2 * math.sin(math.tau * 16 * i / 256))))
+                            for i in range(41600)))
+                with wave.open(str(path)) as audio:
+                    samples = struct.unpack("<" + str(audio.getnframes()) + "h",
+                                            audio.readframes(audio.getnframes()))
+                frame_only = self.run_report(path, *flags, "--phase-frames")
+                report = self.run_report(path, *flags, "--phase-spectra")
+                self.assertEqual(report, self.run_report(path, *flags, "--phase-spectra", "--phase-frames"))
+                series = report["frame_series"]
+                self.assertEqual(series["spectra"]["method"], "note-phase-spectra-1")
+                self.assertEqual(series["spectra"]["power_unit"], "full-scale-squared")
+                self.assertEqual(series["spectra"]["bin_count"], 129)
+                self.assertEqual(series["spectra"]["first_bin_hz"], 0)
+                self.assertEqual(series["spectra"]["bin_step_hz"], 62.5)
+                rows = series["rows"]
+                self.assertTrue(rows)
+                for row in rows:
+                    powers = row["bin_powers"]
+                    self.assertEqual(len(powers), 129)
+                    self.assertTrue(all(math.isfinite(p) and p >= 0 for p in powers))
+                    total = sum(powers)
+                    self.assertAlmostEqual(row["level_dbfs"],
+                        10 * math.log10(total) if total > 1e-30 else -300, places=9)
+                window = [0.5 * (1 - math.cos(math.tau * i / 255)) for i in range(256)]
+                energy = sum(w*w for w in window)
+                for row in (rows[0], rows[len(rows)//2], rows[-1]):
+                    start = row["start_sample"]
+                    values = [(samples[start+i]/32768 if start+i < len(samples) else 0)*window[i]
+                              for i in range(256)]
+                    expected = [abs(sum(v * cmath.exp(-1j * math.tau * k * n / 256)
+                                       for n, v in enumerate(values)))**2 / (256 * energy)
+                                * (1 if k in (0, 128) else 2) for k in range(129)]
+                    for actual, power in zip(row["bin_powers"], expected):
+                        self.assertTrue(math.isclose(actual, power, rel_tol=1e-8, abs_tol=1e-14))
+                    self.assertAlmostEqual(sum(row["bin_powers"]),
+                                           sum(v*v for v in values)/energy, places=12)
+                if fixture == "edges":
+                    mid = rows[len(rows)//2]["bin_powers"]
+                    self.assertGreater(mid[0], 0.02)
+                    self.assertGreater(mid[-1], 0.02)
+                if fixture == "padded":
+                    self.assertTrue(any(r["zero_padded"] for r in rows))
+                series.pop("spectra")
+                for row in rows:
+                    row.pop("bin_powers")
+                self.assertEqual(report, frame_only)
+            recording(path)
+            envelope = self.run_report(path, *flags, "--phase-envelope", "--phase-frames")
+            both = self.run_report(path, *flags, "--phase-envelope", "--phase-spectra")
+            both["frame_series"].pop("spectra")
+            for row in both["frame_series"]["rows"]:
+                row.pop("bin_powers")
+            self.assertEqual(both, envelope)
+
+    def test_spectra_limits_rejections_and_low_power(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            flags = ("--phase-spectra", "--measure-fft-size", "256")
+            report = self.run_report(path, *flags, "--block-frames", "97")
+            self.assertEqual(report, self.run_report(path, *flags, "--block-frames", "4096"))
+            transforms = (report["frames"] - 128 + 255) // 256
+            self.run_report(path, *flags, "--max-measurement-transforms", str(transforms))
+            for limit in ("--max-work-bytes", "--max-measurement-work-bytes", "--max-measurements", "--max-measurement-series-points",
+                          "--max-measurement-transforms"):
+                failed = self.run_report(path, *flags, limit, "1", expected=1)
+                self.assertEqual(failed.stdout, "")
+            # Frame storage fits here; dense spectrum storage does not.
+            self.run_report(path, "--phase-frames", "--measure-hop-size", "4", "--max-measurement-work-bytes", "4000000")
+            failed = self.run_report(path, "--phase-spectra", "--measure-hop-size", "4",
+                                     "--max-measurement-work-bytes", "4000000", expected=1)
+            self.assertIn("spectra exceed the work limit", failed.stderr)
+            self.assertEqual(failed.stdout, "")
+            self.run_report(path, *flags, "--phase-spectra", expected=2)
+            wrong = subprocess.run([str(ANALYZER), "inspect", str(path), "--phase-spectra"], capture_output=True)
+            self.assertEqual(wrong.returncode, 2)
+            low = self.run_report(path, *flags, "--spectral-floor-dbfs", "0")
+            self.assertTrue(any(sum(r["bin_powers"]) > 0 for r in low["frame_series"]["rows"]))
+            self.assertTrue(all(r["centroid_hz"] is None for r in low["frame_series"]["rows"]))
+            self.assertEqual([r["bin_powers"] for r in report["frame_series"]["rows"]],
+                             [r["bin_powers"] for r in low["frame_series"]["rows"]])
+            for variant in ({"silence": True}, {"second": True}, {"tail_seconds": 0.35}):
+                recording(path, **variant)
+                report = self.run_report(path, *flags)
+                valid = {p["phase"] for p in report["phases"] if p["status"] == "valid"}
+                self.assertTrue(all(r["phase"] in valid for r in report["frame_series"]["rows"]))
+                if variant.get("silence"):
+                    self.assertEqual(report["frame_series"]["rows"], [])
+                    self.assertEqual(report["frame_series"]["spectra"]["bin_count"], 129)
+
     def test_frame_series_grid_and_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "note.wav"
@@ -191,13 +344,14 @@ class NotePhasesTests(unittest.TestCase):
                 audio.setsampwidth(2)
                 audio.setframerate(16000)
                 audio.writeframes(b"".join(struct.pack("<hh", s, -s) for s in samples))
-            report = self.run_report(stereo, "--phase-frames")
+            report = self.run_report(stereo, "--phase-spectra", "--measure-fft-size", "256")
             self.assertTrue(report["frame_series"]["rows"])
             for row in report["frame_series"]["rows"]:
                 self.assertEqual(row["level_dbfs"], -300)
                 self.assertEqual(row["spectral_status"], "no-signal")
                 self.assertIsNone(row["centroid_hz"])
                 self.assertIsNone(row["flatness"])
+                self.assertTrue(all(p == 0 for p in row["bin_powers"]))
 
     def test_phases_cover_a_note_with_known_envelope(self):
         with tempfile.TemporaryDirectory(prefix="hwa phase note ") as directory:
@@ -407,6 +561,128 @@ class NotePhasesTests(unittest.TestCase):
                         checks, "_run", return_value=report):
                     with self.assertRaises(evidence.EvidenceError):
                         checks.note_phases("note", 3200, 19200)
+
+    def test_partial_tracks_checked_evidence(self):
+        fit = load_fit_tests().MODULE
+        evidence = fit.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {"note": (path, fit.sha256(path))})
+            checks.note_phases("note", 3200, 19200, partials=True)
+            original = checks.note_phases("note", 3200, 19200, partials=True, spectra=True).report
+            cache = evidence.NotePhaseCache()
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                for _ in range(2):
+                    cache.note_phases(checks, "note", 3200, 19200, partials=True,
+                                      partial_options={"max_peaks": 2, "max_step_cents": 50, "relative_floor_db": -20})
+                self.assertEqual(run.call_count, 2)
+            for change in ("id", "continued", "frequency", "power", "missing", "count", "omitted", "method", "settings"):
+                report = copy.deepcopy(original)
+                meta = report["frame_series"]["partial_tracking"]
+                row = next(r for r in report["frame_series"]["rows"] if r["partials"])
+                point = row["partials"][0]
+                if change == "id":
+                    point["track_id"] += 1
+                elif change == "continued":
+                    point["continued"] = not point["continued"]
+                elif change == "frequency":
+                    point["frequency_hz"] += 0.1
+                elif change == "power":
+                    point["bin_power"] *= 2
+                elif change == "missing":
+                    row["partials"].clear()
+                elif change == "count":
+                    meta["track_count"] += 1
+                elif change == "omitted":
+                    meta["omitted_peak_count"] += 1
+                elif change == "method":
+                    meta["identity"] = "harmonics"
+                else:
+                    meta["max_step_cents"] = 200
+                with self.subTest(change=change), mock.patch.object(checks, "_run", return_value=report):
+                    with self.assertRaises(evidence.EvidenceError):
+                        checks.note_phases("note", 3200, 19200, partials=True, spectra=True)
+            with mock.patch.object(checks, "_run", return_value=original):
+                with self.assertRaises(evidence.EvidenceError):
+                    checks.note_phases("note", 3200, 19200, spectra=True)
+            for options in ({"max_peaks": True}, {"max_peaks": 33}, {"max_step_cents": 0},
+                            {"relative_floor_db": 1}, {"typo": 1}):
+                with self.assertRaises(evidence.EvidenceError):
+                    checks.note_phases("note", 3200, 19200, partials=True, partial_options=options)
+            with self.assertRaises(evidence.EvidenceError):
+                checks.note_phases("note", 3200, 19200, partial_options={})
+            with self.assertRaises(evidence.EvidenceError):
+                checks.note_phases("note", 3200, 19200, partials=1)
+
+    def test_spectra_checked_evidence_and_cache(self):
+        fit = load_fit_tests().MODULE
+        evidence = fit.analyzer_evidence_module()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "note.wav"
+            recording(path)
+            checks = evidence.AnalyzerEvidence(ANALYZER, {"note": (path, fit.sha256(path))})
+            settings = {"measurement_fft_size": 256}
+            original = checks.note_phases("note", 3200, 19200, spectra=True, options=settings).report
+            self.assertEqual(original, checks.note_phases("note", 3200, 19200,
+                spectra=True, frames=True, options=settings).report)
+            cache = evidence.NotePhaseCache()
+            with mock.patch.object(checks, "_run", wraps=checks._run) as run:
+                for _ in range(2):
+                    cache.note_phases(checks, "note", 3200, 19200, frames=True, options=settings)
+                    result = cache.note_phases(checks, "note", 3200, 19200, spectra=True, options=settings)
+                    self.assertEqual(result.report, original)
+                    result.report["frame_series"]["rows"].clear()
+                self.assertEqual(run.call_count, 3)
+            for change in ("method", "unit", "bin-count", "spacing", "normalization", "edges",
+                           "floor", "missing", "negative", "nan", "bool", "power", "swapped"):
+                report = copy.deepcopy(original)
+                meta = report["frame_series"]["spectra"]
+                row = next(r for r in report["frame_series"]["rows"] if r["spectral_status"] == "valid")
+                powers = row["bin_powers"]
+                if change == "method":
+                    meta["method"] = "unknown"
+                elif change == "unit":
+                    meta["power_unit"] = "dBFS"
+                elif change == "bin-count":
+                    meta["bin_count"] -= 1
+                elif change == "spacing":
+                    meta["bin_step_hz"] += 1
+                elif change == "normalization":
+                    meta["normalization"] = "power-density"
+                elif change == "edges":
+                    meta["dc_nyquist_bin_factor"] = 2
+                elif change == "floor":
+                    meta["includes_below_floor"] = False
+                elif change == "missing":
+                    powers.pop()
+                elif change == "negative":
+                    powers[0] = -1
+                elif change == "nan":
+                    powers[0] = float("nan")
+                elif change == "bool":
+                    powers[0] = True
+                elif change == "power":
+                    powers[0] += 1
+                else:
+                    powers.reverse()
+                with self.subTest(change=change), mock.patch.object(checks, "_run", return_value=report):
+                    with self.assertRaises(evidence.EvidenceError):
+                        checks.note_phases("note", 3200, 19200, spectra=True, options=settings)
+            with mock.patch.object(checks, "_run", return_value=original):
+                with self.assertRaises(evidence.EvidenceError):
+                    checks.note_phases("note", 3200, 19200, frames=True, options=settings)
+            with self.assertRaises(evidence.EvidenceError):
+                checks.note_phases("note", 3200, 19200, spectra=1)
+            with self.assertRaises(evidence.EvidenceError):
+                cache.note_phases(checks, "note", 3200, 19200, spectra=1)
+            with mock.patch.object(evidence, "MAX_FRAME_REPORT_BYTES", 100):
+                with self.assertRaisesRegex(evidence.EvidenceError, "byte limit"):
+                    checks.note_phases("note", 3200, 19200, spectra=True)
+            for variant in ({"silence": True}, {"second": True}, {"tail_seconds": 0.05}):
+                recording(path, **variant)
+                current = evidence.AnalyzerEvidence(ANALYZER, {"note": (path, fit.sha256(path))})
+                current.note_phases("note", 3200, 19200, spectra=True, options=settings)
 
     def test_frame_series_checked_evidence_and_cache(self):
         fit = load_fit_tests().MODULE
@@ -852,6 +1128,19 @@ class NotePhasesTests(unittest.TestCase):
                                     options={"tail_limit_seconds": 4}).report["frame_series"]["rows"]
         self.assertTrue(frames)
         self.assertEqual({r["phase"] for r in frames}, {"attack", "sustain", "release", "clean-tail"})
+        spectra = checks.note_phases("note", 44100, 88200, spectra=True,
+                                     options={"tail_limit_seconds": 4}).report["frame_series"]["rows"]
+        for row in spectra:
+            self.assertEqual(len(row.pop("bin_powers")), 2049)
+        self.assertEqual(spectra, frames)
+
+        partial_report = checks.note_phases("note", 44100, 88200, partials=True,
+            options={"tail_limit_seconds": 4}).report["frame_series"]
+        self.assertGreater(partial_report["partial_tracking"]["track_count"], 0)
+        self.assertTrue(any(row["partials"] for row in partial_report["rows"]))
+        for row in partial_report["rows"]:
+            row.pop("partials")
+        self.assertEqual(partial_report["rows"], frames)
 
 
 if __name__ == "__main__":

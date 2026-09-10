@@ -1697,7 +1697,8 @@ static int hwa_measure_process_frame(HWAMeasureEngine *engine,
             band_power, pitch, pitch_reference);
         if (engine->frame_sink != NULL && engine->frame_sink(
                 engine->frame_context, item_index, frame_start, level_db,
-                centroid, flatness, error, error_size) != 0) return -1;
+                centroid, flatness, engine->power, engine->spectrum_bins,
+                error, error_size) != 0) return -1;
         index++;
     }
     return 0;

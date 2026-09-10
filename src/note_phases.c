@@ -95,6 +95,7 @@ static void check_tail(const HWAAnalysis *analysis, HWANotePhaseResult *result)
 
 typedef struct PhaseFrameCollector {
     HWANotePhaseFramesResult *result;
+    HWANotePhaseSpectraResult *spectra;
     size_t capacity;
 } PhaseFrameCollector;
 
@@ -137,11 +138,34 @@ static int prepare_frames(PhaseFrameCollector *collector,
         }
     }
     *retained_bytes += count * sizeof(HWANotePhaseFrame);
+    if (collector->spectra != NULL) {
+        size_t bins = options->fft_size / 2U + 1U;
+        uint64_t bytes;
+        if (count > SIZE_MAX / sizeof(double) / bins) {
+            hwa_set_error(error, error_size, "phase spectrum size overflows");
+            return -1;
+        }
+        bytes = count * bins * sizeof(double);
+        if (bytes > options->max_work_bytes - *retained_bytes) {
+            hwa_set_error(error, error_size, "phase spectra exceed the work limit");
+            return -1;
+        }
+        collector->spectra->bin_count = bins;
+        if (count != 0U) {
+            collector->spectra->bin_powers = calloc((size_t)count * bins, sizeof(double));
+            if (collector->spectra->bin_powers == NULL) {
+                hwa_set_error(error, error_size, "cannot allocate phase spectra");
+                return -1;
+            }
+        }
+        *retained_bytes += bytes;
+    }
     return 0;
 }
 
 static int collect_frame(void *context, size_t item_index, uint64_t start,
                          double level, double centroid, double flatness,
+                         const double *bin_powers, size_t bin_count,
                          char *error, size_t error_size)
 {
     PhaseFrameCollector *collector = context;
@@ -155,6 +179,14 @@ static int collect_frame(void *context, size_t item_index, uint64_t start,
         return -1;
     }
     phase = &summary->phases[item_index];
+    if (collector->spectra != NULL) {
+        if (bin_count != collector->spectra->bin_count || bin_powers == NULL) {
+            hwa_set_error(error, error_size, "phase spectrum grid changed");
+            return -1;
+        }
+        memcpy(collector->spectra->bin_powers + result->frame_count * bin_count,
+               bin_powers, bin_count * sizeof(double));
+    }
     frame = &result->frames[result->frame_count++];
     frame->phase_index = item_index;
     frame->start_sample = start;
@@ -177,6 +209,7 @@ static int analyze_note_phases(
     const char *path, const HWANotePhaseOptions *options,
     HWANotePhaseResult *result, HWANotePhaseEnvelopeResult *envelope,
     HWANotePhaseFramesResult *frames,
+    HWANotePhaseSpectraResult *spectra,
     char *error, size_t error_size)
 {
     HWANotePhaseOptions copied;
@@ -197,13 +230,17 @@ static int analyze_note_phases(
     size_t metric;
     int status = -1;
     uint64_t retained_bytes;
-    PhaseFrameCollector collector = {frames, 0U};
+    PhaseFrameCollector collector = {frames, spectra, 0U};
 
     if (error != NULL && error_size != 0U) error[0] = '\0';
     if (result == NULL) return -1;
     if (options != NULL) copied = *options;
     else hwa_note_phase_options_default(&copied);
     memset(result, 0, sizeof(*result));
+    if (spectra != NULL) {
+        spectra->bin_count = 0U;
+        spectra->bin_powers = NULL;
+    }
     if (frames != NULL) {
         frames->frames = NULL;
         frames->frame_count = 0U;
@@ -325,6 +362,10 @@ cleanup:
             free(frames->frames);
             memset(frames, 0, sizeof(*frames));
         }
+        if (spectra != NULL) {
+            free(spectra->bin_powers);
+            memset(spectra, 0, sizeof(*spectra));
+        }
     }
     return status;
 }
@@ -333,7 +374,7 @@ int hwa_analyze_note_phases_wav(
     const char *path, const HWANotePhaseOptions *options,
     HWANotePhaseResult *result, char *error, size_t error_size)
 {
-    return analyze_note_phases(path, options, result, NULL, NULL, error, error_size);
+    return analyze_note_phases(path, options, result, NULL, NULL, NULL, error, error_size);
 }
 
 int hwa_analyze_note_phase_envelope_wav(
@@ -344,7 +385,7 @@ int hwa_analyze_note_phase_envelope_wav(
         hwa_set_error(error, error_size, "note phase envelope result is required");
         return -1;
     }
-    return analyze_note_phases(path, options, &result->summary, result, NULL, error, error_size);
+    return analyze_note_phases(path, options, &result->summary, result, NULL, NULL, error, error_size);
 }
 
 void hwa_note_phase_envelope_result_free(HWANotePhaseEnvelopeResult *result)
@@ -363,7 +404,7 @@ int hwa_analyze_note_phase_frames_wav(
         return -1;
     }
     return analyze_note_phases(path, options, &result->envelope.summary,
-                              &result->envelope, result, error, error_size);
+                              &result->envelope, result, NULL, error, error_size);
 }
 
 void hwa_note_phase_frames_result_free(HWANotePhaseFramesResult *result)
@@ -371,5 +412,25 @@ void hwa_note_phase_frames_result_free(HWANotePhaseFramesResult *result)
     if (result == NULL) return;
     hwa_note_phase_envelope_result_free(&result->envelope);
     free(result->frames);
+    memset(result, 0, sizeof(*result));
+}
+
+int hwa_analyze_note_phase_spectra_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseSpectraResult *result, char *error, size_t error_size)
+{
+    if (result == NULL) {
+        hwa_set_error(error, error_size, "note phase spectra result is required");
+        return -1;
+    }
+    return analyze_note_phases(path, options, &result->series.envelope.summary,
+        &result->series.envelope, &result->series, result, error, error_size);
+}
+
+void hwa_note_phase_spectra_result_free(HWANotePhaseSpectraResult *result)
+{
+    if (result == NULL) return;
+    hwa_note_phase_frames_result_free(&result->series);
+    free(result->bin_powers);
     memset(result, 0, sizeof(*result));
 }

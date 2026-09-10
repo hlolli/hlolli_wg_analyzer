@@ -32,6 +32,7 @@
 #include "measure_file.h"
 #include "measure_report.h"
 #include "note_phase_report.h"
+#include "numeric_locale.h"
 #include "output.h"
 #include "physical_file.h"
 #include "physical_report.h"
@@ -82,6 +83,13 @@ typedef struct HWACli {
     unsigned note_span_options;
     int note_phase_envelope;
     int note_phase_frames;
+    int note_phase_spectra;
+    int note_phase_partials;
+    int partial_option_set;
+    HWAPartialTrackingOptions partial_options;
+    HWAEventScoreOptions event_score_options;
+    uint64_t event_score_source_id;
+    unsigned event_score_option_set;
     const char *positionals[5];
     size_t positional_count;
     const char *output_path;
@@ -139,6 +147,8 @@ static void hwa_print_usage(FILE *stream)
         "Usage:\n"
         "  hlolli-wg-analyzer [OPTIONS] inspect INPUT.wav\n"
         "  hlolli-wg-analyzer [OPTIONS] compare REFERENCE.wav MODEL.wav\n"
+        "  hlolli-wg-analyzer evaluate-separation REFERENCE.wav ESTIMATE.wav "
+        "[MIXTURE.wav] --output FILE.json|-\n"
         "  hlolli-wg-analyzer [OPTIONS] body-envelope REFERENCE.wav "
         "[MODEL.wav]\n"
         "  hlolli-wg-analyzer --json harmonic-decay REFERENCE.wav "
@@ -177,6 +187,8 @@ static void hwa_print_usage(FILE *stream)
         "--bind ID=PATH [--bind ID=PATH ...] --output NEW_DIRECTORY\n"
         "  hlolli-wg-analyzer [--json] validate-event-bundle "
         "DIRECTORY.hwa-events\n"
+        "  hlolli-wg-analyzer export-event-score DIRECTORY.hwa-events "
+        "--format csound|lilypond [--source-id N] [--tempo-bpm N] --output FILE\n"
         "  hlolli-wg-analyzer [ANALYSIS OPTIONS] analyze-events INPUT.wav "
         "--output NEW.hwa-events\n"
         "  hlolli-wg-analyzer infer-note-events INPUT.wav --model MODEL.onnx "
@@ -198,6 +210,9 @@ static void hwa_print_usage(FILE *stream)
         "  --output PATH               New artifact path; - for stdout.\n"
         "  --replace                   Permit replacing a regular output file.\n"
         "  --score PATH                Align an unfolded note manifest to audio.\n"
+        "  --format csound|lilypond    Event score format; --tempo-bpm is required for LilyPond.\n"
+        "  --source-id N               Source recording ID; may be omitted for one source.\n"
+        "  --tempo-bpm N               Explicit quarter-note tempo (10..1000); no tempo inference.\n"
         "  --alignment PATH            Segment a score-to-audio alignment.\n"
         "  --labels PATH               Add typed event labels while segmenting.\n"
         "  --amend PATH                Apply locked anchors or item edits.\n"
@@ -234,6 +249,11 @@ static void hwa_print_usage(FILE *stream)
         "                              Variation is frame standard deviation, including trend.\n"
         "  --phase-frames              Add level, centroid, and flatness on the measurement grid.\n"
         "                              Set spacing with --measure-hop-size; window with --measure-fft-size.\n"
+        "  --phase-spectra             Include phase frames and raw DC-through-Nyquist bin powers.\n"
+        "                              Units are full-scale squared, not power/Hz.\n"
+        "  --phase-partials            Link spectral peaks on phase frames (not harmonic identities).\n"
+        "  --partial-relative-floor-db DB  Peak cutoff below frame maximum (default -30).\n"
+        "  --partial-link-cents CENTS  Largest adjacent-frame frequency step (default 100).\n"
         "  --max-note-evaluations N    Maximum note-analysis checks.\n"
         "  --onset-threshold RATIO     Basic Pitch onset cut (default 0.5).\n"
         "  --frame-threshold RATIO     Basic Pitch frame cut (default 0.3).\n"
@@ -877,6 +897,16 @@ static int hwa_parse_option_with_value(HWACli *cli,
             return -1;
         }
         cli->measurement_option_set = 1;
+    } else if (strcmp(option, "--partial-relative-floor-db") == 0) {
+        if (hwa_parse_double(value, &cli->partial_options.relative_floor_db) != 0 ||
+            cli->partial_options.relative_floor_db < -300.0 || cli->partial_options.relative_floor_db > 0.0)
+            return -1;
+        cli->partial_option_set = 1;
+    } else if (strcmp(option, "--partial-link-cents") == 0) {
+        if (hwa_parse_double(value, &cli->partial_options.max_step_cents) != 0 ||
+            cli->partial_options.max_step_cents <= 0.0 || cli->partial_options.max_step_cents > 1200.0)
+            return -1;
+        cli->partial_option_set = 1;
     } else if (strcmp(option, "--measure-hop-size") == 0) {
         if (hwa_parse_size(value, &cli->measurement_options.hop_size) != 0 ||
             cli->measurement_options.hop_size == 0U) {
@@ -1445,6 +1475,22 @@ static int hwa_parse_option_with_value(HWACli *cli,
                            &cli->gap_report_options.max_json_tokens) != 0 ||
             cli->gap_report_options.max_json_tokens == 0U) return -1;
         cli->gap_report_option_set = 1;
+    } else if (strcmp(option, "--format") == 0) {
+        if (cli->event_score_option_set & 1U) return -1;
+        if (strcmp(value, "csound") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_CSOUND;
+        else if (strcmp(value, "lilypond") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_LILYPOND;
+        else return -1;
+        cli->event_score_option_set |= 1U;
+    } else if (strcmp(option, "--source-id") == 0) {
+        if ((cli->event_score_option_set & 2U) ||
+            hwa_parse_u64(value, &cli->event_score_source_id) != 0 || cli->event_score_source_id == 0U) return -1;
+        cli->event_score_option_set |= 2U;
+    } else if (strcmp(option, "--tempo-bpm") == 0) {
+        uint64_t tempo;
+        if ((cli->event_score_option_set & 4U) || hwa_parse_u64(value, &tempo) != 0 ||
+            tempo < 10U || tempo > 1000U) return -1;
+        cli->event_score_options.tempo_bpm = (uint32_t)tempo;
+        cli->event_score_option_set |= 4U;
     } else if (strcmp(option, "--kind") == 0) {
         if (strcmp(value, "frames") == 0) {
             cli->export_kind = HWA_EXPORT_FRAMES;
@@ -1469,6 +1515,8 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
     hwa_alignment_options_default(&cli->alignment_options);
     hwa_segmentation_options_default(&cli->segmentation_options);
     hwa_measurement_options_default(&cli->measurement_options);
+    hwa_partial_tracking_options_default(&cli->partial_options);
+    hwa_event_score_options_default(&cli->event_score_options);
     hwa_profile_comparison_options_default(&cli->comparison_options);
     hwa_physical_options_default(&cli->physical_options);
     hwa_production_options_default(&cli->production_options);
@@ -1500,6 +1548,12 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
         } else if (!end_options && strcmp(current, "--phase-frames") == 0) {
             if (cli->note_phase_frames) return -1;
             cli->note_phase_frames = 1;
+        } else if (!end_options && strcmp(current, "--phase-spectra") == 0) {
+            if (cli->note_phase_spectra) return -1;
+            cli->note_phase_spectra = 1;
+        } else if (!end_options && strcmp(current, "--phase-partials") == 0) {
+            if (cli->note_phase_partials) return -1;
+            cli->note_phase_partials = 1;
         } else if (!end_options && strcmp(current, "--replace") == 0) {
             cli->replace = 1;
         } else if (!end_options && strcmp(current, "--allow-run") == 0) {
@@ -1754,6 +1808,36 @@ static int hwa_run_note_phases(const HWACli *cli)
     options.analysis = cli->options;
     options.segmentation = cli->segmentation_options;
     options.measurement = cli->measurement_options;
+    if (cli->partial_option_set && !cli->note_phase_partials) return -1;
+    if (cli->note_phase_spectra || cli->note_phase_partials) {
+        HWANotePhaseSpectraResult spectra;
+        if (hwa_analyze_note_phase_spectra_wav(cli->positionals[1], &options, &spectra,
+                                              error, sizeof(error)) != 0) {
+            (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+            return 1;
+        }
+        if (cli->note_phase_partials) {
+            HWAPartialTracks tracks;
+            HWAPartialTrackingOptions tracking = cli->partial_options;
+            tracking.max_peaks = options.measurement.max_partials;
+            tracking.min_peak_dbfs = options.measurement.spectral_floor_dbfs;
+            tracking.max_points = options.measurement.max_series_points;
+            tracking.max_work_bytes = options.measurement.max_work_bytes;
+            tracking.max_evaluations = options.measurement.max_item_frame_evaluations;
+            if (hwa_track_note_phase_partials(&spectra, &tracking, &tracks, error, sizeof(error)) != 0) {
+                (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+                hwa_note_phase_spectra_result_free(&spectra);
+                return 1;
+            }
+            if (hwa_note_phase_partials_report_json(stdout, &spectra, &tracks,
+                    cli->note_phase_envelope, cli->note_phase_spectra) == 0 &&
+                hwa_finish_stream(stdout, "standard output") == 0) status = 0;
+            hwa_partial_tracks_free(&tracks);
+        } else if (hwa_note_phase_spectra_report_json(stdout, &spectra, cli->note_phase_envelope) == 0 &&
+                   hwa_finish_stream(stdout, "standard output") == 0) status = 0;
+        hwa_note_phase_spectra_result_free(&spectra);
+        return status;
+    }
     if (cli->note_phase_frames) {
         HWANotePhaseFramesResult frames;
         if (hwa_analyze_note_phase_frames_wav(cli->positionals[1], &options, &frames,
@@ -3215,6 +3299,58 @@ static int hwa_run_validate_event_bundle(const HWACli *cli)
     return result;
 }
 
+static int hwa_run_export_event_score(const HWACli *cli)
+{
+    HWAEventBundle bundle;
+    HWAEventBundleLimits limits;
+    HWAFileOutput output;
+    uint64_t source_id = cli->event_score_source_id;
+    size_t sources = 0U, i;
+    char error[HWA_ERROR_SIZE] = {0};
+    int result = 1;
+    memset(&bundle, 0, sizeof(bundle));
+    memset(&output, 0, sizeof(output));
+    if (cli->positional_count != 2U || cli->output_path == NULL ||
+        cli->output_path[0] == '\0' || strcmp(cli->positionals[1], "-") == 0 ||
+        !(cli->event_score_option_set & 1U) || cli->json || cli->replace ||
+        (cli->event_score_options.kind == HWA_EVENT_SCORE_LILYPOND && !(cli->event_score_option_set & 4U)) ||
+        (cli->event_score_options.kind == HWA_EVENT_SCORE_CSOUND && (cli->event_score_option_set & 4U)) ||
+        cli->export_kind != 0 || cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->physical_binding_count != 0U || cli->analysis_clock_option_set ||
+        cli->analysis_only_option_set || cli->analysis_resource_option_set ||
+        cli->analysis_spectral_resource_option_set || cli->frame_size_option_set ||
+        cli->hop_size_option_set || cli->silence_option_set || cli->decode_block_option_set ||
+        cli->max_bytes_option_set || cli->input_frame_limit_set || cli->alignment_option_set ||
+        cli->segmentation_option_set || cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set || cli->run_option_set ||
+        cli->experiment_option_set || cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->isolated_note_expected_set || cli->isolated_note_metrics_set || cli->harmonic_decay_expected_set) return -1;
+    hwa_event_bundle_limits_default(&limits);
+    if (hwa_event_bundle_read(cli->positionals[1], &limits, &bundle, error, sizeof(error)) != 0) goto cleanup;
+    if (source_id == 0U) {
+        for (i = 0U; i < bundle.audio_count; ++i) {
+            if (bundle.audio[i].kind == HWA_EVENT_SOURCE_RECORDING) { source_id = bundle.audio[i].id; sources++; }
+        }
+        if (sources != 1U) {
+            (void)snprintf(error, sizeof(error), "use --source-id when the bundle does not have exactly one source recording");
+            goto cleanup;
+        }
+    }
+    if (hwa_file_output_open(&output, cli->output_path, NULL, 0U, 0, error, sizeof(error)) != 0) goto cleanup;
+    if (hwa_event_score_write(hwa_file_output_stream(&output), &bundle, source_id,
+            &cli->event_score_options, error, sizeof(error)) != 0) {
+        (void)hwa_file_output_abort(&output);
+        goto cleanup;
+    }
+    if (hwa_file_output_finish(&output, "event score", error, sizeof(error)) == 0) result = 0;
+cleanup:
+    if (result != 0) (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error[0] != '\0' ? error : "event score export failed");
+    hwa_event_bundle_free(&bundle);
+    return result;
+}
+
 static int hwa_run_analyze_events(const HWACli *cli)
 {
     HWAEventAnalysisOptions options;
@@ -3882,6 +4018,111 @@ cleanup:
     return result;
 }
 
+static int hwa_separation_ratio_json(FILE *stream, const HWASeparationRatio *value)
+{
+    const char *status = value->status == HWA_SEPARATION_RATIO_FINITE ? "finite" :
+        value->status == HWA_SEPARATION_RATIO_POSITIVE_INFINITY ? "positive-infinity" :
+        value->status == HWA_SEPARATION_RATIO_NEGATIVE_INFINITY ? "negative-infinity" : "undefined";
+    if (fprintf(stream, "{\"status\":\"%s\",\"db\":", status) < 0) return -1;
+    if (value->status == HWA_SEPARATION_RATIO_FINITE) {
+        if (fprintf(stream, "%.17g", value->db) < 0) return -1;
+    } else if (fputs("null", stream) == EOF) return -1;
+    return fputc('}', stream) == EOF ? -1 : 0;
+}
+
+static int hwa_separation_pair_json(FILE *stream, const HWASeparationPair *pair)
+{
+    if (fputs("{\"snr\":", stream) == EOF ||
+        hwa_separation_ratio_json(stream, &pair->snr) != 0 ||
+        fputs(",\"si_sdr\":", stream) == EOF ||
+        hwa_separation_ratio_json(stream, &pair->si_sdr) != 0 ||
+        fputs(",\"reference_level_dbfs\":", stream) == EOF ||
+        hwa_separation_ratio_json(stream, &pair->reference_level_dbfs) != 0 ||
+        fputs(",\"estimate_level_dbfs\":", stream) == EOF ||
+        hwa_separation_ratio_json(stream, &pair->estimate_level_dbfs) != 0 ||
+        fputs(",\"error_level_dbfs\":", stream) == EOF ||
+        hwa_separation_ratio_json(stream, &pair->error_level_dbfs) != 0 ||
+        fputs(",\"projection_gain\":", stream) == EOF) return -1;
+    if (pair->projection_gain_valid) {
+        if (fprintf(stream, "%.17g", pair->projection_gain) < 0) return -1;
+    } else if (fputs("null", stream) == EOF) return -1;
+    return fprintf(stream, ",\"reference_silent\":%s,\"estimate_silent\":%s}",
+        pair->reference_silent ? "true" : "false",
+        pair->estimate_silent ? "true" : "false") < 0 ? -1 : 0;
+}
+
+static int hwa_run_evaluate_separation(const HWACli *cli)
+{
+    HWASeparationEvalOptions options;
+    HWASeparationEvaluation evaluation;
+    HWAFileOutput output;
+    HWANumericLocale locale;
+    FILE *stream;
+    char error[HWA_ERROR_SIZE] = {0};
+    int status = 1;
+    int wrote;
+    if ((cli->positional_count != 3U && cli->positional_count != 4U) ||
+        cli->output_path == NULL || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->physical_binding_count != 0U || cli->analysis_clock_option_set ||
+        cli->analysis_only_option_set || cli->analysis_spectral_resource_option_set ||
+        cli->frame_size_option_set || cli->hop_size_option_set || cli->silence_option_set ||
+        cli->decode_block_option_set || cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set || cli->physical_option_set ||
+        cli->production_option_set || cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set ||
+        cli->harmonic_decay_expected_set) return -1;
+    hwa_separation_eval_options_default(&options);
+    if (cli->max_bytes_option_set) options.max_input_bytes = cli->options.max_input_bytes;
+    if (cli->input_frame_limit_set) options.max_frames = cli->options.max_input_frames;
+    if (cli->analysis_resource_option_set) options.max_work_bytes = cli->options.max_work_bytes;
+    if (hwa_evaluate_separation_wav(cli->positionals[1], cli->positionals[2],
+            cli->positional_count == 4U ? cli->positionals[3] : NULL, &options,
+            &evaluation, error, sizeof(error)) != 0) goto failed;
+    if (hwa_file_output_open(&output, cli->output_path, &cli->positionals[1],
+            cli->positional_count - 1U, 0, error, sizeof(error)) != 0) goto failed;
+    if (hwa_c_numeric_locale_begin(&locale) != 0) {
+        (void)hwa_file_output_abort(&output);
+        (void)snprintf(error, sizeof(error), "cannot set numeric output locale");
+        goto failed;
+    }
+    stream = hwa_file_output_stream(&output);
+    wrote = fprintf(stream,
+        "{\"schema\":\"hwa-separation-evaluation\",\"schema_version\":1,"
+        "\"method_version\":\"%s\",\"frames\":%" PRIu64 ",\"rate_hz\":%u,"
+        "\"channels\":%u,\"channel_mask\":%u,\"remove_channel_mean\":true,"
+        "\"channel_policy\":\"joint-signed-projection\",\"alignment\":\"none\","
+        "\"reference_sha256\":\"%s\",\"estimate_sha256\":\"%s\",\"estimate\":",
+        HWA_SEPARATION_EVAL_METHOD_VERSION, (uint64_t)evaluation.frames,
+        (unsigned)evaluation.sample_rate_hz, (unsigned)evaluation.channels,
+        (unsigned)evaluation.channel_mask,
+        evaluation.reference_sha256, evaluation.estimate_sha256) >= 0 &&
+        hwa_separation_pair_json(stream, &evaluation.estimate) == 0;
+    if (wrote && evaluation.mixture_present) {
+        wrote = fprintf(stream, ",\"mixture_sha256\":\"%s\",\"mixture\":",
+            evaluation.mixture_sha256) >= 0 &&
+            hwa_separation_pair_json(stream, &evaluation.mixture) == 0;
+    }
+    if (wrote) wrote = fputs(",\"si_sdr_improvement_db\":", stream) != EOF;
+    if (wrote) wrote = evaluation.si_sdr_improvement_valid
+        ? fprintf(stream, "%.17g", evaluation.si_sdr_improvement_db) >= 0
+        : fputs("null", stream) != EOF;
+    if (wrote) wrote = fputs("}\n", stream) != EOF;
+    if (hwa_c_numeric_locale_end(&locale) != 0) wrote = 0;
+    if (!wrote) {
+        (void)hwa_file_output_abort(&output);
+        (void)snprintf(error, sizeof(error), "cannot write separation evaluation");
+        goto failed;
+    }
+    if (hwa_file_output_finish(&output, "separation evaluation", error, sizeof(error)) == 0)
+        status = 0;
+failed:
+    if (status) (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+    return status;
+}
+
 static int hwa_run_inference_capabilities(const HWACli *cli)
 {
     const char *onnx_version = hwa_inference_onnx_runtime_version();
@@ -3931,13 +4172,16 @@ static int hwa_run_inference_capabilities(const HWACli *cli)
                   "\"implemented\":true,\"available\":",
                   stdout) == EOF ||
             fputs(htdemucs_available ? "true" : "false", stdout) == EOF ||
-            fputs("},\"stem_note_workflow\":{"
+            fputs(",\"stem_labels\":[\"drums\",\"bass\",\"other\",\"vocals\",\"guitar\",\"piano\"]},\"stem_note_workflow\":{"
                   "\"contract\":\"org.hlolli.stem-note-events-v1\","
                   "\"provider\":\"" HWA_BASIC_PITCH_AUDIO_PROVIDER_NAME
                   "\",\"implemented\":true,\"available\":",
                   stdout) == EOF ||
             fputs(onnx_available ? "true" : "false", stdout) == EOF ||
-            fputs("}}\n", stdout) == EOF)
+            fputs("},\"scope\":{\"native_execution_provider\":\"CPUExecutionProvider\","
+                  "\"caller_supplied_models\":true,\"models_checked_by_this_command\":false,"
+                  "\"browser_inference\":false,\"webnn_inference\":false,"
+                  "\"orchestral_part_separation\":false,\"dry_instrument_recovery\":false}}\n", stdout) == EOF)
             return 1;
     } else if (fprintf(
                    stdout,
@@ -3946,7 +4190,11 @@ static int hwa_run_inference_capabilities(const HWACli *cli)
                    "ONNX Runtime: %s%s%s%s\n"
                    "Polyphonic note task: Basic Pitch adapter %s\n"
                    "Instrument stem task: HTDemucs six-stem adapter %s\n"
-                   "Stem note workflow: Basic Pitch per-stem adapter %s\n",
+                   "Stem note workflow: Basic Pitch per-stem adapter %s\n"
+                   "Stem labels: drums, bass, other, vocals, guitar, piano\n"
+                   "Models: caller supplied; this command does not check model files\n"
+                   "Native inference provider: CPUExecutionProvider\n"
+                   "Not implemented: browser/WebNN inference, orchestral part separation, dry instrument recovery\n",
                    onnx_available ? "available" : "not compiled",
                    onnx_available ? " (" : "",
                    onnx_available ? onnx_version : "",
@@ -3980,8 +4228,11 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "note-phases") != 0 &&
-        (cli.note_span_options != 0U || cli.note_phase_envelope || cli.note_phase_frames)) {
+    if (strcmp(cli.positionals[0], "export-event-score") != 0 && cli.event_score_option_set != 0U) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "note-phases") != 0 &&
+        (cli.note_span_options != 0U || cli.note_phase_envelope || cli.note_phase_frames ||
+         cli.note_phase_spectra || cli.note_phase_partials || cli.partial_option_set)) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
         strcmp(cli.positionals[0], "separate-instruments") != 0 &&
@@ -4012,6 +4263,8 @@ int main(int argc, char **argv)
         result = hwa_run_inspect(&cli);
     } else if (strcmp(cli.positionals[0], "compare") == 0) {
         result = hwa_run_compare(&cli);
+    } else if (strcmp(cli.positionals[0], "evaluate-separation") == 0) {
+        result = hwa_run_evaluate_separation(&cli);
     } else if (strcmp(cli.positionals[0], "body-envelope") == 0) {
         result = hwa_run_body_envelope(&cli);
     } else if (strcmp(cli.positionals[0], "note-phases") == 0) {
@@ -4044,6 +4297,8 @@ int main(int argc, char **argv)
         result = hwa_run_gap_report(&cli);
     } else if (strcmp(cli.positionals[0], "validate-event-bundle") == 0) {
         result = hwa_run_validate_event_bundle(&cli);
+    } else if (strcmp(cli.positionals[0], "export-event-score") == 0) {
+        result = hwa_run_export_event_score(&cli);
     } else if (strcmp(cli.positionals[0], "analyze-events") == 0) {
         result = hwa_run_analyze_events(&cli);
     } else if (strcmp(cli.positionals[0], "infer-note-events") == 0) {

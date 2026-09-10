@@ -70,6 +70,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/event_analysis.c
   src/event_bundle.c
   src/event_csound.c
+  src/event_score.c
   src/features.c
   src/gap_report.c
   src/gap_report_clip.c
@@ -88,6 +89,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/measure_file.c
   src/numeric_locale.c
   src/note_phases.c
+  src/partial_tracks.c
   src/physical_check.c
   src/physical_file.c
   src/production.c
@@ -96,6 +98,8 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/run_file.c
   src/score_manifest.c
   src/segmentation.c
+  src/separation_eval.c
+  src/separation_eval_file.c
   src/sha256.c
   src/stem_note_derivation.c
   src/typed_labels.c

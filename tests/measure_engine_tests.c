@@ -582,6 +582,79 @@ static void test_consensus_and_multi_pitch(void)
     free(samples);
 }
 
+static void test_chord_response(void)
+{
+    const uint32_t rate = 16000U;
+    const size_t count = 8000U;
+    double *samples = (double *)calloc(count, sizeof(*samples));
+    HWAItemEvent events[2];
+    HWAItem item;
+    HWAItemMember members[2];
+    HWAItemSet set;
+    HWAMeasurementOptions options = test_options();
+    HWAMeasurementSet result;
+    char error[HWA_ERROR_SIZE];
+    unsigned pass;
+    size_t index;
+    CHECK(samples != NULL, "chord sample allocation failed");
+    if (samples == NULL) return;
+    memset(&set, 0, sizeof(set));
+    set.audio_format.frames = count;
+    set.audio_format.sample_rate_hz = rate;
+    set.events = events;
+    set.event_count = 2U;
+    set.items = &item;
+    set.item_count = 1U;
+    set.members = members;
+    set.member_count = 2U;
+    set_event(&events[0], 1U, (char *)"a", (char *)"69",
+              (char *)"piano", (char *)"mf");
+    set_event(&events[1], 2U, (char *)"e", (char *)"76",
+              (char *)"piano", (char *)"mf");
+    set_item(&item, 1U, HWA_ITEM_MULTI_NOTE, (char *)"chord:a:e",
+             (char *)"chord", 2000U, 6000U, 0U);
+    set_member(&members[0], 1U, 1U, HWA_ITEM_MEMBER_ACTIVE);
+    set_member(&members[1], 1U, 2U, HWA_ITEM_MEMBER_ACTIVE);
+    for (pass = 0U; pass < 2U; ++pass) {
+        double gain = pass == 0U ? 1.0 : 0.5;
+        const HWAMeasureObservation *rms;
+        const HWAMeasureObservation *centroid;
+        const HWAMeasureObservation *pitch;
+        const HWAMeasureObservation *harmonics;
+        for (index = 0U; index < count; ++index) {
+            double time = (double)index / (double)rate;
+            samples[index] = gain *
+                (0.2 * sin(2.0 * TEST_PI * 440.0 * time) +
+                 0.1 * sin(2.0 * TEST_PI * 660.0 * time));
+        }
+        if (hwa_measure_engine_samples(&set, samples, count, rate, &options,
+                0U, &result, error, sizeof(error)) != 0) {
+            CHECK(0, error);
+            break;
+        }
+        rms = find_measure(&result, 1U, HWA_MEASURE_RMS_DBFS, 0U,
+                           HWA_MEASURE_VIEW_RAW);
+        centroid = find_measure(&result, 1U, HWA_MEASURE_CENTROID_HZ, 0U,
+                                HWA_MEASURE_VIEW_RAW);
+        pitch = find_measure(&result, 1U, HWA_MEASURE_PITCH_HZ, 0U,
+                             HWA_MEASURE_VIEW_RAW);
+        harmonics = find_measure(&result, 1U, HWA_MEASURE_HARMONIC_LEVEL_DBFS,
+                                 0U, HWA_MEASURE_VIEW_RAW);
+        CHECK(rms != NULL && rms->status == HWA_MEASURE_STATUS_VALID &&
+                  fabs(rms->value - 10.0 * log10(0.025 * gain * gain)) < 1e-9,
+              "chord RMS does not match the combined signal energy");
+        CHECK(centroid != NULL && centroid->status == HWA_MEASURE_STATUS_VALID &&
+                  fabs(centroid->value - 484.0) < 0.1,
+              "chord centroid does not retain the two-tone power balance");
+        CHECK(pitch != NULL && pitch->status == HWA_MEASURE_STATUS_MULTI_PITCH &&
+                  harmonics != NULL &&
+                  harmonics->status == HWA_MEASURE_STATUS_MULTI_PITCH,
+              "chord response claimed an isolated pitch or harmonic series");
+        hwa_measurement_set_free(&result);
+    }
+    free(samples);
+}
+
 static void test_interleaved_parts(void)
 {
     const uint32_t sample_rate = 16000U;
@@ -1212,6 +1285,7 @@ int main(void)
 {
     test_known_note_and_block_invariance();
     test_consensus_and_multi_pitch();
+    test_chord_response();
     test_interleaved_parts();
     test_no_body_level_reference();
     test_level_reference_skips_low_confidence_body();

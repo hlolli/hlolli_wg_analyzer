@@ -1,16 +1,9 @@
 # Double-bass per-string passive-loss workflow
 
-This directory holds the analyzer-side Stage 3 adapter. The v2 workflow fits
-the E, A, D, and G string loss values independently from one declared
-University of Iowa 2012 `ff` reference per physical string. A, D, and G use
-their open notes. The E-string reference is G1 because the full E1 and F1
-recordings failed the unchanged one-event gate and G1 was the first ascending
-left-channel note to pass both checked pitch and harmonic decay. It does not
-change the fixed model or mark Stage 3 done.
-
-The failed v1 bundle remains here as historical evidence. It varied four loss
-values together at 32 random points and exposed a flat whole-file RMS response.
-Do not use that response or the v1 selector result to choose model data.
+The v2 workflow fits E, A, D, and G string loss values independently from
+one declared University of Iowa reference per physical string. A, D, and G
+use open notes; the E-string contract uses G1. The adapter does not change
+the fixed model in place. The legacy v1 RMS response cannot select model data.
 
 ## Frozen physical-dynamics falsification
 
@@ -34,16 +27,8 @@ python3 -B adapters/hlolli_wg_double_bass/physical_dynamics.py \
   --output /private/physical-dynamics/result.json
 ```
 
-The first frozen run checked all twelve source hashes/WAVE facts and rejected
-the baseline on six predeclared level or dynamic-spectrum objectives. Pitch,
-clipping, source level ordering, and contact-state gates passed. A second,
-separately frozen development run replaced only the four string impedances with
-midpoints of published orchestra-string ranges. It remained finite but failed
-13 objectives, demonstrating that the runtime's absolute contact/hair constants
-must be identified jointly with impedance. Orchidea does not report physical
-bow force, speed, or position, so neither result can identify those constants
-or serve as an independent audit. The sibling double-bass repository keeps the
-public-safe receipt.
+These source recordings do not report physical bow force, speed, or position.
+Do not use their microphone levels to identify those constants.
 
 ## Optional controlled recording intake
 
@@ -111,12 +96,10 @@ four `ff` notes maximize decay signal-to-noise while retaining one observation
 per physical string.
 
 The base 19 loss times run from 0.01 through 30 seconds and include the
-unchanged 0.25-second baseline. After the first valid run bracketed D's
-opposing first- and fifth-harmonic errors between 0.75 and 1.0 seconds, its
-grid gained five predeclared refinement values from 0.85 through 0.95 seconds.
+0.25-second baseline. D adds five values from 0.85 through 0.95 seconds.
 E, A, and G therefore have 19 points; D has 24.
 
-Stage 8 requires both fit and check cases, so each point renders the same bound
+The experiment format requires both fit and check cases, so each point renders the same bound
 recording once under each split: 38 renders for E, A, and G and 48 for D. The
 check render is a format diagnostic, not an audit objective, and `fit-only`
 selection cannot use it or accept another binding. A baseline can remain
@@ -133,7 +116,7 @@ reference frame count. This supplies the silence-before-onset required by the
 one-event gate; it does not trim, filter, normalize, or otherwise alter the
 reference recording.
 
-## Predeclared D frequency-loss follow-up
+## D frequency-loss fit
 
 The D-only v3 follow-up reuses the runtime's existing first-order bridge
 termination rather than adding another filter or changing the fixed model.
@@ -177,13 +160,6 @@ The grid was frozen before a new render or selection. It has 30 points:
 - exactly the existing D2 reference, pitch gate, harmonic-decay method,
   0.75-octave mean limit, 1.5-octave worst limit, and fit-only ranking.
 
-The previous D residual sets these bounds. Its scalar render needed a longer
-fundamental decay while harmonics 5 and 6 were already too long. Evaluating the
-one-pole equation against the already-consumed six-band reference brackets the
-needed monotonic corner between 1 and 3 kHz and the broadband time between 1
-and 3 seconds. This calculation only sets a bounded experiment; measured
-radiated gains are not copied into the string.
-
 Validate or build only this frozen D bundle with:
 
 ```sh
@@ -201,15 +177,6 @@ python3 -I adapters/hlolli_wg_double_bass/build_manifest.py \
 The generated experiment contains one selecting fit case and the required
 same-binding diagnostic check case. Both carry exactly the two D parameters;
 other strings and corpora cannot enter this fit.
-
-The real frozen run passed. Point 13 selected a 1500 Hz bridge cutoff and
-3.0-second broadband loss time. Eleven of 30 points passed the unchanged fit
-rules. The selected six-harmonic RMS, mean absolute, and worst T60 errors are
-0.529, 0.427, and 0.980 octaves; rendered pitch is +0.228 cents. The selected
-loss time lies on the declared upper boundary, so the result is fit-side
-evidence only, not permission to widen the grid or write a candidate. The
-public receipt in the sibling double-bass repository records the smoke, run
-hashes, verification, and unchanged-model proof.
 
 ## Build a private v2 bundle
 
@@ -366,22 +333,6 @@ checks, and `write_profile: false`. Its receipt copies the path-free local
 WAVE facts, archive/member provenance, license, source-group ID, and explicit
 open-pitch proxy evidence. It copies no audio.
 
-The real frozen run used exact A4=442 E1/A1/D2/G2 members from one player,
-session, microphone, and hard-pizzicato group. All four references passed
-pitch and harmonic preflight. After Stage 8 rejected an initial manifest before
-job 1 because `joint_candidate.levels` omitted its baseline, the adapter was
-corrected to declare `[0.0, 1.0]` and a superseding declaration retained the
-same candidate, roster, and gates. The resulting 24-job run failed: G passed
-at 0.628-octave mean and 1.240-octave worst error, A failed at 0.893/2.039, D
-failed at 1.238/2.412, and E had no valid shared decay bands. No profile was
-written and this roster must not tune a successor.
-
-Source review also found conflicting rights metadata: Zenodo's structured
-field, its description, and the Freesound member pages name three different
-licenses. The checker now requires that conflict and private-analysis-only
-status explicitly. The sibling double-bass repository has the public-safe
-receipt.
-
 ## Frozen joint validation
 
 `build-joint-validation-v1` consumes one external, read-only pre-analysis
@@ -406,17 +357,8 @@ and changes only the declared E/A/D/G losses and D bridge cutoff in a temporary
 model. It retains regular-file and symlink rejection, checked Python shebangs,
 resource rehashing, output confinement, and `write_profile: false`.
 
-The first frozen roster failed before bundle publication: its physical
-E-string A-flat1 reference passed `isolated-note-1` pitch but
-`harmonic-decay-1` rejected it with `late-pulse`. The candidate was not
-rendered, the remaining validation references were not analyzed, and the
-roster was not changed after the result. The public receipt in the sibling
-plug-in repository records hashes and the next-source decision.
-
-## Historical v1 bundle
+## Legacy v1 bundle
 
 `fit-passive-open-v1.json`, `reference-contract-v1.json`, and the old
-`validate`/`build` commands retain the first 264-job trial contract for audit.
-A new run has a new builder hash; the original receipt remains the authority
-for the historical run. The v1 files are not the active fit path, and no v1
-point authorizes a model update.
+`validate`/`build` commands remain for compatibility. They are not the active
+fit path and do not authorize a model update.

@@ -21,6 +21,7 @@ add_library(hlolli_wg_analyzer_portable STATIC
   ../src/analysis.c
   ../src/dsp.c
   ../src/features.c
+  ../src/separation_eval.c
   ../src/wav_reader.c)
 target_include_directories(hlolli_wg_analyzer_portable
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include"
@@ -64,6 +65,28 @@ if(HLOLLI_WG_ANALYZER_STRICT)
 endif()
 
 include(CTest)
+
+add_executable(hwa_basic_pitch_browser_tests
+  ../src/basic_pitch.c
+  ../tests/basic_pitch_wasm_bridge.c)
+target_include_directories(hwa_basic_pitch_browser_tests PRIVATE ../src)
+target_link_libraries(hwa_basic_pitch_browser_tests PRIVATE m)
+target_compile_options(hwa_basic_pitch_browser_tests PRIVATE
+  -Wall -Wextra -Wpedantic)
+target_link_options(hwa_basic_pitch_browser_tests PRIVATE
+  -mexec-model=reactor
+  "LINKER:--export-memory"
+  "LINKER:--export=hwa_test_note_buffer"
+  "LINKER:--export=hwa_test_onset_buffer"
+  "LINKER:--export=hwa_test_decode"
+  "LINKER:--export=hwa_test_note_count"
+  "LINKER:--export=hwa_test_note_field")
+set_target_properties(hwa_basic_pitch_browser_tests PROPERTIES SUFFIX ".wasm")
+if(HLOLLI_WG_ANALYZER_STRICT)
+  target_compile_options(hwa_basic_pitch_browser_tests PRIVATE
+    -Werror -Wconversion -Wformat=2 -Wshadow -Wstrict-prototypes)
+endif()
+
 if(BUILD_TESTING)
   add_test(
     NAME wasm.portability

@@ -1,4 +1,16 @@
 add_executable(hlolli_wg_analyzer_cli_tests cli_tests.c)
+add_executable(hlolli_wg_analyzer_separation_eval_tests separation_eval_tests.c)
+target_link_libraries(hlolli_wg_analyzer_separation_eval_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(hlolli_wg_analyzer_separation_eval_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_separation_eval_tests)
+add_test(NAME unit.separation-eval COMMAND hlolli_wg_analyzer_separation_eval_tests)
+set_tests_properties(unit.separation-eval PROPERTIES TIMEOUT 30)
+add_executable(hlolli_wg_analyzer_partial_tracks_tests partial_tracks_tests.c)
+target_link_libraries(hlolli_wg_analyzer_partial_tracks_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(hlolli_wg_analyzer_partial_tracks_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_partial_tracks_tests)
+add_test(NAME unit.partial-tracks COMMAND hlolli_wg_analyzer_partial_tracks_tests)
+set_tests_properties(unit.partial-tracks PROPERTIES TIMEOUT 30)
 target_compile_features(hlolli_wg_analyzer_cli_tests PRIVATE c_std_11)
 hwa_set_warnings(hlolli_wg_analyzer_cli_tests)
 
@@ -409,6 +421,12 @@ add_test(
   COMMAND hlolli_wg_analyzer_event_csound_roundtrip_tests)
 set_tests_properties(unit.event-csound-score PROPERTIES TIMEOUT 30)
 find_program(HWA_CSOUND_EXECUTABLE NAMES csound)
+add_executable(hlolli_wg_analyzer_event_score_tests event_score_tests.c)
+target_link_libraries(hlolli_wg_analyzer_event_score_tests PRIVATE hlolli_wg_analyzer_core)
+target_compile_features(hlolli_wg_analyzer_event_score_tests PRIVATE c_std_11)
+hwa_set_warnings(hlolli_wg_analyzer_event_score_tests)
+add_test(NAME unit.event-score COMMAND hlolli_wg_analyzer_event_score_tests)
+set_tests_properties(unit.event-score PROPERTIES TIMEOUT 30)
 if(HWA_CSOUND_EXECUTABLE)
   add_test(
     NAME integration.event-csound-roundtrip
@@ -1420,6 +1438,10 @@ endforeach()
 
 find_program(HWA_PYTHON3_EXECUTABLE NAMES python3)
 if(HWA_PYTHON3_EXECUTABLE)
+  add_test(NAME cli.separation-eval COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_separation_eval_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.separation-eval PROPERTIES TIMEOUT 60)
   add_test(
     NAME cli.isolated-note
     COMMAND
@@ -1457,6 +1479,21 @@ if(HWA_PYTHON3_EXECUTABLE)
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
   # Includes cached and uncached multi-objective selection runs.
   set_tests_properties(cli.note-phases PROPERTIES TIMEOUT 180)
+
+  find_program(HWA_LILYPOND_EXECUTABLE NAMES lilypond)
+  set(HWA_EVENT_SCORE_RENDER_ARGS "")
+  if(HWA_LILYPOND_EXECUTABLE)
+    list(APPEND HWA_EVENT_SCORE_RENDER_ARGS --lilypond=${HWA_LILYPOND_EXECUTABLE})
+  endif()
+  if(HWA_CSOUND_EXECUTABLE)
+    list(APPEND HWA_EVENT_SCORE_RENDER_ARGS --csound=${HWA_CSOUND_EXECUTABLE})
+  endif()
+  add_test(NAME cli.event-score COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_event_score_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>
+    --fixture=$<TARGET_FILE:hlolli_wg_analyzer_event_score_tests>
+    ${HWA_EVENT_SCORE_RENDER_ARGS})
+  set_tests_properties(cli.event-score PROPERTIES TIMEOUT 120)
 
   if(NOT WIN32)
     add_test(

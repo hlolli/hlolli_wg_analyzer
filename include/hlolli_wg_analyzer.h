@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1177,6 +1178,49 @@ typedef struct HWANotePhaseFramesResult {
     size_t frame_count;
     HWANotePhaseFrame *frames;
 } HWANotePhaseFramesResult;
+
+#define HWA_NOTE_PHASE_SPECTRA_METHOD_VERSION "note-phase-spectra-1"
+
+/* Row-major powers: bin_powers[frame_index * bin_count + bin_index]. Bins
+ * run from DC through Nyquist at bin_index * sample_rate_hz / fft_size.
+ * Power is |DFT(window * mono)|^2 / (fft_size * sum(window^2)), doubled
+ * except at DC and Nyquist. Units are full-scale squared, not power/Hz.
+ * Raw powers retain bins below the spectral floor; no magnitude clipping.
+ */
+typedef struct HWANotePhaseSpectraResult {
+    HWANotePhaseFramesResult series;
+    size_t bin_count;
+    double *bin_powers;
+} HWANotePhaseSpectraResult;
+
+#define HWA_PARTIAL_TRACK_METHOD_VERSION "spectral-peak-tracks-1"
+typedef struct HWAPartialTrackingOptions {
+    size_t max_peaks;
+    double min_peak_dbfs;
+    double relative_floor_db;
+    double max_step_cents;
+    size_t max_points;
+    uint64_t max_work_bytes;
+    uint64_t max_evaluations;
+} HWAPartialTrackingOptions;
+
+typedef struct HWAPartialTrackPoint {
+    size_t frame_index;
+    size_t bin_index;
+    uint64_t track_id;
+    double frequency_hz;
+    double bin_power;
+    int continued;
+} HWAPartialTrackPoint;
+
+typedef struct HWAPartialTracks {
+    HWAPartialTrackingOptions options;
+    size_t point_count;
+    HWAPartialTrackPoint *points;
+    uint64_t track_count;
+    uint64_t omitted_peak_count;
+    uint64_t evaluations;
+} HWAPartialTracks;
 
 typedef struct HWAProfileComparisonOptions {
     uint64_t max_input_bytes;
@@ -2655,7 +2699,127 @@ typedef struct HWAEventFileBinding {
     const char *source_path;
 } HWAEventFileBinding;
 
+typedef enum HWAEventScoreKind {
+    HWA_EVENT_SCORE_CSOUND = 1,
+    HWA_EVENT_SCORE_LILYPOND = 2
+} HWAEventScoreKind;
+
+typedef struct HWAEventScoreOptions {
+    HWAEventScoreKind kind;
+    uint32_t tempo_bpm; /* Quarter notes per minute; required for LilyPond. */
+    size_t max_notes;
+    size_t max_tracks;
+    size_t max_lanes_per_track;
+    uint64_t max_work_bytes;
+} HWAEventScoreOptions;
+
+void hwa_event_score_options_default(HWAEventScoreOptions *options);
+
+/*
+ * Export selected pitch-hz note values on one source clock. The caller owns
+ * the stream and must check flush/close errors. The bundle stays unchanged.
+ * Tracks are (part, voice) pairs in bytewise text order; missing labels use
+ * empty strings. Notes without a selected pitch are counted and omitted.
+ * Invalid or ambiguous selected pitches fail before writing any score bytes.
+ * Csound v2 uses one numbered instrument per track, fixed level 0.2 in p5,
+ * event ID in p6, exact sample bounds in p7/p8, and track ID in p9.
+ * LilyPond rounds A440 equal-tempered pitches to semitones and sample bounds
+ * to 128th notes at the supplied integer tempo (10..1000). Ties round up;
+ * collapsed notes extend to one tick. Pitches must round into MIDI 0..127.
+ * Overlaps use separate lanes. No key,
+ * meter, instrument, articulation, or ornament is inferred. Score comments
+ * retain source bounds and frequencies; use the bundle for lossless data.
+ * Work limits cover export arrays, not the caller-owned bundle or stream.
+ */
+int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
+                          uint64_t source_recording_id,
+                          const HWAEventScoreOptions *options,
+                          char *error, size_t error_size);
+
 void hwa_analysis_options_default(HWAAnalysisOptions *options);
+
+#define HWA_SEPARATION_EVAL_METHOD_VERSION "separation-waveform-1"
+
+typedef enum HWASeparationRatioStatus {
+    HWA_SEPARATION_RATIO_UNDEFINED = 0,
+    HWA_SEPARATION_RATIO_FINITE = 1,
+    HWA_SEPARATION_RATIO_POSITIVE_INFINITY = 2,
+    HWA_SEPARATION_RATIO_NEGATIVE_INFINITY = 3
+} HWASeparationRatioStatus;
+
+typedef struct HWASeparationRatio {
+    double db; /* Meaningful only when status is FINITE. */
+    HWASeparationRatioStatus status;
+} HWASeparationRatio;
+
+typedef struct HWASeparationPair {
+    HWASeparationRatio snr;
+    HWASeparationRatio si_sdr;
+    HWASeparationRatio reference_level_dbfs;
+    HWASeparationRatio estimate_level_dbfs;
+    HWASeparationRatio error_level_dbfs;
+    double projection_gain;
+    int projection_gain_valid;
+    int reference_silent;
+    int estimate_silent;
+} HWASeparationPair;
+
+typedef struct HWASeparationEvalOptions {
+    uint64_t max_frames;
+    uint64_t max_sample_values; /* Total values across all supplied signals. */
+    uint64_t max_input_bytes; /* Per WAVE file. */
+    uint64_t max_work_bytes; /* WAVE snapshots plus decoded sample buffers. */
+    int remove_channel_mean;
+} HWASeparationEvalOptions;
+
+typedef struct HWASeparationEvaluation {
+    HWASeparationEvalOptions options;
+    size_t frames;
+    uint32_t channels;
+    int mixture_present;
+    uint32_t sample_rate_hz; /* Zero for caller-owned sample arrays. */
+    uint32_t channel_mask; /* Zero when no speaker mapping is supplied. */
+    char reference_sha256[HWA_SHA256_HEX_SIZE];
+    char estimate_sha256[HWA_SHA256_HEX_SIZE];
+    char mixture_sha256[HWA_SHA256_HEX_SIZE];
+    HWASeparationPair estimate;
+    HWASeparationPair mixture;
+    double si_sdr_improvement_db;
+    int si_sdr_improvement_valid;
+} HWASeparationEvaluation;
+
+/*
+ * Borrow equally sized, interleaved, finite sample arrays on the same clock.
+ * No alignment, resampling, channel averaging, filtering, or clipping occurs.
+ * By default each signal's per-channel mean is removed. SNR retains gain
+ * error; SI-SDR fits one signed gain across every channel together.
+ * SI-SDR uses alpha = dot(estimate,reference) / dot(reference,reference),
+ * then 10 log10(power(alpha*reference) / power(estimate-alpha*reference)).
+ * Silence and infinite ratios have explicit statuses, not arbitrary dB ceilings.
+ * Levels are 10 log10(mean(sample^2)), relative to sample amplitude 1.0,
+ * across all frames and channels after the selected mean removal. Error level
+ * measures reference-estimate without fitting gain. Zero power is -infinity.
+ * Optional mixture is the original mixture, evaluated against the same target.
+ * This does not identify instruments or split interference from new artifacts.
+ * The result owns no memory. Failure clears it; options may alias the result.
+ */
+void hwa_separation_eval_options_default(HWASeparationEvalOptions *options);
+int hwa_evaluate_separation_samples(const double *reference,
+                                     const double *estimate,
+                                     const double *mixture,
+                                     size_t frames, uint32_t channels,
+                                     const HWASeparationEvalOptions *options,
+                                     HWASeparationEvaluation *result,
+                                     char *error, size_t error_size);
+
+/* Read immutable, hash-bound WAVE snapshots. Frame counts, rates, channel
+ * counts, and speaker masks must match; sample encodings may differ. */
+int hwa_evaluate_separation_wav(const char *reference_path,
+                                const char *estimate_path,
+                                const char *mixture_path,
+                                const HWASeparationEvalOptions *options,
+                                HWASeparationEvaluation *result,
+                                char *error, size_t error_size);
 
 /*
  * Analyze one caller-owned byte source without opening a path. The source name
@@ -2844,6 +3008,30 @@ int hwa_analyze_note_phase_frames_wav(
     const char *path, const HWANotePhaseOptions *options,
     HWANotePhaseFramesResult *result, char *error, size_t error_size);
 void hwa_note_phase_frames_result_free(HWANotePhaseFramesResult *result);
+
+/* Same frame grid, ownership, and failure rules as phase frames. Includes
+ * raw bin powers without another FFT or read; storage shares max_work_bytes.
+ */
+int hwa_analyze_note_phase_spectra_wav(
+    const char *path, const HWANotePhaseOptions *options,
+    HWANotePhaseSpectraResult *result, char *error, size_t error_size);
+void hwa_note_phase_spectra_result_free(HWANotePhaseSpectraResult *result);
+
+/* Links local spectral peaks, not proven harmonics or physical sources.
+ * Frequencies use a clamped three-bin log-power parabola. Stronger peaks
+ * get first choice of the nearest unused prior peak within max_step_cents.
+ * Ties use the lower bin or track ID. Missing frames/peaks break links;
+ * crossings and merged peaks have no guaranteed identity. Output sorts by
+ * frame then bin. The point budget reserves frame_count * max_peaks slots.
+ * Work limits include source frames and powers. Source stays
+ * borrowed; options are copied before result initialization. Free successful
+ * output before reuse. Failures clear it.
+ */
+void hwa_partial_tracking_options_default(HWAPartialTrackingOptions *options);
+int hwa_track_note_phase_partials(const HWANotePhaseSpectraResult *source,
+    const HWAPartialTrackingOptions *options, HWAPartialTracks *result,
+    char *error, size_t error_size);
+void hwa_partial_tracks_free(HWAPartialTracks *result);
 
 void hwa_profile_comparison_options_default(
     HWAProfileComparisonOptions *options);
