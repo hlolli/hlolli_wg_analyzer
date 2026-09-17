@@ -1465,6 +1465,11 @@ if(HWA_PYTHON3_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_fit.py)
   set_tests_properties(unit.instrument-fit PROPERTIES TIMEOUT 30)
 
+  add_test(NAME unit.harmonic-decay-relative
+    COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_harmonic_decay_relative.py)
+  set_tests_properties(unit.harmonic-decay-relative PROPERTIES TIMEOUT 30)
+
   add_test(
     NAME unit.analyzer-evidence
     COMMAND

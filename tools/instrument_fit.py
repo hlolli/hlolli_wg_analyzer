@@ -29,6 +29,7 @@ VERIFY_CANDIDATE_METHOD_VERSION = "instrument-fit-verify-candidate-v1"
 PASSIVE_DECAY_METHOD_VERSION = "passive-decay-v4"
 PASSIVE_DECAY_SHAPE_METHOD_VERSION = "passive-decay-shape-v1"
 HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-v1"
+RELATIVE_HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-v2"
 CHECKED_NOTE_METHOD_VERSION = "isolated-note-1"
 CHECKED_HARMONIC_DECAY_METHOD_VERSION = "harmonic-decay-1"
 T60_DB_PER_OCTAVE = 20.0 * math.log10(2.0)
@@ -47,6 +48,8 @@ HARMONIC_BAND_HALF_WIDTH_HZ = 0.0
 HARMONIC_BAND_OFFSETS_HZ = (0.0,)
 HARMONIC_FIT_RANGE_DB = 35.0
 MIN_HARMONIC_LEVEL_DBFS = -90.0
+HARMONIC_NOISE_MARGIN_DB = 12.0
+MIN_HARMONIC_DYNAMIC_RANGE_DB = 20.0
 MIN_HARMONIC_SUPPORT_SECONDS = 0.20
 MAX_HARMONIC_LINE_RESIDUAL_DB = 5.0
 MIN_HARMONIC_VALID_BANDS = 3
@@ -281,6 +284,10 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
             raise FitError(f"objectives[{index}] has an unknown kind")
         if "phase_options" in row and kind != "note-phase":
             raise FitError("phase_options requires a note-phase objective")
+        if "harmonic_method_version" in row and kind != "harmonic-decay":
+            raise FitError("harmonic_method_version requires a harmonic-decay objective")
+        if kind == "harmonic-decay":
+            harmonic_method(row.get("harmonic_method_version", HARMONIC_DECAY_METHOD_VERSION))
         if kind == "note-phase":
             if version != 1:
                 raise FitError("note-phase objectives require fit manifest v1")
@@ -344,6 +351,8 @@ def fit_manifest(path: Path, source: Optional[bytes] = None) -> dict[str, Any]:
                          f"objectives[{index}].expected_hz")
                 digest(row.get("reference_sha256"),
                        f"objectives[{index}].reference_sha256")
+    # A result records one harmonic method; never mix measurement contracts.
+    passive_method_versions(objectives)
     if version == 1:
         mode = selection.get("mode", "fit-check")
         if mode not in ("fit-check", "fit-only"):
@@ -1235,15 +1244,30 @@ def goertzel_level_dbfs(samples: list[list[float]], start: int, count: int,
     return 20.0 * math.log10(max(amplitude, 1.0e-12))
 
 
+def harmonic_method(method_version: str) -> str:
+    if method_version not in (HARMONIC_DECAY_METHOD_VERSION,
+                              RELATIVE_HARMONIC_DECAY_METHOD_VERSION):
+        raise FitError("unknown harmonic-decay method")
+    return method_version
+
+
 def harmonic_decay_profile(
         path: Path, fundamental_hz: float, harmonic_count: int,
-        expected_sha256: Optional[str] = None) -> list[dict[str, Any]]:
+        expected_sha256: Optional[str] = None, *,
+        method_version: str = HARMONIC_DECAY_METHOD_VERSION) -> list[dict[str, Any]]:
+    harmonic_method(method_version)
+    relative = method_version == RELATIVE_HARMONIC_DECAY_METHOD_VERSION
     fundamental = positive(fundamental_hz, "harmonic fundamental")
     if (type(harmonic_count) is not int or type(harmonic_count) is bool or
             harmonic_count < MIN_HARMONIC_VALID_BANDS or
             harmonic_count > MAX_HARMONIC_BANDS):
         raise FitError("harmonic count is out of range")
     rate, samples = read_pcm_wave_channels(path, expected_sha256)
+    quantization_bound = None
+    if relative:
+        _, _, width, _ = read_pcm_wave_payload(path, expected_sha256)
+        # Half a PCM step per sample, times the amplitude estimator's factor 2.
+        quantization_bound = -20.0 * math.log10(1 << (width * 8 - 1))
     tail = decay_tail(path, expected_sha256)
     window = max(8, round(rate * HARMONIC_WINDOW_SECONDS))
     hop = max(1, round(rate * HARMONIC_HOP_SECONDS))
@@ -1271,10 +1295,21 @@ def harmonic_decay_profile(
             times.append((offset - start + 0.5 * window) / rate)
         peak = max(levels)
         first_peak = levels.index(peak)
+        floor = MIN_HARMONIC_LEVEL_DBFS
+        noise_floor = None
+        if relative:
+            # Use the upper quartile of the last tenth (at least five windows).
+            # A still-decaying end is conservative: it can shorten support.
+            ending = sorted(levels[-max(5, math.ceil(len(levels) / 10)):])
+            noise_floor = ending[math.ceil(.75 * len(ending)) - 1]
+            floor = max(noise_floor, quantization_bound) + HARMONIC_NOISE_MARGIN_DB
         stop = len(levels)
         for index in range(first_peak + 1, len(levels)):
+            if relative and levels[index] <= floor:
+                stop = index  # Never include a sample below the measurement floor.
+                break
             if (levels[index] <= peak - HARMONIC_FIT_RANGE_DB or
-                    levels[index] <= MIN_HARMONIC_LEVEL_DBFS):
+                    (not relative and levels[index] <= floor)):
                 stop = index + 1
                 break
         fit_times = times[first_peak:stop]
@@ -1284,7 +1319,10 @@ def harmonic_decay_profile(
         residual = None
         t60 = None
         support = 0.0
-        if len(fit_times) < 4:
+        dynamic_range = peak - min(fit_levels)
+        if relative and (peak <= floor or dynamic_range < MIN_HARMONIC_DYNAMIC_RANGE_DB):
+            status = "insufficient-dynamic-range"
+        elif len(fit_times) < 4:
             status = "too-short"
         else:
             support = fit_times[-1] - fit_times[0]
@@ -1309,14 +1347,27 @@ def harmonic_decay_profile(
             "line_residual_db": residual,
             "t60_seconds": t60,
         })
+        if relative:
+            rows[-1].update({
+                "method_version": method_version,
+                "noise_floor_dbfs": noise_floor,
+                "quantization_bound_dbfs": quantization_bound,
+                "fit_floor_dbfs": floor,
+                "dynamic_range_db": dynamic_range,
+            })
     return rows
 
 
 def compare_harmonic_decay_profiles(
         reference_rows: list[dict[str, Any]],
         model_rows: list[dict[str, Any]], fundamental_hz: float,
-        harmonic_count: int) -> dict[str, Any]:
+        harmonic_count: int, *,
+        method_version: str = HARMONIC_DECAY_METHOD_VERSION) -> dict[str, Any]:
     """Compare two checked harmonic profiles."""
+    harmonic_method(method_version)
+    if any(row.get("method_version", HARMONIC_DECAY_METHOD_VERSION) != method_version
+           for row in reference_rows + model_rows):
+        raise FitError("harmonic profile method does not match comparison method")
     reference_valid_count = sum(
         row["status"] == "valid" for row in reference_rows
     )
@@ -1348,7 +1399,7 @@ def compare_harmonic_decay_profiles(
     mean_error = sum(errors) / len(errors) if errors else 8.0
     maximum_error = max(errors) if errors else 8.0
     return {
-        "method_version": HARMONIC_DECAY_METHOD_VERSION,
+        "method_version": method_version,
         "fundamental_hz": float(fundamental_hz),
         "harmonic_count": harmonic_count,
         "harmonics": rows,
@@ -1364,16 +1415,20 @@ def run_harmonic_decay(
         reference: Path, model: Path, fundamental_hz: float,
         harmonic_count: int = 8,
         reference_sha256: Optional[str] = None,
-        model_sha256: Optional[str] = None) -> dict[str, Any]:
+        model_sha256: Optional[str] = None, *,
+        method_version: str = HARMONIC_DECAY_METHOD_VERSION) -> dict[str, Any]:
     """Compare per-harmonic T60 values after one plucked-string attack."""
     reference_rows = harmonic_decay_profile(
-        reference, fundamental_hz, harmonic_count, reference_sha256
+        reference, fundamental_hz, harmonic_count, reference_sha256,
+        method_version=method_version,
     )
     model_rows = harmonic_decay_profile(
-        model, fundamental_hz, harmonic_count, model_sha256
+        model, fundamental_hz, harmonic_count, model_sha256,
+        method_version=method_version,
     )
     return compare_harmonic_decay_profiles(
-        reference_rows, model_rows, fundamental_hz, harmonic_count
+        reference_rows, model_rows, fundamental_hz, harmonic_count,
+        method_version=method_version,
     )
 
 
@@ -1619,7 +1674,11 @@ def passive_method_versions(objectives: list[dict[str, Any]]) -> dict[str, str]:
     if "passive-decay-shape" in kinds:
         result["passive_decay_shape"] = PASSIVE_DECAY_SHAPE_METHOD_VERSION
     if "harmonic-decay" in kinds:
-        result["harmonic_decay"] = HARMONIC_DECAY_METHOD_VERSION
+        methods = {harmonic_method(row.get("harmonic_method_version", HARMONIC_DECAY_METHOD_VERSION))
+                   for row in objectives if row["kind"] == "harmonic-decay"}
+        if len(methods) != 1:
+            raise FitError("harmonic-decay objectives must use one method")
+        result["harmonic_decay"] = methods.pop()
     if "checked-note-harmonic-decay" in kinds:
         result["isolated_note"] = CHECKED_NOTE_METHOD_VERSION
         result["checked_harmonic_decay"] = (
@@ -2241,7 +2300,7 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
 
     audio_cache: dict[tuple[int, str], dict[str, Any]] = {}
     harmonic_reference_cache: dict[
-        tuple[str, float, int], list[dict[str, Any]]
+        tuple[str, float, int, str], list[dict[str, Any]]
     ] = {}
     phase_cache = (analyzer_evidence_module().NotePhaseCache()
                    if any(row["kind"] == "note-phase" for row in manifest["objectives"])
@@ -2306,8 +2365,9 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                     elif objective["kind"] == "harmonic-decay":
                         fundamental = float(objective["fundamental_hz"])
                         count = int(objective["harmonic_count"])
+                        method = objective.get("harmonic_method_version", HARMONIC_DECAY_METHOD_VERSION)
                         reference_key = (
-                            objective["reference_binding"], fundamental, count
+                            objective["reference_binding"], fundamental, count, method
                         )
                         reference_profile = harmonic_reference_cache.get(
                             reference_key
@@ -2317,16 +2377,19 @@ def select(arguments: argparse.Namespace) -> Optional[bool]:
                                 reference, fundamental, count,
                                 binding_hashes[
                                     objective["reference_binding"]],
+                                method_version=method,
                             )
                             harmonic_reference_cache[reference_key] = (
                                 reference_profile
                             )
                         model_profile = harmonic_decay_profile(
-                            model, fundamental, count, model_hash
+                            model, fundamental, count, model_hash,
+                            method_version=method,
                         )
                         harmonic = compare_harmonic_decay_profiles(
                             reference_profile, model_profile,
                             fundamental, count,
+                            method_version=method,
                         )
                         comparison = harmonic["comparison"]
                         measure = {

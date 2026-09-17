@@ -54,3 +54,31 @@ fit-result hash per source group. The instrument owns the supported paths and
 group layout. Model writing still requires the hash-bound profile adapter and
 rechecks the selected result. Legacy double-bass manifests retain their
 existing protocol; other joint manifests must declare this contract.
+
+## Harmonic decay methods
+
+Version-1 fit manifests can set `harmonic_method_version` on each
+`harmonic-decay` objective. Omission keeps `harmonic-decay-v1`, including its
+fixed -90 dBFS cutoff. All harmonic objectives in a fit must use the same
+method. Selection and model-writing receipts bind the chosen method.
+
+The opt-in `harmonic-decay-v2` method measures quieter PCM audio without
+normalizing its samples. For each harmonic it estimates an end-of-recording
+floor from the upper quartile of the last tenth of its measured levels, using
+at least five windows. It also bounds PCM rounding error by one sample step
+in amplitude. Fitting stops 12 dB above the higher of these two floors and
+excludes levels below that limit. A band needs at least 20 dB of measured
+decay as well as the existing time-support, slope, and residual checks.
+Reports include both floors, the fit limit, and the measured decay range.
+
+Uniform gain should preserve estimates while sufficient signal remains above
+the PCM limit. Gain cannot restore lost precision. The tail estimate can
+include a still-decaying signal, so short recordings may lose support. This
+method does not separate overlapping modes or room response, and its floor
+estimate is not a calibrated signal-to-noise measurement. The whole-note
+checks and the limit on slopes of -3 dB/s or faster still apply.
+
+A method change requires new reference checks and a new selection result.
+Keep the old manifest and result. Passing a synthetic method test does not
+validate an instrument model or turn development recordings into held-out
+evidence.

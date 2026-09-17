@@ -2701,12 +2701,13 @@ typedef struct HWAEventFileBinding {
 
 typedef enum HWAEventScoreKind {
     HWA_EVENT_SCORE_CSOUND = 1,
-    HWA_EVENT_SCORE_LILYPOND = 2
+    HWA_EVENT_SCORE_LILYPOND = 2,
+    HWA_EVENT_SCORE_MIDI = 3
 } HWAEventScoreKind;
 
 typedef struct HWAEventScoreOptions {
     HWAEventScoreKind kind;
-    uint32_t tempo_bpm; /* Quarter notes per minute; required for LilyPond. */
+    uint32_t tempo_bpm; /* Required for LilyPond; zero for Csound and MIDI. */
     size_t max_notes;
     size_t max_tracks;
     size_t max_lanes_per_track;
@@ -2729,6 +2730,14 @@ void hwa_event_score_options_default(HWAEventScoreOptions *options);
  * Overlaps use separate lanes. No key,
  * meter, instrument, articulation, or ornament is inferred. Score comments
  * retain source bounds and frequencies; use the bundle for lossless data.
+ * MIDI writes SMF format 1 with 32767 ticks/quarter and a fixed 500000 us
+ * quarter (a clock convention, not inferred tempo). Bounds round to nearest
+ * tick, ties up; collapsed notes extend to one tick. Pitch rounds as above.
+ * At most 15 (part, voice) tracks use distinct channels, excluding channel 10.
+ * Same-key overlap within a track and deltas above 0x0fffffff ticks fail
+ * before writing. Velocity is fixed at 64; no programs or pitch bends are
+ * inferred. Labels use track-name metadata; exact values stay in the bundle.
+ * MIDI requires a binary stream, including stdout on Windows.
  * Work limits cover export arrays, not the caller-owned bundle or stream.
  */
 int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,

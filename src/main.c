@@ -188,7 +188,7 @@ static void hwa_print_usage(FILE *stream)
         "  hlolli-wg-analyzer [--json] validate-event-bundle "
         "DIRECTORY.hwa-events\n"
         "  hlolli-wg-analyzer export-event-score DIRECTORY.hwa-events "
-        "--format csound|lilypond [--source-id N] [--tempo-bpm N] --output FILE\n"
+        "--format csound|lilypond|midi [--source-id N] [--tempo-bpm N] --output FILE\n"
         "  hlolli-wg-analyzer [ANALYSIS OPTIONS] analyze-events INPUT.wav "
         "--output NEW.hwa-events\n"
         "  hlolli-wg-analyzer infer-note-events INPUT.wav --model MODEL.onnx "
@@ -210,7 +210,7 @@ static void hwa_print_usage(FILE *stream)
         "  --output PATH               New artifact path; - for stdout.\n"
         "  --replace                   Permit replacing a regular output file.\n"
         "  --score PATH                Align an unfolded note manifest to audio.\n"
-        "  --format csound|lilypond    Event score format; --tempo-bpm is required for LilyPond.\n"
+        "  --format csound|lilypond|midi  Score format; --tempo-bpm is only for LilyPond.\n"
         "  --source-id N               Source recording ID; may be omitted for one source.\n"
         "  --tempo-bpm N               Explicit quarter-note tempo (10..1000); no tempo inference.\n"
         "  --alignment PATH            Segment a score-to-audio alignment.\n"
@@ -1479,6 +1479,7 @@ static int hwa_parse_option_with_value(HWACli *cli,
         if (cli->event_score_option_set & 1U) return -1;
         if (strcmp(value, "csound") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_CSOUND;
         else if (strcmp(value, "lilypond") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_LILYPOND;
+        else if (strcmp(value, "midi") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_MIDI;
         else return -1;
         cli->event_score_option_set |= 1U;
     } else if (strcmp(option, "--source-id") == 0) {
@@ -3314,7 +3315,7 @@ static int hwa_run_export_event_score(const HWACli *cli)
         cli->output_path[0] == '\0' || strcmp(cli->positionals[1], "-") == 0 ||
         !(cli->event_score_option_set & 1U) || cli->json || cli->replace ||
         (cli->event_score_options.kind == HWA_EVENT_SCORE_LILYPOND && !(cli->event_score_option_set & 4U)) ||
-        (cli->event_score_options.kind == HWA_EVENT_SCORE_CSOUND && (cli->event_score_option_set & 4U)) ||
+        (cli->event_score_options.kind != HWA_EVENT_SCORE_LILYPOND && (cli->event_score_option_set & 4U)) ||
         cli->export_kind != 0 || cli->score_path != NULL || cli->alignment_path != NULL ||
         cli->labels_path != NULL || cli->amend_path != NULL || cli->items_path != NULL ||
         cli->room_ir_path != NULL || cli->renderer_path != NULL || cli->resume_path != NULL ||

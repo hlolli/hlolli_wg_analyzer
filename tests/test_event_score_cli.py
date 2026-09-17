@@ -12,27 +12,33 @@ import unittest
 import wave
 
 
-def midi_notes(path):
+def midi_notes(path, details=None):
     data = path.read_bytes()
-    if data[:4] != b"MThd":
+    if len(data) < 14 or data[:8] != b"MThd\0\0\0\x06":
         raise AssertionError("missing MIDI header")
     division = int.from_bytes(data[12:14], "big")
-    if division & 0x8000:
+    if not division or division & 0x8000:
         raise AssertionError("unexpected SMPTE clock")
     offset = 8 + int.from_bytes(data[4:8], "big")
     result = []
     tempos = []
+    track_count = 0
     while offset < len(data):
+        track_count += 1
         if data[offset:offset+4] != b"MTrk":
             raise AssertionError("missing MIDI track")
         length = int.from_bytes(data[offset+4:offset+8], "big")
         track = data[offset+8:offset+8+length]
+        if len(track) != length:
+            raise AssertionError("truncated MIDI track")
         offset += 8 + length
         pos = tick = 0
         running = None
         active = {}
         notes = []
         name = ""
+        channels = set()
+        ended = False
 
         def variable():
             nonlocal pos
@@ -60,10 +66,18 @@ def midi_notes(path):
                 size = variable()
                 payload = track[pos:pos+size]
                 pos += size
+                if len(payload) != size:
+                    raise AssertionError("truncated MIDI metadata")
                 if kind == 3:
                     name = payload.decode("utf-8")
                 elif kind == 81:
+                    if size != 3:
+                        raise AssertionError("invalid MIDI tempo")
                     tempos.append((tick, int.from_bytes(payload, "big")))
+                elif kind == 47:
+                    if size != 0 or pos != len(track):
+                        raise AssertionError("invalid MIDI track end")
+                    ended = True
                 continue
             if status in (240, 247):
                 size = variable()
@@ -74,18 +88,25 @@ def midi_notes(path):
             size = 1 if status & 240 in (192, 208) else 2
             payload = track[pos:pos+size]
             pos += size
+            if len(payload) != size or any(byte > 127 for byte in payload):
+                raise AssertionError("invalid MIDI channel data")
             key = (status & 15, payload[0])
             if status & 240 == 144 and payload[1]:
+                channels.add(status & 15)
                 if key in active:
                     raise AssertionError("unexpected same-channel duplicate note")
                 active[key] = tick
             elif status & 240 == 128 or (status & 240 == 144 and not payload[1]):
                 start = active.pop(key)
                 notes.append((payload[0], start / division, tick / division))
-        if active:
-            raise AssertionError("hanging MIDI notes")
+        if active or not ended:
+            raise AssertionError("hanging MIDI notes or missing track end")
+        if details is not None:
+            details.append((channels, tick))
         if notes:
             result.append((name, sorted(notes)))
+    if track_count != int.from_bytes(data[10:12], "big"):
+        raise AssertionError("wrong MIDI track count")
     return result, tempos
 
 
@@ -119,6 +140,120 @@ class EventScoreTests(unittest.TestCase):
         entry.update(file_bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
         (self.bundle / "manifest.json").write_text(json.dumps(manifest))
 
+    def midi_command(self, output, ok=True):
+        result = subprocess.run(
+            [str(ANALYZER), "export-event-score", str(self.bundle),
+             "--format", "midi", "--output", str(output)], capture_output=True)
+        self.assertEqual(result.returncode == 0, ok, result.stderr)
+        return result
+
+    def test_direct_midi_tracks_clock_and_input_preservation(self):
+        before = {path.name: path.read_bytes() for path in self.bundle.iterdir()}
+        output = self.root / "direct.mid"
+        self.midi_command(output)
+        data = output.read_bytes()
+        self.assertEqual(data[:14], b"MThd\0\0\0\x06\0\x01\0\x05\x7f\xff")
+        tracks, tempos = midi_notes(output)
+        self.assertEqual(tempos, [(0, 500000)])
+        self.assertEqual(tracks, [
+            ("cello / 1", [(48, 0, 4)]),
+            ("viola / 1", [(60, 0, 4)]),
+            ("violin-1 / 1", [(69, 0, 2), (72, 1, 3)]),
+            ("violin-2 / 1", [(76, 1, 3)]),
+        ])
+        self.assertEqual(self.midi_command("-").stdout, data)
+        self.midi_command(output, ok=False)
+        self.assertEqual(output.read_bytes(), data)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.bundle.iterdir()})
+        self.edit_bundle(lambda manifest, events: events.reverse())
+        self.assertEqual(self.midi_command("-").stdout, data)
+
+    def test_direct_midi_rounding_labels_and_retrigger(self):
+        def change(manifest, events):
+            events[0].update(start_sample=1, end_sample=2, part='声\\"\n')
+            events[4]["values"][0]["value"] = 440.0
+            events[4].update(start_sample=2, end_sample=3, part='声\\"\n')
+        self.edit_bundle(change)
+        output = self.root / "small.mid"
+        self.midi_command(output)
+        tracks, _ = midi_notes(output)
+        notes = dict(tracks)['声\\"\n / 1']
+        self.assertEqual(notes, [(69, 8/32767, 16/32767), (69, 16/32767, 25/32767)])
+
+    def test_direct_midi_rejects_ambiguous_overlap_without_partial_output(self):
+        def change(manifest, events):
+            events[4]["values"][0]["value"] = 440.0
+        self.edit_bundle(change)
+        output = self.root / "bad.mid"
+        result = self.midi_command(output, ok=False)
+        self.assertIn(b"same-key overlap", result.stderr)
+        self.assertFalse(output.exists())
+        self.assertEqual(self.midi_command("-", ok=False).stdout, b"")
+
+    def test_direct_midi_channel_limit(self):
+        def change(manifest, events):
+            template = copy.deepcopy(events[0])
+            events.clear()
+            for index in range(16):
+                event = copy.deepcopy(template)
+                event.update(id=index+1, part="part-%02d" % index)
+                events.append(event)
+        self.edit_bundle(change)
+        output = self.root / "too-many.mid"
+        result = self.midi_command(output, ok=False)
+        self.assertIn(b"15-track", result.stderr)
+        self.assertFalse(output.exists())
+        self.assertEqual(self.midi_command("-", ok=False).stdout, b"")
+        self.edit_bundle(lambda manifest, events: events.pop())
+        self.midi_command(output)
+        details = []
+        self.assertEqual(len(midi_notes(output, details)[0]), 15)
+        self.assertEqual(details[0], (set(), 0))
+        self.assertEqual(details[1:], [({channel}, 3*65534)
+                                      for channel in range(16) if channel != 9])
+
+    def test_direct_midi_sample_clocks_and_minimum_duration(self):
+        for rate in (44100, 48000, 768000):
+            with self.subTest(rate=rate):
+                def change(manifest, events):
+                    manifest["audio"][0]["format"].update(
+                        sample_rate_hz=rate, frames=rate*3,
+                        data_bytes=rate*6, duration_seconds=3)
+                    del events[1:]
+                    events[0].update(start_sample=1, end_sample=2)
+                self.edit_bundle(change)
+                output = self.root / (str(rate) + ".mid")
+                self.midi_command(output)
+                start = (65534 + rate//2)//rate
+                end = max(start+1, (2*65534 + rate//2)//rate)
+                self.assertEqual(midi_notes(output)[0], [
+                    ("violin-1 / 1", [(69, start/32767, end/32767)])])
+
+    def test_direct_midi_delta_limit_and_pitch_range(self):
+        def change(manifest, events):
+            manifest["audio"][0]["format"].update(
+                frames=8000*4000, data_bytes=16000*4000, duration_seconds=4000)
+            del events[1:]
+            events[0].update(start_sample=8000*3999, end_sample=8000*4000)
+        self.edit_bundle(change)
+        output = self.root / "long.mid"
+        self.midi_command(output)
+        self.assertEqual(midi_notes(output)[0], [
+            ("violin-1 / 1", [(69, 7998, 8000)])])
+
+        def excessive_gap(manifest, events):
+            manifest["audio"][0]["format"].update(
+                frames=8000*10000, data_bytes=16000*10000, duration_seconds=10000)
+        self.edit_bundle(excessive_gap)
+        bad = self.root / "bad.mid"
+        self.assertIn(b"delta/chunk", self.midi_command(bad, ok=False).stderr)
+        self.assertFalse(bad.exists())
+        self.assertEqual(self.midi_command("-", ok=False).stdout, b"")
+        self.edit_bundle(lambda manifest, events: events[0]["values"][0].update(value=1))
+        self.assertIn(b"pitch or time range", self.midi_command(bad, ok=False).stderr)
+        self.assertFalse(bad.exists())
+        self.assertEqual(self.midi_command("-", ok=False).stdout, b"")
+
     def test_csound_tracks_exact_values_and_no_input_changes(self):
         before = {path.name: path.read_bytes() for path in self.bundle.iterdir()}
         text = self.command("--format", "csound", "--output", "-").stdout
@@ -147,6 +282,7 @@ class EventScoreTests(unittest.TestCase):
         output = self.root / "score"
         for flags in [[], ["--format", "unknown"], ["--format", "lilypond"],
                       ["--format", "csound", "--tempo-bpm", "120"],
+                      ["--format", "midi", "--tempo-bpm", "120"],
                       ["--format", "lilypond", "--tempo-bpm", "9"],
                       ["--format", "lilypond", "--tempo-bpm", "120.5"],
                       ["--format", "csound", "--format", "csound"],

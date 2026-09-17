@@ -130,6 +130,41 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
+### Export musical events
+
+```sh
+build/hlolli-wg-analyzer export-event-score notes.hwa-events \
+  --format midi --output notes.mid
+build/hlolli-wg-analyzer export-event-score notes.hwa-events \
+  --format csound --output notes.sco
+build/hlolli-wg-analyzer export-event-score notes.hwa-events \
+  --format lilypond --tempo-bpm 120 --output notes.ly
+```
+
+`export-event-score` reads selected `pitch-hz` note values from a checked
+event bundle. Use `--source-id N` when the bundle has more than one source
+recording. Each `(part, voice)` pair becomes a track. Unpitched notes are
+omitted; invalid or ambiguous selected pitches cause an error. The command
+leaves the bundle unchanged and refuses to overwrite an existing output.
+`--output -` writes to stdout (binary for MIDI).
+
+MIDI export needs no detected tempo or external tools. It writes a format-1
+file at 32767 ticks per quarter and 500000 microseconds per quarter: a fixed
+clock, not a tempo estimate. Sample bounds round to the nearest tick (about
+15.26 microseconds), with ties up and a minimum duration of one tick. Pitch
+rounds to the nearest A440 semitone in MIDI range 0–127. Velocity is fixed at
+64; the export does not infer programs, pitch bends, key, meter, or ornaments.
+It supports 15 tracks on distinct channels, skipping drum channel 10.
+Same-key overlaps within a track cause an error, including overlaps caused
+by rounding. A gap between MIDI events cannot exceed 268435455 ticks (about
+68 minutes); each track must fit a 32-bit chunk length. These checks run
+before writing any bytes.
+
+Csound export keeps pitch in Hz and includes event IDs and sample bounds.
+LilyPond export rounds pitches to semitones and timing to 128th notes at the
+supplied tempo, using separate voices for overlaps. Keep the event bundle
+for exact values and information these output formats omit.
+
 ### Align, segment, and measure
 
 For one known note span, `note-phases` estimates attack, sustain, release, and

@@ -18,6 +18,175 @@ typedef struct ScoreNote {
     int midi;
 } ScoreNote;
 
+#define HWA_MIDI_DIVISION 32767U
+#define HWA_MIDI_TICKS_PER_SECOND UINT64_C(65534)
+#define HWA_MIDI_MAX_DELTA UINT64_C(0x0fffffff)
+#define HWA_MIDI_TRACKS 15U
+
+typedef struct MidiEdge {
+    const ScoreNote *note;
+    uint64_t tick;
+    int on;
+} MidiEdge;
+
+typedef struct MidiSink {
+    FILE *stream;
+    uint64_t bytes;
+    int failed;
+} MidiSink;
+
+static void midi_bytes(MidiSink *sink, const void *data, size_t size)
+{
+    if (sink->failed) return;
+    if (sink->bytes > UINT32_MAX || (uint64_t)size > UINT32_MAX-sink->bytes) {
+        sink->failed = 1;
+        return;
+    }
+    if (sink->stream != NULL && fwrite(data, 1U, size, sink->stream) != size)
+        sink->failed = 1;
+    sink->bytes += (uint64_t)size;
+}
+
+static void midi_byte(MidiSink *sink, unsigned value)
+{
+    unsigned char byte = (unsigned char)value;
+    midi_bytes(sink, &byte, 1U);
+}
+
+static void midi_variable(MidiSink *sink, uint64_t value)
+{
+    unsigned char bytes[4];
+    size_t count = 0U;
+    if (value > HWA_MIDI_MAX_DELTA) { sink->failed = 1; return; }
+    do {
+        bytes[count] = (unsigned char)((value & 127U) | (count != 0U ? 128U : 0U));
+        count++;
+        value >>= 7U;
+    } while (value != 0U);
+    while (count != 0U) midi_byte(sink, bytes[--count]);
+}
+
+static void midi_u32(MidiSink *sink, uint32_t value)
+{
+    midi_byte(sink, value >> 24U);
+    midi_byte(sink, value >> 16U);
+    midi_byte(sink, value >> 8U);
+    midi_byte(sink, value);
+}
+
+static int midi_tick(uint64_t sample, uint32_t rate, uint64_t *tick)
+{
+    uint64_t fraction = ((sample % rate)*HWA_MIDI_TICKS_PER_SECOND + rate/2U)/rate;
+    uint64_t whole = sample/rate;
+    if (whole > (UINT64_MAX-1U-fraction)/HWA_MIDI_TICKS_PER_SECOND) return -1;
+    *tick = whole*HWA_MIDI_TICKS_PER_SECOND + fraction;
+    return 0;
+}
+
+static int midi_edge_order(const void *left, const void *right)
+{
+    const MidiEdge *a = left, *b = right;
+    if (a->note->track != b->note->track) return a->note->track < b->note->track ? -1 : 1;
+    if (a->tick != b->tick) return a->tick < b->tick ? -1 : 1;
+    if (a->on != b->on) return a->on < b->on ? -1 : 1;
+    return a->note->event->id < b->note->event->id ? -1 :
+           a->note->event->id > b->note->event->id ? 1 : 0;
+}
+
+static void midi_track(MidiSink *sink, const MidiEdge *edges, size_t count,
+                       uint64_t end_tick)
+{
+    const char *part = edges[0].note->event->part;
+    const char *voice = edges[0].note->event->voice;
+    size_t part_size = part == NULL ? 0U : strlen(part);
+    size_t voice_size = voice == NULL ? 0U : strlen(voice);
+    size_t i;
+    unsigned char active[128] = {0};
+    unsigned channel = (unsigned)edges[0].note->track-1U;
+    uint64_t cursor = 0U;
+    if (channel >= 9U) channel++;
+    if (part_size > HWA_MIDI_MAX_DELTA-3U ||
+        voice_size > HWA_MIDI_MAX_DELTA-3U-part_size) { sink->failed = 1; return; }
+    midi_bytes(sink, "\0\xff\x03", 3U);
+    midi_variable(sink, (uint64_t)part_size+(uint64_t)voice_size+3U);
+    if (part_size != 0U) midi_bytes(sink, part, part_size);
+    midi_bytes(sink, " / ", 3U);
+    if (voice_size != 0U) midi_bytes(sink, voice, voice_size);
+    for (i = 0U; i < count; ++i) {
+        unsigned key = (unsigned)edges[i].note->midi;
+        if ((edges[i].on != 0) == (active[key] != 0U)) { sink->failed = 1; return; }
+        active[key] = (unsigned char)edges[i].on;
+        midi_variable(sink, edges[i].tick-cursor);
+        midi_byte(sink, (edges[i].on ? 0x90U : 0x80U) | channel);
+        midi_byte(sink, key);
+        midi_byte(sink, edges[i].on ? 64U : 0U);
+        cursor = edges[i].tick;
+    }
+    midi_variable(sink, end_tick > cursor ? end_tick-cursor : 0U);
+    midi_bytes(sink, "\xff\x2f\0", 3U);
+}
+
+static int midi_score(FILE *stream, const ScoreNote *notes, size_t count,
+                      size_t tracks, const HWAEventAudio *source,
+                      MidiEdge *edges, char *error, size_t error_size)
+{
+    uint32_t lengths[HWA_MIDI_TRACKS];
+    size_t i, first, track = 0U;
+    uint64_t end_tick;
+    MidiSink sink = {NULL, 0U, 0};
+    if (tracks > HWA_MIDI_TRACKS || midi_tick(source->format.frames,
+            source->format.sample_rate_hz, &end_tick) != 0) {
+        hwa_set_error(error, error_size, "MIDI exceeds its 15-track or clock limit");
+        return -1;
+    }
+    for (i = 0U; i < count; ++i) {
+        edges[2U*i].note = edges[2U*i+1U].note = &notes[i];
+        edges[2U*i].tick = notes[i].start_tick;
+        edges[2U*i].on = 1;
+        edges[2U*i+1U].tick = notes[i].end_tick;
+        edges[2U*i+1U].on = 0;
+    }
+    qsort(edges, count*2U, sizeof(*edges), midi_edge_order);
+    /* Count and validate every chunk before writing, including to a pipe. */
+    first = 0U;
+    while (first < count*2U) {
+        size_t last = first+1U;
+        while (last < count*2U && edges[last].note->track == edges[first].note->track) last++;
+        sink.bytes = 0U;
+        midi_track(&sink, edges+first, last-first, end_tick);
+        if (sink.failed) {
+            hwa_set_error(error, error_size, "MIDI has same-key overlap or exceeds a delta/chunk limit");
+            return -1;
+        }
+        lengths[track++] = (uint32_t)sink.bytes;
+        first = last;
+    }
+    sink.stream = stream;
+    sink.bytes = 0U;
+    midi_bytes(&sink, "MThd\0\0\0\x06\0\x01", 10U);
+    midi_byte(&sink, 0U);
+    midi_byte(&sink, (unsigned)tracks+1U);
+    midi_byte(&sink, HWA_MIDI_DIVISION >> 8U);
+    midi_byte(&sink, HWA_MIDI_DIVISION);
+    midi_bytes(&sink, "MTrk\0\0\0\x0b\0\xff\x51\x03\x07\xa1\x20\0\xff\x2f\0", 19U);
+    first = track = 0U;
+    while (first < count*2U) {
+        size_t last = first+1U;
+        while (last < count*2U && edges[last].note->track == edges[first].note->track) last++;
+        sink.bytes = 0U;
+        midi_bytes(&sink, "MTrk", 4U);
+        midi_u32(&sink, lengths[track++]);
+        sink.bytes = 0U;
+        midi_track(&sink, edges+first, last-first, end_tick);
+        first = last;
+    }
+    if (sink.failed || ferror(stream)) {
+        hwa_set_error(error, error_size, "cannot write MIDI score");
+        return -1;
+    }
+    return 0;
+}
+
 static const char *label(const char *text) { return text == NULL ? "" : text; }
 
 static int track_order(const HWAPerformanceEvent *a, const HWAPerformanceEvent *b)
@@ -220,6 +389,7 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     HWAEventBundleLimits limits;
     const HWAEventAudio *source = NULL;
     ScoreNote *notes = NULL;
+    MidiEdge *midi_edges = NULL;
     uint64_t *lane_ends = NULL;
     size_t count = 0U, omitted = 0U, tracks = 0U, i;
     uint64_t bytes;
@@ -229,9 +399,9 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     if (options != NULL) copied = *options;
     else hwa_event_score_options_default(&copied);
     if (stream == NULL || bundle == NULL ||
-        (copied.kind != HWA_EVENT_SCORE_CSOUND && copied.kind != HWA_EVENT_SCORE_LILYPOND) ||
+        (copied.kind != HWA_EVENT_SCORE_CSOUND && copied.kind != HWA_EVENT_SCORE_LILYPOND && copied.kind != HWA_EVENT_SCORE_MIDI) ||
         (copied.kind == HWA_EVENT_SCORE_LILYPOND && (copied.tempo_bpm < 10U || copied.tempo_bpm > 1000U)) ||
-        (copied.kind == HWA_EVENT_SCORE_CSOUND && copied.tempo_bpm != 0U) ||
+        (copied.kind != HWA_EVENT_SCORE_LILYPOND && copied.tempo_bpm != 0U) ||
         copied.max_notes == 0U || copied.max_tracks == 0U || copied.max_tracks > 65535U ||
         copied.max_lanes_per_track == 0U || copied.max_lanes_per_track > 256U || copied.max_work_bytes == 0U) {
         hwa_set_error(error, error_size, "invalid event score arguments or options");
@@ -257,13 +427,22 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
         return -1;
     }
     bytes = (uint64_t)copied.max_lanes_per_track * sizeof(*lane_ends);
+    if (copied.kind == HWA_EVENT_SCORE_MIDI) {
+        if (count > SIZE_MAX/(2U*sizeof(*midi_edges)) ||
+            (uint64_t)count > (UINT64_MAX-bytes)/(2U*sizeof(*midi_edges))) {
+            hwa_set_error(error, error_size, "MIDI event allocation overflows");
+            return -1;
+        }
+        bytes += (uint64_t)count*2U*sizeof(*midi_edges);
+    }
     if (bytes > copied.max_work_bytes || (uint64_t)count > (copied.max_work_bytes-bytes)/sizeof(*notes)) {
         hwa_set_error(error, error_size, "event score work limit exceeded");
         return -1;
     }
     notes = calloc(count, sizeof(*notes));
     lane_ends = calloc(copied.max_lanes_per_track, sizeof(*lane_ends));
-    if (notes == NULL || lane_ends == NULL) {
+    if (copied.kind == HWA_EVENT_SCORE_MIDI) midi_edges = calloc(count*2U, sizeof(*midi_edges));
+    if (notes == NULL || lane_ends == NULL || (copied.kind == HWA_EVENT_SCORE_MIDI && midi_edges == NULL)) {
         hwa_set_error(error, error_size, "cannot allocate event score");
         goto cleanup;
     }
@@ -285,12 +464,18 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
         if (present == 0) { omitted++; continue; }
         notes[count].event = event;
         notes[count].pitch = pitch;
-        if (copied.kind == HWA_EVENT_SCORE_LILYPOND) {
+        if (copied.kind != HWA_EVENT_SCORE_CSOUND) {
             double midi = floor(69.0 + 12.0*log2(pitch/440.0) + 0.5);
-            if (midi < 0.0 || midi > 127.0 ||
-                tick_at(event->start_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].start_tick) != 0 ||
-                tick_at(event->end_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].end_tick) != 0) {
-                hwa_set_error(error, error_size, "note is outside the LilyPond export pitch or time range");
+            int bad_clock;
+            if (copied.kind == HWA_EVENT_SCORE_MIDI) {
+                bad_clock = midi_tick(event->start_sample, source->format.sample_rate_hz, &notes[count].start_tick) != 0 ||
+                    midi_tick(event->end_sample, source->format.sample_rate_hz, &notes[count].end_tick) != 0;
+            } else {
+                bad_clock = tick_at(event->start_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].start_tick) != 0 ||
+                    tick_at(event->end_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].end_tick) != 0;
+            }
+            if (!isfinite(midi) || midi < 0.0 || midi > 127.0 || bad_clock) {
+                hwa_set_error(error, error_size, "note is outside the score export pitch or time range");
                 goto cleanup;
             }
             notes[count].midi = (int)midi;
@@ -326,6 +511,10 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
         notes[i].lane = lane;
         lane_ends[lane] = notes[i].end_tick;
     }
+    if (copied.kind == HWA_EVENT_SCORE_MIDI) {
+        result = midi_score(stream, notes, count, tracks, source, midi_edges, error, error_size);
+        goto cleanup;
+    }
     memset(&locale, 0, sizeof(locale));
     if (hwa_c_numeric_locale_begin(&locale) != 0) {
         hwa_set_error(error, error_size, "cannot enter C numeric locale");
@@ -337,6 +526,7 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     if (hwa_c_numeric_locale_end(&locale) != 0 || ferror(stream)) result = -1;
     if (result != 0) hwa_set_error(error, error_size, "cannot write event score");
 cleanup:
+    free(midi_edges);
     free(notes);
     free(lane_ends);
     return result;
