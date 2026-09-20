@@ -361,6 +361,29 @@ static void test_musicxml(void)
         hwa_musicxml_score_free(&score);
     }
     {
+        static const unsigned char rounded[] = "<score-partwise><part-list><score-part id='P'>"
+            "<part-name>P</part-name></score-part></part-list><part id='P'><measure number='1'>"
+            "<attributes><divisions>480</divisions></attributes><sound tempo='130'/><sound tempo='110'/>"
+            "<note><pitch><step>C</step><octave>4</octave></pitch><duration>69</duration><type>16th</type>"
+            "<time-modification><actual-notes>7</actual-notes><normal-notes>4</normal-notes>"
+            "</time-modification></note></measure></part></score-partwise>";
+        HWAMusicXMLOptions options;
+        size_t i;
+        hwa_musicxml_options_default(&options);
+        options.repair_tuplets = 1; options.last_tempo_wins = 1;
+        status = hwa_musicxml_read(rounded, sizeof(rounded)-1U, &options, &score, error, sizeof(error));
+        CHECK(status == 0);
+        if (status == 0) {
+            CHECK(score.repaired_tuplets == 1U && score.tempo_conflicts == 1U);
+            CHECK(fabs(score.duration_beats-1.0/7.0) < 1e-12);
+            for (i = 0U; i < score.event_count; i++) {
+                if (score.events[i].kind == HWA_MUSICXML_NOTE) CHECK(score.events[i].interpretation & 4U);
+                if (score.events[i].kind == HWA_MUSICXML_TEMPO) CHECK(score.events[i].tempo_bpm == 110.0);
+            }
+            hwa_musicxml_score_free(&score);
+        }
+    }
+    {
         HWAMusicXMLOptions options;
         size_t i, notes = 0U, controls = 0U;
         hwa_musicxml_options_default(&options); options.performance = 1;

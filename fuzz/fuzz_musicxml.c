@@ -18,6 +18,8 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size)
     options.max_events = 4096U;
     options.max_measure_visits = 4096U;
     options.performance = (int)(size % 2U);
+    options.repair_tuplets = (int)((size/2U) % 2U);
+    options.last_tempo_wins = (int)((size/4U) % 2U);
     if (hwa_musicxml_read(data, size, &options, &score, error, sizeof(error)) == 0) {
         if (!isfinite(score.duration_beats) || score.duration_beats <= 0.0) abort();
         for (i = 0U; i < score.event_count; i++) {

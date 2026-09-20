@@ -290,11 +290,28 @@ not a trained performer:
 Use `--score-grace-fraction`, `--score-trill-rate`, `--score-staccato-ratio`,
 and `--score-default-velocity` to change these rules. Output records the policy.
 Event `interpretation` is a bit mask: 1 means a baseline choice, 2 means explicit
-XML playback data. Written positions remain separate from these choices.
+XML playback data, 4 means a repaired tuplet duration, and 8 means a tempo
+conflict resolved by policy. Written positions remain separate from playback choices.
 `unrendered_marks` reports marks/attributes without a playback rule, including
 grace `make-time`, ornament acceleration/uneven spacing/terminal turns,
 hairpins, and free text. Their XML remains available; no performer-specific
 interpretation is claimed.
+
+Import stays strict by default. For exports with rounded tuplet durations,
+`import-score --score-repair-tuplets` derives the duration from the note type,
+dots, and `time-modification` ratio, but only when the source uses integer
+divisions and rounds that duration to the nearest integer tick. It leaves
+fractional durations and larger differences unchanged. It also handles full-voice
+backups stated as either the rounded sum or the repaired span; partial backups
+after a changed span are rejected. JSON reports `repaired_tuplets` as a count of
+written note/rest durations, before repeat expansion. The original XML stays intact.
+
+`import-score --score-tempo-conflicts last` selects the last tempo in document
+order when several different tempos occupy one beat; `error` is the default.
+JSON records this policy and counts the resolved `tempo_conflicts` after repeat
+expansion. Rejected tempo instructions remain accessible in the source XML.
+Both options also work through `HWAMusicXMLOptions` in the memory/WASM reader;
+`align` still uses strict score parsing.
 
 This is a written-score reader, not a complete MusicXML player or an XML schema
 validator. It rejects timewise scores, namespaced elements, cue/unpitched notes,

@@ -459,6 +459,51 @@ static double beat_unit(const char *s)
     return 0.0;
 }
 
+static int unique_fields(XMLReader *r, size_t parent, const char *const *fields, size_t count)
+{
+    size_t f;
+    for (f = 0U; f < count; f++) {
+        size_t first = child(r, parent, fields[f]), next;
+        if (first == 0U) continue;
+        for (next = r->nodes[first].next; next != 0U; next = r->nodes[next].next)
+            if (!r->nodes[next].attribute && strcmp(r->nodes[next].name, fields[f]) == 0)
+                return fail(r, "duplicate score field");
+    }
+    return 0;
+}
+
+static int repair_tuplet(XMLReader *r, size_t note, double divisions, double ticks,
+                         HWAMusicXMLEvent *event)
+{
+    static const char *const fields[] = {"actual-notes", "normal-notes", "normal-type"};
+    size_t modification = child(r, note, "time-modification"), n;
+    double actual, normal, written, dot, expected;
+    if (!r->limits.repair_tuplets || modification == 0U) return 0;
+    if (unique_fields(r, modification, fields, sizeof(fields)/sizeof(fields[0])) != 0 ||
+        number(r, modification, "actual-notes", &actual) != 0 ||
+        number(r, modification, "normal-notes", &normal) != 0) return -1;
+    if (actual < 1.0 || normal < 1.0 || floor(actual) != actual || floor(normal) != normal)
+        return fail(r, "invalid tuplet ratio");
+    written = beat_unit(value(r, note, "type", ""));
+    if (written == 0.0 || floor(divisions) != divisions || floor(ticks) != ticks) return 0;
+    dot = written*0.5;
+    for (n = r->nodes[note].first; n != 0U; n = r->nodes[n].next) {
+        if (!r->nodes[n].attribute && strcmp(r->nodes[n].name, "dot") == 0) {
+            written += dot; dot *= 0.5;
+        }
+    }
+    written *= normal/actual;
+    expected = written*divisions;
+    /* Only infer rounding when the duration is the nearest integer tick.
+     * Fractional source durations and larger intentional differences win. */
+    if (!isfinite(expected) || expected <= 0.0 || floor(expected+0.5) != ticks ||
+        fabs(expected-ticks) <= 1e-9) return 0;
+    event->duration_beats = written;
+    event->interpretation |= 4U;
+    r->score->repaired_tuplets++;
+    return 0;
+}
+
 static int meter(XMLReader *r, size_t time, double *length)
 {
     size_t i;
@@ -548,19 +593,6 @@ static int unsupported(XMLReader *r)
             (*attribute(r, i, "attack") != '\0' || *attribute(r, i, "release") != '\0' ||
              *attribute(r, i, "time-only") != '\0' || child(r, i, "play") != 0U))
             return fail(r, "note playback overrides are unsupported");
-    }
-    return 0;
-}
-
-static int unique_fields(XMLReader *r, size_t parent, const char *const *fields, size_t count)
-{
-    size_t f;
-    for (f = 0U; f < count; f++) {
-        size_t first = child(r, parent, fields[f]), next;
-        if (first == 0U) continue;
-        for (next = r->nodes[first].next; next != 0U; next = r->nodes[next].next)
-            if (!r->nodes[next].attribute && strcmp(r->nodes[next].name, fields[f]) == 0)
-                return fail(r, "duplicate score field");
     }
     return 0;
 }
@@ -990,7 +1022,7 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
     memset(r->pedal_cc, 0, sizeof(r->pedal_cc));
     for (m = r->nodes[part].first; m != 0U; m = r->nodes[m].next) {
         size_t n;
-        double cursor = 0.0, extent = 0.0, last_start = 0.0, last_duration = 0.0;
+        double cursor = 0.0, source_cursor = 0.0, extent = 0.0, last_start = 0.0, last_duration = 0.0;
         const char *last_voice = "";
         int last_note = 0, last_grace = 0;
         if (r->nodes[m].attribute) continue;
@@ -1036,15 +1068,26 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
                 double duration;
                 if (divisions <= 0.0 || number(r, n, "duration", &duration) != 0 || duration <= 0.0)
                     return fail(r, "invalid backup/forward duration or missing divisions");
-                cursor += (strcmp(tag, "backup") == 0 ? -duration : duration)/divisions;
+                duration /= divisions;
+                if (r->limits.repair_tuplets && strcmp(tag, "backup") == 0 && fabs(cursor-source_cursor) > 1e-9) {
+                    /* Exporters rewind by either the bar length or the sum
+                     * of rounded note durations. Both denote a full voice. */
+                    if (fabs(duration-cursor) > 1e-9 && fabs(duration-source_cursor) > 1e-9)
+                        return fail(r, "partial backup after repaired tuplets is unsupported");
+                    cursor = source_cursor = 0.0;
+                } else {
+                    double shift = strcmp(tag, "backup") == 0 ? -duration : duration;
+                    cursor += shift; source_cursor += shift;
+                }
                 if (!isfinite(cursor) || cursor < -1e-9) return fail(r, "backup crosses the start of a measure");
                 if (cursor < 0.0) cursor = 0.0;
                 if (cursor > extent) extent = cursor;
                 last_note = 0;
             } else if (strcmp(tag, "note") == 0) {
-                static const char *const fields[] = {"pitch", "rest", "grace", "chord", "voice", "staff", "duration"};
+                static const char *const fields[] = {"pitch", "rest", "grace", "chord", "voice", "staff", "duration", "type", "time-modification"};
                 static const char *const pitch_fields[] = {"step", "alter", "octave"};
                 size_t tie;
+                double source_duration = 0.0;
                 int grace = child(r, n, "grace") != 0U;
                 int chord = child(r, n, "chord") != 0U;
                 event.chord = chord;
@@ -1056,6 +1099,8 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
                     if (divisions <= 0.0 || number(r, n, "duration", &duration) != 0 || duration <= 0.0)
                         return fail(r, "invalid note duration or missing divisions");
                     event.duration_beats = duration/divisions;
+                    source_duration = event.duration_beats;
+                    if (repair_tuplet(r, n, divisions, duration, &event) != 0) return -1;
                 } else if (child(r, n, "duration") != 0U) return fail(r, "grace notes must not contain duration");
                 pitch = child(r, n, "pitch");
                 if ((pitch != 0U) == rest || (rest && (grace || chord))) return fail(r, "note must contain one pitch or rest");
@@ -1079,6 +1124,7 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
                     last_start = cursor; last_duration = event.duration_beats;
                     last_voice = event.voice; last_grace = grace; last_note = !rest;
                     cursor += event.duration_beats;
+                    source_cursor += source_duration;
                 }
                 for (tie = r->nodes[n].first; tie != 0U; tie = r->nodes[tie].next) {
                     if (!r->nodes[tie].attribute && strcmp(r->nodes[tie].name, "tie") == 0) {
@@ -1207,7 +1253,15 @@ static int read_score(XMLReader *r, size_t root)
         HWAMusicXMLEvent *event = &r->score->events[i];
         if (event->kind == HWA_MUSICXML_TEMPO) {
             if (last_tempo != SIZE_MAX && r->score->events[last_tempo].start_beats == event->start_beats) {
-                if (r->score->events[last_tempo].tempo_bpm != event->tempo_bpm) return fail(r, "conflicting tempos at one beat");
+                if (r->score->events[last_tempo].tempo_bpm != event->tempo_bpm) {
+                    if (!r->limits.last_tempo_wins) {
+                        r->pos = event->source_offset;
+                        return fail(r, "conflicting tempos at one beat");
+                    }
+                    r->score->events[last_tempo] = *event;
+                    r->score->events[last_tempo].interpretation |= 8U;
+                    r->score->tempo_conflicts++;
+                }
                 continue;
             }
             last_tempo = output;
@@ -1246,6 +1300,8 @@ static int read_document(const unsigned char *data, size_t size,
         size > (SIZE_MAX-1U)/2U || r.limits.max_nodes == 0U || r.limits.max_nodes == SIZE_MAX ||
         r.limits.max_events == 0U || r.limits.max_work_bytes == 0U || r.limits.max_measure_visits == 0U ||
         (r.limits.performance != 0 && r.limits.performance != 1) ||
+        (r.limits.repair_tuplets != 0 && r.limits.repair_tuplets != 1) ||
+        (r.limits.last_tempo_wins != 0 && r.limits.last_tempo_wins != 1) ||
         !isfinite(r.limits.grace_fraction) || r.limits.grace_fraction <= 0.0 || r.limits.grace_fraction >= 1.0 ||
         !isfinite(r.limits.trill_notes_per_beat) || r.limits.trill_notes_per_beat < 1.0 || r.limits.trill_notes_per_beat > 128.0 ||
         !isfinite(r.limits.staccato_ratio) || r.limits.staccato_ratio <= 0.0 || r.limits.staccato_ratio > 1.0 ||

@@ -2952,7 +2952,7 @@ typedef struct HWAMusicXMLEvent {
     double value; /* CONTROL: continuous 0..127; MARK: optional numeric value. */
     double velocity; /* Continuous MIDI 0..127, valid only when velocity_valid. */
     int velocity_valid;
-    unsigned interpretation; /* 1: baseline playback policy, 2: XML playback data. */
+    unsigned interpretation; /* Bits: 1 baseline policy, 2 XML playback data, 4 tuplet repair, 8 tempo conflict choice. */
     double grace_previous, grace_following, grace_make; /* -1 when absent. */
     unsigned sequence; /* Orders multiple generated events at one source position. */
     unsigned articulations; /* 1 staccato, 2 staccatissimo, 4 tenuto, 8 accent, 16 strong-accent. */
@@ -2971,6 +2971,8 @@ typedef struct HWAMusicXMLOptions {
     double trill_notes_per_beat; /* Baseline rate when no XML beats, default 8. */
     double staccato_ratio; /* Baseline gate fraction, default 0.5. */
     double default_velocity; /* Baseline MIDI velocity, default 64. */
+    int repair_tuplets; /* Opt in to repairing nearest-integer-tick tuplet rounding. */
+    int last_tempo_wins; /* Opt in to document-order resolution of same-beat tempos. */
 } HWAMusicXMLOptions;
 
 typedef struct HWAMusicXMLScore {
@@ -2987,6 +2989,8 @@ typedef struct HWAMusicXMLScore {
     int unfolded;
     size_t interpreted_events;
     size_t unrendered_marks; /* Marks without a baseline playback rule. */
+    size_t repaired_tuplets; /* Written note/rest durations repaired, before repeats. */
+    size_t tempo_conflicts; /* Same-beat tempo disagreements resolved after repeats. */
 } HWAMusicXMLScore;
 
 void hwa_musicxml_options_default(HWAMusicXMLOptions *options);
@@ -3005,6 +3009,8 @@ void hwa_musicxml_options_default(HWAMusicXMLOptions *options);
  * Written mode leaves grace notes at zero duration. Performance mode applies
  * baseline grace borrowing, articulation gates, dynamics and common ornaments;
  * interpretation bits distinguish policy from explicit XML playback data.
+ * repair_tuplets and last_tempo_wins are opt-in recovery policies; their
+ * counts and interpretation bits report changes without altering xml_data.
  * This is not a performer model. Unrendered marks stay in XML/mark events and
  * are counted. See README for supported rules and rejected navigation forms.
  * External DOCTYPE identifiers are never opened; internal DTDs are rejected.

@@ -217,6 +217,8 @@ static void hwa_print_usage(FILE *stream)
     (void)fprintf(stream,
         "  --score-mode written|performance  Preserve written notes or apply baseline playback rules.\n"
         "  --score-tempo-bpm N          Import tempo fallback (0 disables; default 120).\n"
+        "  --score-repair-tuplets       Import: repair nearest-tick rounding from tuplet notation.\n"
+        "  --score-tempo-conflicts error|last  Import: reject conflicting tempos (default) or use document order.\n"
         "  --score-grace-fraction N     Baseline share borrowed from following note (default 0.125).\n"
         "  --score-trill-rate N         Baseline notes per quarter beat (default 8).\n"
         "  --score-staccato-ratio N     Baseline note gate (default 0.5).\n"
@@ -1496,6 +1498,11 @@ static int hwa_parse_option_with_value(HWACli *cli,
         else if (strcmp(value, "performance") == 0) cli->musicxml_options.performance = 1;
         else return -1;
         cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-tempo-conflicts") == 0) {
+        if (strcmp(value, "error") == 0) cli->musicxml_options.last_tempo_wins = 0;
+        else if (strcmp(value, "last") == 0) cli->musicxml_options.last_tempo_wins = 1;
+        else return -1;
+        cli->musicxml_option_set = 1;
     } else if (strcmp(option, "--score-tempo-bpm") == 0) {
         if (hwa_parse_double(value, &cli->musicxml_options.default_tempo_bpm) != 0 || cli->musicxml_options.default_tempo_bpm < 0.0) return -1;
         cli->musicxml_option_set = 1;
@@ -1593,6 +1600,10 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
             return 1;
         } else if (!end_options && strcmp(current, "--json") == 0) {
             cli->json = 1;
+        } else if (!end_options && strcmp(current, "--score-repair-tuplets") == 0) {
+            if (cli->musicxml_options.repair_tuplets) return -1;
+            cli->musicxml_options.repair_tuplets = 1;
+            cli->musicxml_option_set = 1;
         } else if (!end_options && strcmp(current, "--phase-envelope") == 0) {
             if (cli->note_phase_envelope) return -1;
             cli->note_phase_envelope = 1;

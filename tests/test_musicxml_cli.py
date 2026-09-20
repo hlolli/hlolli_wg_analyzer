@@ -79,6 +79,82 @@ class MusicXML(unittest.TestCase):
         xml = score(*(measure(note('G') * 20, i) for i in range(30)))
         self.assertEqual(len(self.notes(self.run_score(self.archive(xml)))), 600)
 
+    def test_rounded_tuplet_repair(self):
+        tuplet = ('<voice>1</voice><type>16th</type><time-modification>'
+                  '<actual-notes>7</actual-notes><normal-notes>4</normal-notes></time-modification>')
+        attrs = ('<attributes><divisions>480</divisions>'
+                 '<time><beats>1</beats><beat-type>4</beat-type></time></attributes>')
+        upper = note(duration=69, extra=tuplet) * 7
+        lower = note('G', duration=480, extra='<voice>2</voice>')
+        xml = score('<measure number="1">' + attrs + FORWARD + upper
+                    + '<backup><duration>480</duration></backup>' + lower + BACKWARD + '</measure>',
+                    '<measure number="2">' + note('D', duration=480) + '</measure>')
+        result = self.run_score(xml, ok=False)
+        self.assertIn('measure exceeds its meter', result.stderr)
+        for data in (xml, self.archive(xml)):
+            parsed = self.run_score(data, '--score-repair-tuplets', '--score-tempo-bpm', '0')
+            self.assertEqual(parsed['repaired_tuplets'], 7)
+            self.assertTrue(parsed['policy']['repair_tuplets'])
+            self.assertEqual(parsed['duration_beats'], 3)
+            notes = self.notes(parsed)
+            self.assertEqual(len(notes), 17)
+            self.assertEqual([e['start_beats'] for e in notes if e['voice'] == '2'], [0, 1])
+            for e in notes:
+                if e['interpretation'] & 4:
+                    self.assertAlmostEqual(e['duration_beats'], 1/7)
+                    self.assertAlmostEqual(e['written_duration_beats'], 1/7)
+            performed = self.run_score(data, '--score-repair-tuplets', '--score-mode', 'performance')
+            self.assertEqual(performed['repaired_tuplets'], 7)
+        self.run_score(xml, '--score-repair-tuplets', '--score-repair-tuplets', ok=False)
+
+    def test_tuplet_repair_does_not_hide_bad_durations(self):
+        attrs = '<attributes><divisions>480</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes>'
+        ratio = '<type>16th</type><time-modification><actual-notes>7</actual-notes><normal-notes>4</normal-notes></time-modification>'
+        for body in (note(duration=481), note(duration=70, extra=ratio)*7,
+                     note(duration=69, extra=ratio)*7 + '<backup><duration>240</duration></backup>',
+                     note(duration=69, extra=ratio.replace('>7<', '>0<')),
+                     note(duration=69, extra=ratio.replace('>7<', '>1.5<'))):
+            self.run_score(score('<measure number="1">' + attrs + body + '</measure>'),
+                           '--score-repair-tuplets', ok=False)
+        # Explicit fractional durations must not be guessed back to notation.
+        xml = score('<measure number="1">' + attrs + note(duration=68.6, extra=ratio) + '</measure>')
+        parsed = self.run_score(xml, '--score-repair-tuplets')
+        self.assertEqual(parsed['repaired_tuplets'], 0)
+        self.assertAlmostEqual(self.notes(parsed)[0]['duration_beats'], 68.6/480)
+
+    def test_dotted_tuplet_chords_and_rests(self):
+        ratio = ('<type>16th</type><dot/><time-modification><actual-notes>7</actual-notes>'
+                 '<normal-notes>4</normal-notes><normal-type>16th</normal-type>'
+                 '<normal-dot/></time-modification>')
+        xml = score('<measure number="1"><attributes><divisions>480</divisions></attributes>'
+                    + note(duration=103, extra=ratio)
+                    + note('E', duration=103, extra=ratio, before='<chord/>')
+                    + '<note><rest/><duration>103</duration>' + ratio + '</note></measure>')
+        strict = self.run_score(xml)
+        self.assertEqual(strict['repaired_tuplets'], 0)
+        self.assertAlmostEqual(self.notes(strict)[0]['duration_beats'], 103/480)
+        repaired = self.run_score(xml, '--score-repair-tuplets', '--score-tempo-bpm', '0')
+        self.assertEqual(repaired['repaired_tuplets'], 3)
+        self.assertAlmostEqual(repaired['duration_beats'], 3/7)
+        for e, onset in zip(repaired['events'], (0, 0, 3/14)):
+            self.assertAlmostEqual(e['start_beats'], onset)
+            self.assertAlmostEqual(e['duration_beats'], 3/14)
+            self.assertTrue(e['interpretation'] & 4)
+
+    def test_tempo_conflict_policy(self):
+        xml = score(measure('<sound tempo="130"/><sound tempo="110"/>' + note()))
+        self.assertIn('conflicting tempos', self.run_score(xml, ok=False).stderr)
+        self.assertIn('conflicting tempos', self.run_score(xml, '--score-tempo-conflicts', 'error', ok=False).stderr)
+        parsed = self.run_score(xml, '--score-tempo-conflicts', 'last')
+        tempos = [e for e in parsed['events'] if e['kind'] == 'tempo']
+        self.assertEqual([e['tempo_bpm'] for e in tempos], [110])
+        self.assertEqual(parsed['tempo_conflicts'], 1)
+        self.assertEqual(parsed['policy']['tempo_conflicts'], 'last')
+        self.assertTrue(tempos[0]['interpretation'] & 8)
+        self.run_score(xml, '--score-tempo-conflicts', 'guess', ok=False)
+        same = self.run_score(score(measure('<sound tempo="110"/><sound tempo="110"/>' + note())))
+        self.assertEqual(same['tempo_conflicts'], 0)
+
     def test_zip_failures(self):
         archive = self.archive(score(measure(note())), zipfile.ZIP_STORED)
         for length in (0, 1, 20, len(archive)-1, len(archive)-22):

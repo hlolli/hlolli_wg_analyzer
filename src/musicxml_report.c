@@ -15,12 +15,13 @@ static int write_report(FILE *stream, const HWAMusicXMLScore *score, const HWAMu
     size_t i;
     if (fprintf(stream, "{\"schema\":\"hwa-musicxml-score\",\"schema_version\":1,\"time_unit\":\"quarter_note\","
         "\"mode\":\"%s\",\"default_tempo_bpm\":%.17g,\"used_default_tempo\":%s,\"duration_beats\":%.17g,"
-        "\"part_count\":%zu,\"measure_visits\":%zu,\"unfolded\":%s,\"interpreted_events\":%zu,\"unrendered_marks\":%zu,"
-        "\"policy\":{\"grace_fraction\":%.17g,\"trill_notes_per_beat\":%.17g,\"staccato_ratio\":%.17g,\"default_velocity\":%.17g},\"events\":[",
+        "\"part_count\":%zu,\"measure_visits\":%zu,\"unfolded\":%s,\"interpreted_events\":%zu,\"unrendered_marks\":%zu,\"repaired_tuplets\":%zu,\"tempo_conflicts\":%zu,"
+        "\"policy\":{\"grace_fraction\":%.17g,\"trill_notes_per_beat\":%.17g,\"staccato_ratio\":%.17g,\"default_velocity\":%.17g,\"repair_tuplets\":%s,\"tempo_conflicts\":\"%s\"},\"events\":[",
         options->performance ? "baseline-performance" : "written", options->default_tempo_bpm,
         score->used_default_tempo ? "true" : "false", score->duration_beats, score->part_count,
-        score->measure_visits, score->unfolded ? "true" : "false", score->interpreted_events, score->unrendered_marks,
-        options->grace_fraction, options->trill_notes_per_beat, options->staccato_ratio, options->default_velocity) < 0) return -1;
+        score->measure_visits, score->unfolded ? "true" : "false", score->interpreted_events, score->unrendered_marks, score->repaired_tuplets, score->tempo_conflicts,
+        options->grace_fraction, options->trill_notes_per_beat, options->staccato_ratio, options->default_velocity,
+        options->repair_tuplets ? "true" : "false", options->last_tempo_wins ? "last" : "error") < 0) return -1;
     for (i = 0U; i < score->event_count; i++) {
         const HWAMusicXMLEvent *e = &score->events[i];
         const char *const values[] = {e->id, e->part, e->part_name, e->voice, e->staff, e->measure, e->mark};

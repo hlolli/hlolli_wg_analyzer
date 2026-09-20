@@ -92,6 +92,10 @@ static void simple_and_limits(void)
     reject(xml, &options, "work byte limit");
     hwa_musicxml_options_default(&options); options.default_tempo_bpm = NAN;
     reject(xml, &options, "options");
+    hwa_musicxml_options_default(&options); options.repair_tuplets = 2;
+    reject(xml, &options, "options");
+    hwa_musicxml_options_default(&options); options.last_tempo_wins = -1;
+    reject(xml, &options, "options");
     for (i = 0U; i < strlen(xml); i++) {
         char saved = xml[i]; xml[i] = '\0';
         reject(xml, NULL, NULL);
@@ -152,6 +156,55 @@ static void timeline(void)
     hwa_musicxml_score_free(&score);
 }
 
+static void rounded_tuplets(void)
+{
+    char body[8192], *xml;
+    HWAMusicXMLOptions options;
+    HWAMusicXMLScore score;
+    size_t used, i, pass;
+    hwa_musicxml_options_default(&options);
+    options.default_tempo_bpm = 0.0;
+    options.repair_tuplets = 1;
+    for (pass = 0U; pass < 3U; pass++) {
+        /* Full-voice backups may use the bar length or the rounded sum. */
+        unsigned ticks = 69U, divisions = pass == 2U ? 484U : 480U;
+        unsigned backup = pass == 0U ? divisions : ticks*7U;
+        used = (size_t)snprintf(body, sizeof(body),
+            "<attributes><divisions>%u</divisions><time><beats>1</beats><beat-type>4</beat-type></time></attributes>", divisions);
+        for (i = 0U; i < 7U; i++) {
+            used += (size_t)snprintf(body+used, sizeof(body)-used,
+                "<note id='t%zu'><pitch><step>C</step><octave>4</octave></pitch>"
+                "<duration>%u</duration><voice>1</voice><type>16th</type>"
+                "<time-modification><actual-notes>7</actual-notes><normal-notes>4</normal-notes>"
+                "</time-modification></note>", i, ticks);
+        }
+        (void)snprintf(body+used, sizeof(body)-used,
+            "<backup><duration>%u</duration></backup>"
+            "<note id='lower'><pitch><step>C</step><octave>3</octave></pitch><duration>%u</duration><voice>2</voice></note>"
+            "</measure><measure number='2'><note id='next'><rest/><duration>%u</duration></note>", backup, divisions, divisions);
+        xml = document(body);
+        if (xml == NULL) return;
+        if (pass == 0U) reject(xml, NULL, "measure exceeds its meter");
+        if (read(xml, &options, &score) == 0) {
+            CHECK(score.repaired_tuplets == 7U && score.event_count == 9U);
+            CHECK(fabs(score.duration_beats-2.0) < 1e-12);
+            CHECK(score.xml_size == strlen(xml) && memcmp(score.xml_data, xml, strlen(xml)) == 0);
+            for (i = 0U; i < score.event_count; i++) {
+                const HWAMusicXMLEvent *e = &score.events[i];
+                if (e->id[0] == 't') {
+                    CHECK(fabs(e->duration_beats-1.0/7.0) < 1e-12);
+                    CHECK(fabs(e->written_duration_beats-1.0/7.0) < 1e-12);
+                    CHECK(fabs(e->start_beats-(double)(e->id[1]-'0')/7.0) < 1e-12);
+                    CHECK((e->interpretation & 4U) != 0U);
+                } else if (strcmp(e->id, "lower") == 0) CHECK(e->start_beats == 0.0);
+                else if (strcmp(e->id, "next") == 0) CHECK(e->start_beats == 1.0);
+            }
+            hwa_musicxml_score_free(&score);
+        } else CHECK(0);
+        free(xml);
+    }
+}
+
 static void malformed(void)
 {
     static const char *const bodies[] = {
@@ -207,6 +260,6 @@ static void malformed(void)
 
 int main(void)
 {
-    simple_and_limits(); timeline(); malformed();
+    simple_and_limits(); timeline(); rounded_tuplets(); malformed();
     return failures != 0;
 }
