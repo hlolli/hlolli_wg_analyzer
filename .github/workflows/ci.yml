@@ -335,7 +335,7 @@ jobs:
         run: >-
           cmake --build build-fuzz --parallel 2
           --target hwa_fuzz_wav hwa_fuzz_manifests
-          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers hwa_fuzz_musicxml
       - name: Run corpus fuzz smoke
         run: >-
           ctest --test-dir build-fuzz --output-on-failure
@@ -372,7 +372,7 @@ jobs:
         run: >-
           cmake --build build-fuzz --parallel 2
           --target hwa_fuzz_wav hwa_fuzz_manifests
-          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers hwa_fuzz_musicxml
       - name: Run corpus fuzz smoke
         run: >-
           ctest --test-dir build-fuzz --output-on-failure
@@ -399,7 +399,7 @@ jobs:
         run: >-
           cmake --build build-fuzz --config Release --parallel 2
           --target hwa_fuzz_wav hwa_fuzz_manifests
-          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers
+          hwa_fuzz_alignment hwa_fuzz_probe hwa_fuzz_readers hwa_fuzz_musicxml
       - name: Run corpus fuzz smoke
         run: >-
           ctest --test-dir build-fuzz -C Release --output-on-failure

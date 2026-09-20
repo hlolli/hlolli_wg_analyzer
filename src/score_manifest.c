@@ -911,6 +911,99 @@ static int hwa_score_finish_manifest(HWAScoreManifest *manifest,
     return 0;
 }
 
+int hwa_musicxml_read_file(const char *path, const HWAMusicXMLOptions *options,
+                          HWAMusicXMLScore *score, char *error, size_t error_size)
+{
+    HWAMusicXMLOptions limits;
+    unsigned char *data = NULL;
+    size_t size = 0U;
+    char hash[65];
+    int result;
+    if (options != NULL) limits = *options; else hwa_musicxml_options_default(&limits);
+    if (score == NULL) { hwa_set_error(error, error_size, "missing MusicXML result"); return -1; }
+    memset(score, 0, sizeof(*score));
+    if (hwa_score_read_file(path, limits.max_input_bytes, &data, &size, hash, error, error_size) != 0) return -1;
+    if ((uint64_t)size >= limits.max_work_bytes) {
+        free(data); hwa_set_error(error, error_size, "MusicXML file exceeds work byte limit"); return -1;
+    }
+    limits.max_work_bytes -= (uint64_t)size;
+    result = hwa_musicxml_read(data, size, &limits, score, error, error_size);
+    free(data); return result;
+}
+
+static int hwa_score_from_musicxml(const unsigned char *data, size_t size,
+                                   HWAScoreParseState *state,
+                                   char *error, size_t error_size)
+{
+    HWAMusicXMLScore score;
+    HWAMusicXMLOptions options;
+    size_t i;
+    int result = -1;
+    hwa_musicxml_options_default(&options);
+    options.max_events = state->max_events;
+    if ((uint64_t)size > options.max_input_bytes) options.max_input_bytes = (uint64_t)size;
+    if (hwa_musicxml_read(data, size, &options, &score, error, error_size) != 0) return -1;
+    state->manifest->musicxml_input = 1;
+    state->manifest->musicxml_default_tempo = score.used_default_tempo;
+    for (i = 0U; i < score.event_count; i++) {
+        const HWAMusicXMLEvent *source = &score.events[i];
+        HWAScoreEvent event;
+        char id[64], pitch[16];
+        const char *kind, *tie;
+        size_t voice_size, position_size;
+        if (source->kind != HWA_MUSICXML_NOTE && source->kind != HWA_MUSICXML_REST && source->kind != HWA_MUSICXML_TEMPO) continue;
+        memset(&event, 0, sizeof(event));
+        event.kind = source->kind == HWA_MUSICXML_TEMPO ? HWA_SCORE_TEMPO :
+                     source->kind == HWA_MUSICXML_REST ? HWA_SCORE_REST : HWA_SCORE_NOTE;
+        kind = event.kind == HWA_SCORE_TEMPO ? "tempo" : event.kind == HWA_SCORE_REST ? "rest" : "note";
+        event.start_beats = source->start_beats; event.duration_beats = source->duration_beats;
+        event.end_beats = source->start_beats+source->duration_beats;
+        event.tempo_bpm = source->tempo_bpm; event.tempo_valid = event.kind == HWA_SCORE_TEMPO;
+        event.source_row = i+1U;
+        event.tie = source->tie == 3U ? HWA_SCORE_TIE_CONTINUE :
+                    source->tie == 2U ? HWA_SCORE_TIE_STOP : source->tie == 1U ? HWA_SCORE_TIE_START : HWA_SCORE_TIE_NONE;
+        tie = source->tie == 3U ? "continue" : source->tie == 2U ? "stop" : source->tie == 1U ? "start" : "none";
+        pitch[0] = '\0';
+        if (event.kind == HWA_SCORE_NOTE) {
+            if (source->midi_pitch != floor(source->midi_pitch)) {
+                hwa_set_error(error, error_size, "MusicXML alignment does not support fractional MIDI pitches; use the memory reader to retain microtones");
+                goto done;
+            }
+            event.midi_note = (int)source->midi_pitch; event.midi_note_valid = 1;
+            (void)snprintf(pitch, sizeof(pitch), "%d", event.midi_note);
+        }
+        (void)snprintf(id, sizeof(id), "xml-%zu", i+1U);
+        event.event_id = hwa_score_copy_text(id); event.kind_text = hwa_score_copy_text(kind);
+        event.midi_note_text = hwa_score_copy_text(pitch); event.velocity_text = hwa_score_copy_text("");
+        event.tie_text = hwa_score_copy_text(tie); event.dynamic = hwa_score_copy_text("");
+        event.mark = hwa_score_copy_text("");
+        voice_size = strlen(source->part)+strlen(source->voice)+64U;
+        position_size = strlen(source->part)+strlen(source->measure)+strlen(source->staff)+96U;
+        event.voice = (char *)malloc(voice_size); event.score_position = (char *)malloc(position_size);
+        if (event.event_id == NULL || event.kind_text == NULL || event.midi_note_text == NULL ||
+            event.velocity_text == NULL || event.tie_text == NULL || event.dynamic == NULL ||
+            event.mark == NULL || event.voice == NULL || event.score_position == NULL) {
+            hwa_score_event_free(&event);
+            hwa_set_error(error, error_size, "out of memory for MusicXML alignment events"); goto done;
+        }
+        (void)snprintf(event.voice, voice_size, "%zu:%s%zu:%s", strlen(source->part), source->part,
+                       strlen(source->voice), source->voice);
+        (void)snprintf(event.score_position, position_size, "part=%s measure=%s staff=%s xml-byte=%zu",
+                       source->part, source->measure, source->staff, source->source_offset);
+        if (hwa_score_append_event(state, &event, error, error_size) != 0) {
+            hwa_score_event_free(&event); goto done;
+        }
+    }
+    if (hwa_score_finish_manifest(state->manifest, error, error_size) != 0) goto done;
+    state->manifest->duration_beats = score.duration_beats;
+    if (hwa_score_manifest_beat_to_seconds(state->manifest, score.duration_beats,
+                                          &state->manifest->duration_seconds) != 0) goto done;
+    result = 0;
+done:
+    hwa_musicxml_score_free(&score);
+    return result;
+}
+
 int hwa_score_manifest_load(const char *path,
                             uint64_t max_bytes,
                             size_t max_events,
@@ -922,6 +1015,8 @@ int hwa_score_manifest_load(const char *path,
     size_t data_size = 0U;
     HWAScoreParseState state;
     HWAScoreManifest temporary;
+    size_t first = 0U;
+    int parsed;
 
     if (error != NULL && error_size != 0U) {
         error[0] = '\0';
@@ -946,9 +1041,16 @@ int hwa_score_manifest_load(const char *path,
     memset(&state, 0, sizeof(state));
     state.manifest = &temporary;
     state.max_events = max_events;
-    if (hwa_score_csv_rows(data, data_size, hwa_score_parse_row, &state,
-                           error, error_size) != 0 ||
-        hwa_score_finish_manifest(&temporary, error, error_size) != 0) {
+    if (data_size >= 3U && memcmp(data, "\xef\xbb\xbf", 3U) == 0) first = 3U;
+    while (first < data_size && isspace(data[first])) first++;
+    if ((first < data_size && data[first] == '<') ||
+        (data_size >= 2U && data[0] == 'P' && data[1] == 'K')) {
+        parsed = hwa_score_from_musicxml(data, data_size, &state, error, error_size);
+    } else {
+        parsed = hwa_score_csv_rows(data, data_size, hwa_score_parse_row, &state, error, error_size);
+        if (parsed == 0) parsed = hwa_score_finish_manifest(&temporary, error, error_size);
+    }
+    if (parsed != 0) {
         free(data);
         hwa_score_manifest_free(&temporary);
         return -1;

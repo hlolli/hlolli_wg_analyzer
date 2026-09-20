@@ -42,6 +42,15 @@ int main(void)
     }
     hwa_analysis_free(&analysis);
     {
+        HWAMusicXMLOptions options;
+        HWAMusicXMLScore score;
+        hwa_musicxml_options_default(&options);
+        memset(&score, 0xa5, sizeof(score));
+        if (hwa_musicxml_read(NULL, 0U, &options, &score, error, sizeof(error)) == 0 ||
+            score.events != NULL || score.storage != NULL || error[0] == '\0') return 1;
+        hwa_musicxml_score_free(&score);
+    }
+    {
         HWASeparationEvaluation evaluation;
         HWASeparationEvalOptions options;
         hwa_separation_eval_options_default(&options);

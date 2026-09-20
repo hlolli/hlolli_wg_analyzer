@@ -3704,6 +3704,23 @@ int hwa_align_score_manifest_wav(
            sizeof(alignment->score_sha256));
     memcpy(alignment->target_sha256, audio_after,
            sizeof(alignment->target_sha256));
+    if (manifest.musicxml_input) {
+        size_t capacity = alignment->warning_count+2U;
+        HWAAlignmentWarning *warnings = (HWAAlignmentWarning *)realloc(
+            alignment->warnings, capacity*sizeof(*warnings));
+        if (warnings == NULL) {
+            hwa_set_error(error, error_size, "out of memory for MusicXML alignment warnings");
+            hwa_alignment_free(alignment); goto cleanup;
+        }
+        alignment->warnings = warnings;
+        if (hwa_align_add_warning(alignment, capacity, "musicxml_written_timeline",
+                "MusicXML alignment uses written timed notes and rests; grace notes, ornaments, dynamics and pedal are not expanded into performance timing or controls.") != 0 ||
+            (manifest.musicxml_default_tempo && hwa_align_add_warning(alignment, capacity,
+                "musicxml_default_tempo", "MusicXML has no tempo at beat zero; the score clock starts at 120 quarter notes per minute, not an inferred tempo.") != 0)) {
+            hwa_set_error(error, error_size, "out of memory for MusicXML alignment warnings");
+            hwa_alignment_free(alignment); goto cleanup;
+        }
+    }
     status = 0;
 
 cleanup:

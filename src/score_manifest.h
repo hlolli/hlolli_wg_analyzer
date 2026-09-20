@@ -64,6 +64,8 @@ typedef struct HWAScoreManifest {
     uint64_t tempo_lookup_steps;
     double duration_beats;
     double duration_seconds;
+    int musicxml_input;
+    int musicxml_default_tempo;
 } HWAScoreManifest;
 
 int hwa_score_manifest_load(const char *path,

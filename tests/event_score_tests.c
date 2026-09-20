@@ -127,6 +127,52 @@ int main(int argc, char **argv)
     CHECK(strstr(text, "start_tick=0 end_tick=1 lane=1") != NULL);
     CHECK(strstr(text, "a'128 ") != NULL);
     fixture(&bundle, &audio, events, values);
+    options.kind = HWA_EVENT_SCORE_MUSICXML;
+    CHECK(render(&bundle, 1U, &options, text) == 0);
+    CHECK(strstr(text, "<score-partwise version=\"4.0\">") != NULL);
+    CHECK(strstr(text, "<backup><duration>192</duration></backup>") != NULL);
+    CHECK(strstr(text, "<time><senza-misura/></time>") != NULL);
+    {
+        HWAMusicXMLScore imported;
+        size_t i, note_count = 0U;
+        int status = hwa_musicxml_read((const unsigned char *)text, strlen(text), NULL,
+                                      &imported, error, sizeof(error));
+        CHECK(status == 0);
+        if (status == 0) {
+            CHECK(imported.part_count == 4U && imported.duration_beats == 6.0 && !imported.used_default_tempo);
+            for (i = 0U; i < imported.event_count; i++) {
+                if (imported.events[i].kind == HWA_MUSICXML_NOTE) {
+                    note_count++;
+                    if (strcmp(imported.events[i].id, "E1") == 0) {
+                        CHECK(imported.events[i].midi_pitch == 69.0);
+                        CHECK(imported.events[i].start_beats == 0.0 && imported.events[i].duration_beats == 2.0);
+                    }
+                }
+            }
+            CHECK(note_count == 5U);
+            hwa_musicxml_score_free(&imported);
+        }
+    }
+    options.tempo_bpm = 0U;
+    CHECK(render(&bundle, 1U, &options, text) != 0);
+    options.tempo_bpm = 120U;
+    options.max_lanes_per_track = 1U;
+    CHECK(render(&bundle, 1U, &options, text) != 0);
+    options.max_lanes_per_track = 64U;
+    events[0].part = (char *)"a&b<c>\"d'\r\n";
+    CHECK(render(&bundle, 1U, &options, text) == 0);
+    CHECK(strstr(text, "a&amp;b&lt;c&gt;&quot;d&apos;&#13;\n") != NULL);
+    events[0].part = (char *)"bad\x01";
+    CHECK(render(&bundle, 1U, &options, text) != 0);
+    events[0].part = (char *)"bad\xef\xbf\xbe";
+    CHECK(render(&bundle, 1U, &options, text) != 0);
+    fixture(&bundle, &audio, events, values);
+    values[0].number = 8.175798915643707;
+    CHECK(render(&bundle, 1U, &options, text) != 0);
+    values[0].number = 16.351597831287414;
+    CHECK(render(&bundle, 1U, &options, text) == 0);
+    CHECK(strstr(text, "<step>C</step><alter>0</alter><octave>0</octave>") != NULL);
+    fixture(&bundle, &audio, events, values);
     hwa_event_score_options_default(&options);
     options.kind = HWA_EVENT_SCORE_MIDI;
     CHECK(render(&bundle, 1U, &options, text) == 0);

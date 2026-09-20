@@ -33,6 +33,7 @@
 #include "measure_report.h"
 #include "note_phase_report.h"
 #include "numeric_locale.h"
+#include "musicxml_report.h"
 #include "output.h"
 #include "physical_file.h"
 #include "physical_report.h"
@@ -88,6 +89,8 @@ typedef struct HWACli {
     int partial_option_set;
     HWAPartialTrackingOptions partial_options;
     HWAEventScoreOptions event_score_options;
+    HWAMusicXMLOptions musicxml_options;
+    int musicxml_option_set;
     uint64_t event_score_source_id;
     unsigned event_score_option_set;
     const char *positionals[5];
@@ -188,7 +191,7 @@ static void hwa_print_usage(FILE *stream)
         "  hlolli-wg-analyzer [--json] validate-event-bundle "
         "DIRECTORY.hwa-events\n"
         "  hlolli-wg-analyzer export-event-score DIRECTORY.hwa-events "
-        "--format csound|lilypond|midi [--source-id N] [--tempo-bpm N] --output FILE\n"
+        "--format csound|lilypond|midi|musicxml [--source-id N] [--tempo-bpm N] --output FILE\n"
         "  hlolli-wg-analyzer [ANALYSIS OPTIONS] analyze-events INPUT.wav "
         "--output NEW.hwa-events\n"
         "  hlolli-wg-analyzer infer-note-events INPUT.wav --model MODEL.onnx "
@@ -209,8 +212,21 @@ static void hwa_print_usage(FILE *stream)
         "  --kind frames|spectrogram   Select the CSV export.\n"
         "  --output PATH               New artifact path; - for stdout.\n"
         "  --replace                   Permit replacing a regular output file.\n"
-        "  --score PATH                Align an unfolded note manifest to audio.\n"
-        "  --format csound|lilypond|midi  Score format; --tempo-bpm is only for LilyPond.\n"
+        "  --score PATH                Align MusicXML (.xml/.musicxml/.mxl) or a CSV score to audio.\n"
+        "  import-score SCORE          Read MusicXML as structured JSON; --output defaults to stdout.\n");
+    (void)fprintf(stream,
+        "  --score-mode written|performance  Preserve written notes or apply baseline playback rules.\n"
+        "  --score-tempo-bpm N          Import tempo fallback (0 disables; default 120).\n"
+        "  --score-grace-fraction N     Baseline share borrowed from following note (default 0.125).\n"
+        "  --score-trill-rate N         Baseline notes per quarter beat (default 8).\n"
+        "  --score-staccato-ratio N     Baseline note gate (default 0.5).\n"
+        "  --score-default-velocity N   Baseline MIDI velocity (default 64).\n"
+        "  --score-max-bytes N          Import/expanded XML byte limit.\n"
+        "  --score-max-work-bytes N     Import work memory limit.\n"
+        "  --score-max-events N         Import/expanded event limit.\n"
+        "  --score-max-visits N         Repeat/jump traversal limit.\n");
+    (void)fprintf(stream,
+        "  --format csound|lilypond|midi|musicxml  Score format; LilyPond/MusicXML require --tempo-bpm.\n"
         "  --source-id N               Source recording ID; may be omitted for one source.\n"
         "  --tempo-bpm N               Explicit quarter-note tempo (10..1000); no tempo inference.\n"
         "  --alignment PATH            Segment a score-to-audio alignment.\n"
@@ -1475,11 +1491,44 @@ static int hwa_parse_option_with_value(HWACli *cli,
                            &cli->gap_report_options.max_json_tokens) != 0 ||
             cli->gap_report_options.max_json_tokens == 0U) return -1;
         cli->gap_report_option_set = 1;
+    } else if (strcmp(option, "--score-mode") == 0) {
+        if (strcmp(value, "written") == 0) cli->musicxml_options.performance = 0;
+        else if (strcmp(value, "performance") == 0) cli->musicxml_options.performance = 1;
+        else return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-tempo-bpm") == 0) {
+        if (hwa_parse_double(value, &cli->musicxml_options.default_tempo_bpm) != 0 || cli->musicxml_options.default_tempo_bpm < 0.0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-grace-fraction") == 0) {
+        if (hwa_parse_double(value, &cli->musicxml_options.grace_fraction) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-trill-rate") == 0) {
+        if (hwa_parse_double(value, &cli->musicxml_options.trill_notes_per_beat) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-staccato-ratio") == 0) {
+        if (hwa_parse_double(value, &cli->musicxml_options.staccato_ratio) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-default-velocity") == 0) {
+        if (hwa_parse_double(value, &cli->musicxml_options.default_velocity) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-max-bytes") == 0) {
+        if (hwa_parse_u64(value, &cli->musicxml_options.max_input_bytes) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-max-work-bytes") == 0) {
+        if (hwa_parse_u64(value, &cli->musicxml_options.max_work_bytes) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-max-events") == 0) {
+        if (hwa_parse_size(value, &cli->musicxml_options.max_events) != 0) return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-max-visits") == 0) {
+        if (hwa_parse_size(value, &cli->musicxml_options.max_measure_visits) != 0) return -1;
+        cli->musicxml_option_set = 1;
     } else if (strcmp(option, "--format") == 0) {
         if (cli->event_score_option_set & 1U) return -1;
         if (strcmp(value, "csound") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_CSOUND;
         else if (strcmp(value, "lilypond") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_LILYPOND;
         else if (strcmp(value, "midi") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_MIDI;
+        else if (strcmp(value, "musicxml") == 0) cli->event_score_options.kind = HWA_EVENT_SCORE_MUSICXML;
         else return -1;
         cli->event_score_option_set |= 1U;
     } else if (strcmp(option, "--source-id") == 0) {
@@ -1518,6 +1567,7 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
     hwa_measurement_options_default(&cli->measurement_options);
     hwa_partial_tracking_options_default(&cli->partial_options);
     hwa_event_score_options_default(&cli->event_score_options);
+    hwa_musicxml_options_default(&cli->musicxml_options);
     hwa_profile_comparison_options_default(&cli->comparison_options);
     hwa_physical_options_default(&cli->physical_options);
     hwa_production_options_default(&cli->production_options);
@@ -3309,13 +3359,14 @@ static int hwa_run_export_event_score(const HWACli *cli)
     size_t sources = 0U, i;
     char error[HWA_ERROR_SIZE] = {0};
     int result = 1;
+    int notation = cli->event_score_options.kind == HWA_EVENT_SCORE_LILYPOND ||
+                   cli->event_score_options.kind == HWA_EVENT_SCORE_MUSICXML;
     memset(&bundle, 0, sizeof(bundle));
     memset(&output, 0, sizeof(output));
     if (cli->positional_count != 2U || cli->output_path == NULL ||
         cli->output_path[0] == '\0' || strcmp(cli->positionals[1], "-") == 0 ||
         !(cli->event_score_option_set & 1U) || cli->json || cli->replace ||
-        (cli->event_score_options.kind == HWA_EVENT_SCORE_LILYPOND && !(cli->event_score_option_set & 4U)) ||
-        (cli->event_score_options.kind != HWA_EVENT_SCORE_LILYPOND && (cli->event_score_option_set & 4U)) ||
+        (notation != ((cli->event_score_option_set & 4U) != 0U)) ||
         cli->export_kind != 0 || cli->score_path != NULL || cli->alignment_path != NULL ||
         cli->labels_path != NULL || cli->amend_path != NULL || cli->items_path != NULL ||
         cli->room_ir_path != NULL || cli->renderer_path != NULL || cli->resume_path != NULL ||
@@ -4208,6 +4259,38 @@ static int hwa_run_inference_capabilities(const HWACli *cli)
     return hwa_finish_stream(stdout, "standard output") == 0 ? 0 : 1;
 }
 
+static int hwa_run_import_score(const HWACli *cli)
+{
+    HWAMusicXMLScore score;
+    HWAFileOutput output;
+    char error[HWA_ERROR_SIZE] = {0};
+    const char *protected_path;
+    int result = 1;
+    if (cli->positional_count != 2U || strcmp(cli->positionals[1], "-") == 0 ||
+        cli->export_kind || cli->score_path || cli->alignment_path || cli->labels_path || cli->amend_path || cli->items_path ||
+        cli->room_ir_path || cli->renderer_path || cli->resume_path || cli->allow_run || cli->physical_binding_count ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set || cli->analysis_resource_option_set ||
+        cli->analysis_spectral_resource_option_set || cli->frame_size_option_set || cli->hop_size_option_set ||
+        cli->silence_option_set || cli->decode_block_option_set || cli->max_bytes_option_set || cli->input_frame_limit_set ||
+        cli->alignment_option_set || cli->segmentation_option_set || cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set || cli->run_option_set || cli->experiment_option_set ||
+        cli->gap_report_option_set || cli->isolated_note_option_set || cli->isolated_note_expected_set ||
+        cli->isolated_note_metrics_set || cli->harmonic_decay_expected_set) return -1;
+    protected_path = cli->positionals[1];
+    if (hwa_musicxml_read_file(protected_path, &cli->musicxml_options, &score, error, sizeof(error)) != 0) goto done;
+    if (hwa_file_output_open(&output, cli->output_path ? cli->output_path : "-", &protected_path, 1U,
+            cli->replace, error, sizeof(error)) == 0) {
+        if (hwa_musicxml_report(hwa_file_output_stream(&output), &score, &cli->musicxml_options) != 0) {
+            (void)hwa_file_output_abort(&output);
+            (void)snprintf(error, sizeof(error), "cannot write MusicXML report");
+        } else if (hwa_file_output_finish(&output, "MusicXML report", error, sizeof(error)) == 0) result = 0;
+    }
+    hwa_musicxml_score_free(&score);
+done:
+    if (result) (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+    return result;
+}
+
 int main(int argc, char **argv)
 {
     HWACli cli;
@@ -4229,7 +4312,9 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "export-event-score") != 0 && cli.event_score_option_set != 0U) {
+    if (strcmp(cli.positionals[0], "import-score") != 0 && cli.musicxml_option_set) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "export-event-score") != 0 && cli.event_score_option_set != 0U) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "note-phases") != 0 &&
         (cli.note_span_options != 0U || cli.note_phase_envelope || cli.note_phase_frames ||
@@ -4260,6 +4345,8 @@ int main(int argc, char **argv)
                strcmp(cli.positionals[0], "report") != 0 &&
                cli.gap_report_option_set) {
         result = -1;
+    } else if (strcmp(cli.positionals[0], "import-score") == 0) {
+        result = hwa_run_import_score(&cli);
     } else if (strcmp(cli.positionals[0], "inspect") == 0) {
         result = hwa_run_inspect(&cli);
     } else if (strcmp(cli.positionals[0], "compare") == 0) {

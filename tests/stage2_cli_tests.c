@@ -827,6 +827,44 @@ static int case_score(void)
     return failures == 0;
 }
 
+static int case_musicxml(void)
+{
+    static const char xml[] = "<score-partwise><part-list><score-part id='P'>"
+        "<part-name>Voice</part-name></score-part></part-list><part id='P'><measure number='1'>"
+        "<attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>"
+        "<note><grace/><pitch><step>D</step><octave>4</octave></pitch></note>"
+        "<direction><direction-type><pedal type='start'/></direction-type></direction>"
+        "<note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration></note>"
+        "<note><pitch><step>E</step><octave>4</octave></pitch><duration>1</duration></note>"
+        "<note><pitch><step>G</step><octave>4</octave></pitch><duration>1</duration></note>"
+        "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration></note>"
+        "</measure></part></score-partwise>";
+    TestWorkspace workspace;
+    char output_path[PATH_MAX];
+    char *output;
+    size_t size;
+    int status;
+    if (!setup_fixture(&workspace)) return 0;
+    CHECK(write_text(workspace.score, xml), "cannot write MusicXML input");
+    CHECK(join_path(output_path, workspace.directory, "one.hwa-align"), "output path is too long");
+    status = run_score_align(&workspace, output_path, 0, 0, NULL);
+    expect_success(status, &workspace);
+    output = read_file(output_path, &size);
+    CHECK(output != NULL && strstr(output, "META,mode,score-audio,") != NULL &&
+          strstr(output, ",note,1:P1:1,60,,none,") != NULL &&
+          strstr(output, "part=P measure=1 staff=1 xml-byte=") != NULL &&
+          strstr(output, "musicxml_default_tempo") != NULL &&
+          strstr(output, "musicxml_written_timeline") != NULL,
+          "MusicXML alignment lost events, part/voice, source position or warnings");
+    free(output);
+    CHECK(write_text(workspace.score, "PKnot-a-score"), "cannot write rejected input");
+    CHECK(join_path(output_path, workspace.directory, "failed.hwa-align"), "output path is too long");
+    status = run_score_align(&workspace, output_path, 0, 0, NULL);
+    CHECK(status == 1, "compressed XML should fail before alignment");
+    workspace_close(&workspace);
+    return failures == 0;
+}
+
 static int case_json(void)
 {
     TestWorkspace workspace;
@@ -1342,6 +1380,7 @@ int main(int argc, char **argv)
         {"stage2-summary-line-endings", case_summary_line_endings},
         {"stage2-audio", case_audio},
         {"stage2-score", case_score},
+        {"stage2-musicxml", case_musicxml},
         {"stage2-json", case_json},
         {"stage2-amend", case_amend},
         {"stage2-block-invariance", case_block_invariance},

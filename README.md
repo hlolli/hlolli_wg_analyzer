@@ -139,6 +139,8 @@ build/hlolli-wg-analyzer export-event-score notes.hwa-events \
   --format csound --output notes.sco
 build/hlolli-wg-analyzer export-event-score notes.hwa-events \
   --format lilypond --tempo-bpm 120 --output notes.ly
+build/hlolli-wg-analyzer export-event-score notes.hwa-events \
+  --format musicxml --tempo-bpm 120 --output notes.musicxml
 ```
 
 `export-event-score` reads selected `pitch-hz` note values from a checked
@@ -162,8 +164,20 @@ before writing any bytes.
 
 Csound export keeps pitch in Hz and includes event IDs and sample bounds.
 LilyPond export rounds pitches to semitones and timing to 128th notes at the
-supplied tempo, using separate voices for overlaps. Keep the event bundle
-for exact values and information these output formats omit.
+supplied tempo, using separate voices for overlaps.
+
+MusicXML export writes an uncompressed MusicXML 4.0 partwise file using the
+same timing grid. Each `(part, voice)` pair gets a part with one unmetered
+measure; overlapping notes use separate voices. It does not infer bar lines,
+key, instruments, or ornaments. Part labels use XML escaping; characters
+that XML 1.0 forbids cause an error before any output. Pitch must round into
+C0–G9 (MIDI 12–127). Note IDs use `E` followed by the event ID; comments keep
+source sample bounds, pitch in Hz, and label bytes. This is a note-exchange
+file, not a finished engraved score. The format uses
+[MusicXML's unmetered time marker](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/senza-misura/).
+
+Keep the event bundle for exact values and information these output formats
+omit.
 
 ### Align, segment, and measure
 
@@ -183,6 +197,8 @@ build/hlolli-wg-analyzer align reference.wav candidate.wav \
   --output reference-candidate.hwa-align
 build/hlolli-wg-analyzer align --score score.csv candidate.wav \
   --output candidate-score.hwa-align
+build/hlolli-wg-analyzer align --score score.musicxml candidate.wav \
+  --output candidate-xml.hwa-align
 build/hlolli-wg-analyzer segment \
   --alignment candidate-score.hwa-align candidate.wav \
   --labels labels.csv --output candidate.hwa-items
@@ -201,6 +217,98 @@ a path merely because an earlier artifact stored it.
 
 The sample note manifest at `examples/note-manifest.csv` shows the accepted
 score columns and event kinds.
+
+### MusicXML score input
+
+`align --score` accepts UTF-8 MusicXML `score-partwise` documents, compressed
+`.mxl` files, and CSV manifests. It detects content, not filename extensions.
+No conversion tool, XML/ZIP runtime dependency, or network access is needed.
+The `.mxl` reader follows `META-INF/container.xml`, accepts stored and DEFLATE
+members, checks CRCs and byte limits, and never extracts files to disk.
+
+Use `import-score` to prepare structured score data without supplying audio:
+
+```sh
+build/hlolli-wg-analyzer import-score score.mxl --output score.json
+build/hlolli-wg-analyzer import-score score.mxl --score-mode performance \
+  --score-tempo-bpm 72 --output baseline.json
+```
+
+Output uses schema `hwa-musicxml-score`, version 1, with quarter-note time
+units and `note`, `rest`, `grace`, `tempo`, `direction`, `control`, and `mark`
+events. Positions and durations use full double precision. Each occurrence
+keeps the source ID, written beat position/duration, measure ordinal, visit
+number, part/voice/staff and XML byte span. Repeated IDs refer to the same
+written source; the event index identifies a playback occurrence. Inapplicable
+numeric output fields are `null`, not guessed values.
+
+The reader handles parts, voices, staves, chords, rests, pickups, meter,
+divisions changes, backup/forward, sound ties, chromatic transposition, and
+tempo changes from `sound` or numeric metronome marks. It unfolds nested
+repeats, numeric first/second endings, and measure-boundary D.C., D.S., coda
+and fine jumps. Tempo returns to the written starting value when jumping.
+Beat positions use
+quarter-note units without the exporter's 128th-note grid. Pitch comes from
+`pitch/alter`, not the printed accidental or key signature. Octave-shift
+directions change engraving, not the pitch values already stored in MusicXML.
+See the [MusicXML octave-shift definition](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/octave-shift/).
+
+If the score has no tempo at beat zero, alignment starts its score clock at
+120 BPM and emits `musicxml_default_tempo`; this is a convention, not a tempo
+estimate. `import-score --score-tempo-bpm N` sets the fallback; zero disables
+it and leaves the score in beats without inventing a tempo. The memory reader
+offers the same setting. `musicxml_written_timeline` reports that alignment uses timed notes
+and rests, without turning grace notes, ornaments, dynamics, or pedal into
+performed timing or controls. Parts keep distinct voice identities, and saved
+matches identify their source measure, staff, and XML byte position. Existing
+CSV behavior stays unchanged.
+
+For browser/WASM callers, `hwa_musicxml_read()` accepts plain or compressed
+bytes in memory and returns owned `HWAMusicXMLScore` data, including the
+uncompressed `xml_data`. Event byte spans index this owned XML, so callers can
+free the input buffer. Free the result with `hwa_musicxml_score_free()`.
+`hwa_musicxml_read_file()` provides the native regular-file adapter. The
+path-free portable build includes ZIP decoding and the same score reader.
+
+Pedal controls use continuous MIDI values 0..127 and controller numbers 64
+(damper), 66 (sostenuto), and 67 (soft). Explicit `sound` values win over the
+displayed pedal mark. A pedal change emits ordered release/depress events.
+Pedal controls do not extend note key-down durations; the player applies them.
+Explicit note/sound dynamics preserve the MusicXML velocity convention.
+
+Written mode is the default. `--score-mode performance` selects a baseline,
+not a trained performer:
+
+- Grace groups borrow explicit previous/following percentages when present,
+  otherwise 1/8 of the following note (or the preceding note at a phrase end).
+- Staccato uses half the note duration, staccatissimo a quarter, and accents
+  raise the chosen velocity. Dynamics from pppp through ffff use a fixed table.
+- Trills, mordents, turns and their inverted/delayed variants become note
+  sequences. Trills default to eight notes per quarter beat; explicit `beats`
+  and `trill-step` values take precedence. Baseline spacing is even.
+
+Use `--score-grace-fraction`, `--score-trill-rate`, `--score-staccato-ratio`,
+and `--score-default-velocity` to change these rules. Output records the policy.
+Event `interpretation` is a bit mask: 1 means a baseline choice, 2 means explicit
+XML playback data. Written positions remain separate from these choices.
+`unrendered_marks` reports marks/attributes without a playback rule, including
+grace `make-time`, ornament acceleration/uneven spacing/terminal turns,
+hairpins, and free text. Their XML remains available; no performer-specific
+interpretation is claimed.
+
+This is a written-score reader, not a complete MusicXML player or an XML schema
+validator. It rejects timewise scores, namespaced elements, cue/unpitched notes,
+multi-measure rests, staff-specific or doubled transposition, and note playback
+overrides. Navigation requires measure-boundary signs, matching parts and
+closed numbered endings (1..32); sound `time-only`, numeric fine durations,
+and `after-jump` repeats still require an unfolded input. ZIP64, encryption,
+multi-disk archives and other compression methods are not accepted.
+The memory reader retains
+microtones, but the current alignment track requires integral MIDI pitches.
+XML depth, node, event, measure-visit, input-byte, and work-byte limits bound parsing and expansion.
+The `--score-max-*` import flags expose byte, work, event and visit limits. Internal
+DTD/entity declarations are rejected; external DOCTYPE identifiers are accepted
+without fetching them.
 
 ### Check isolated and harmonic decay
 

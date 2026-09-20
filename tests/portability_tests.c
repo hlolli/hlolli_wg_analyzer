@@ -342,6 +342,45 @@ static void test_separation_evaluation(void)
     CHECK(fabs(result.estimate.estimate_level_dbfs.db + 6000.0) < 1e-9);
 }
 
+#include "musicxml_mxl_fixture.h"
+
+static void test_musicxml(void)
+{
+    static const unsigned char xml[] = "<score-partwise><part-list><score-part id='P'>"
+        "<part-name>Voice</part-name></score-part></part-list><part id='P'><measure number='1'>"
+        "<attributes><divisions>3</divisions></attributes>"
+        "<note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration></note>"
+        "</measure></part></score-partwise>";
+    HWAMusicXMLScore score;
+    char error[HWA_ERROR_SIZE];
+    int status = hwa_musicxml_read(xml, sizeof(xml)-1U, NULL, &score, error, sizeof(error));
+    CHECK(status == 0);
+    if (status == 0) {
+        CHECK(score.event_count == 2U && score.used_default_tempo);
+        CHECK(score.events[1].midi_pitch == 69.0 && score.events[1].duration_beats == 1.0/3.0);
+        hwa_musicxml_score_free(&score);
+    }
+    {
+        HWAMusicXMLOptions options;
+        size_t i, notes = 0U, controls = 0U;
+        hwa_musicxml_options_default(&options); options.performance = 1;
+        status = hwa_musicxml_read(hwa_test_mxl, sizeof(hwa_test_mxl), &options, &score, error, sizeof(error));
+        CHECK(status == 0);
+        if (status == 0) {
+            CHECK(score.unfolded && score.measure_visits == 2U && score.duration_beats == 2.0);
+            CHECK(score.xml_data != NULL && score.xml_size > sizeof(hwa_test_mxl)/2U);
+            for (i = 0U; i < score.event_count; i++) {
+                if (score.events[i].kind == HWA_MUSICXML_NOTE) notes++;
+                if (score.events[i].kind == HWA_MUSICXML_CONTROL) {
+                    controls++; CHECK(score.events[i].controller == 64U && score.events[i].value == 63.5);
+                }
+            }
+            CHECK(notes == 8U && controls == 2U);
+            hwa_musicxml_score_free(&score);
+        }
+    }
+}
+
 #if defined(HWA_WASM_REACTOR)
 __attribute__((export_name("hwa_portability_test")))
 int hwa_portability_test(void)
@@ -354,6 +393,7 @@ int main(void)
     test_limits_and_failure();
     test_virtual_long_source();
     test_separation_evaluation();
+    test_musicxml();
 #if !defined(HWA_WASM_REACTOR)
     test_native_path_parity();
 #endif

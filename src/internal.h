@@ -9,6 +9,9 @@
 
 #define HWA_MAX_CHANNELS 1024U
 
+int hwa_musicxml_perform(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
+                        uint64_t work_bytes, char *error, size_t error_size);
+
 typedef struct HWAWavReader {
     FILE *file;
     HWAByteSource source;

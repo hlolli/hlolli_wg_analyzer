@@ -87,6 +87,9 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/measure_compare.c
   src/measure_engine.c
   src/measure_file.c
+  src/musicxml.c
+  src/musicxml_zip.c
+  src/musicxml_performance.c
   src/numeric_locale.c
   src/note_phases.c
   src/partial_tracks.c
@@ -157,6 +160,7 @@ add_executable(hlolli_wg_analyzer
   src/item_report.c
   src/isolated_note_report.c
   src/main.c
+  src/musicxml_report.c
   src/note_phase_report.c
   src/measure_report.c
   src/physical_report.c

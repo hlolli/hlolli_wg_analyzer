@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 import wave
+import xml.etree.ElementTree as ET
 
 
 def midi_notes(path, details=None):
@@ -108,6 +109,50 @@ def midi_notes(path, details=None):
     if track_count != int.from_bytes(data[10:12], "big"):
         raise AssertionError("wrong MIDI track count")
     return result, tempos
+
+
+def musicxml_notes(text):
+    root = ET.fromstring(text)
+    if root.tag != "score-partwise" or root.get("version") != "4.0":
+        raise AssertionError("unexpected MusicXML root")
+    names = {part.get("id"): part.findtext("part-name")
+             for part in root.findall("part-list/score-part")}
+    result = {}
+    ends = []
+    semitones = dict(C=0, D=2, E=4, F=5, G=7, A=9, B=11)
+    for part in root.findall("part"):
+        measures = part.findall("measure")
+        if len(measures) != 1 or measures[0].find("attributes/time/senza-misura") is None:
+            raise AssertionError("expected a single unmetered measure")
+        cursor = 0
+        lane_ends = {}
+        for item in measures[0]:
+            if item.tag == "backup":
+                ticks = int(item.findtext("duration"))
+                if ticks <= 0 or cursor != ticks:
+                    raise AssertionError("backup does not return to measure start")
+                cursor -= ticks
+            elif item.tag == "note":
+                ticks = int(item.findtext("duration"))
+                voice = int(item.findtext("voice"))
+                if ticks <= 0 or cursor != lane_ends.get(voice, 0):
+                    raise AssertionError("nonpositive duration or broken voice sequence")
+                pitch = item.find("pitch")
+                if pitch is not None:
+                    key = (12*(int(pitch.findtext("octave"))+1) +
+                           semitones[pitch.findtext("step")] + int(pitch.findtext("alter", "0")))
+                    event_id = item.get("id")
+                    if event_id in result:
+                        raise AssertionError("duplicate event ID")
+                    result[event_id] = (names[part.get("id")], voice, key, cursor, cursor+ticks)
+                cursor += ticks
+                lane_ends[voice] = cursor
+        if not lane_ends or set(lane_ends.values()) != {cursor}:
+            raise AssertionError("voices have different end times")
+        ends.append(cursor)
+    if len(names) != len(ends) or len(set(ends)) != 1:
+        raise AssertionError("parts have different end times")
+    return root, result, ends[0]
 
 
 class EventScoreTests(unittest.TestCase):
@@ -278,9 +323,88 @@ class EventScoreTests(unittest.TestCase):
         self.command("--format", "csound", "--replace", "--output", output, ok=False)
         self.assertEqual(output.read_text(), text)
 
+    def test_musicxml_tracks_timing_and_exact_source_comments(self):
+        before = {path.name: path.read_bytes() for path in self.bundle.iterdir()}
+        text = self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", "-").stdout
+        root, notes, end = musicxml_notes(text)
+        self.assertEqual(notes, {
+            "E1": ("violin-1 / 1", 1, 69, 0, 64),
+            "E2": ("violin-2 / 1", 1, 76, 32, 96),
+            "E3": ("viola / 1", 1, 60, 0, 128),
+            "E4": ("cello / 1", 1, 48, 0, 128),
+            "E5": ("violin-1 / 1", 2, 72, 32, 96),
+        })
+        self.assertEqual(end, 192)
+        self.assertEqual([node.text for node in root.findall(".//divisions")], ["32"]*4)
+        self.assertEqual([node.get("tempo") for node in root.findall(".//sound")], ["120"]*4)
+        for tag in ("key", "beats", "beat-type", "midi-instrument", "articulations", "ornaments"):
+            self.assertEqual(root.findall(".//"+tag), [])
+        self.assertIn("event_id=1 start_sample=0 end_sample=8000 pitch_hz=440", text)
+        self.assertIn("omitted_unpitched_notes=1", text)
+        output = self.root / "score.musicxml"
+        self.command("--format", "musicxml", "--tempo-bpm", "120", "--source-id", "1", "--output", output)
+        self.assertEqual(output.read_text(), text)
+        self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", output, ok=False)
+        self.assertEqual(output.read_text(), text)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.bundle.iterdir()})
+        self.edit_bundle(lambda manifest, events: events.reverse())
+        self.assertEqual(self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", "-").stdout, text)
+
+    def test_musicxml_labels_rounding_and_same_pitch_overlap(self):
+        label = "声<&\"'>--\r\n\t🎻"
+        def change(manifest, events):
+            events[0].update(start_sample=1, end_sample=2, part=label)
+            events[4].update(start_sample=1, end_sample=3, part=label)
+            events[4]["values"][0]["value"] = 440.0
+        self.edit_bundle(change)
+        text = self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", "-").stdout
+        _, notes, _ = musicxml_notes(text)
+        self.assertEqual(notes["E1"], (label+" / 1", 1, 69, 0, 1))
+        self.assertEqual(notes["E5"], (label+" / 1", 2, 69, 0, 1))
+        self.assertIn("&lt;&amp;&quot;&apos;&gt;--&#13;", text)
+
+    def test_musicxml_xml_characters_and_pitch_limits(self):
+        output = self.root / "bad.musicxml"
+        for label in ("bad\x01", "bad\ufffe", "bad\uffff"):
+            self.edit_bundle(lambda manifest, events: events[0].update(part=label))
+            result = self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", output, ok=False)
+            self.assertIn("forbidden XML character", result.stderr)
+            self.assertFalse(output.exists())
+            self.assertEqual(self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", "-", ok=False).stdout, "")
+        def change(manifest, events):
+            events[0].update(part="low")
+            events[0]["values"][0]["value"] = 8.175798915643707
+        self.edit_bundle(change)
+        result = self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", output, ok=False)
+        self.assertIn("pitch or time range", result.stderr)
+        self.assertFalse(output.exists())
+        self.edit_bundle(lambda manifest, events: events[0]["values"][0].update(value=16.351597831287414))
+        text = self.command("--format", "musicxml", "--tempo-bpm", "120", "--output", "-").stdout
+        self.assertEqual(musicxml_notes(text)[1]["E1"][2], 12)
+
+    def test_musicxml_rate_tempo_and_large_event_ids(self):
+        for rate, tempo in ((44100, 10), (48000, 137), (768000, 1000)):
+            with self.subTest(rate=rate, tempo=tempo):
+                def change(manifest, events):
+                    manifest["audio"][0]["format"].update(
+                        sample_rate_hz=rate, frames=3*rate, data_bytes=6*rate, duration_seconds=3)
+                    del events[1:]
+                    events[0].update(id=9007199254740991, start_sample=rate//3, end_sample=rate+1)
+                self.edit_bundle(change)
+                text = self.command("--format", "musicxml", "--tempo-bpm", str(tempo), "--output", "-").stdout
+                _, notes, end = musicxml_notes(text)
+                divisor = rate*60
+                start = ((rate//3)*tempo*32 + divisor//2)//divisor
+                stop = ((rate+1)*tempo*32 + divisor//2)//divisor
+                self.assertEqual(notes["E9007199254740991"][3:], (start, stop))
+                self.assertEqual(end, (3*rate*tempo*32 + divisor//2)//divisor)
+
     def test_options_validation_and_cleanup(self):
         output = self.root / "score"
         for flags in [[], ["--format", "unknown"], ["--format", "lilypond"],
+                      ["--format", "musicxml"],
+                      ["--format", "musicxml", "--tempo-bpm", "0"],
+                      ["--format", "musicxml", "--tempo-bpm", "1001"],
                       ["--format", "csound", "--tempo-bpm", "120"],
                       ["--format", "midi", "--tempo-bpm", "120"],
                       ["--format", "lilypond", "--tempo-bpm", "9"],

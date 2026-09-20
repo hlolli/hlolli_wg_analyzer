@@ -381,6 +381,102 @@ static int lilypond(FILE *stream, const ScoreNote *notes, size_t count, size_t t
     return fputs(">> \\layout { } \\midi { } }\n", stream) == EOF ? -1 : 0;
 }
 
+/* Bundle validation has already checked UTF-8. NULL stream checks XML text. */
+static int xml_text(FILE *stream, const char *text)
+{
+    const unsigned char *p = (const unsigned char *)label(text);
+    for (; *p != 0U; ++p) {
+        const char *escaped = NULL;
+        if ((*p < 32U && *p != 9U && *p != 10U && *p != 13U) ||
+            (*p == 0xefU && p[1] == 0xbfU && (p[2] == 0xbeU || p[2] == 0xbfU))) return -1;
+        if (stream == NULL) continue;
+        switch (*p) {
+        case '&': escaped = "&amp;"; break;
+        case '<': escaped = "&lt;"; break;
+        case '>': escaped = "&gt;"; break;
+        case '"': escaped = "&quot;"; break;
+        case '\'': escaped = "&apos;"; break;
+        case '\r': escaped = "&#13;"; break;
+        default: break;
+        }
+        if (escaped != NULL) {
+            if (fputs(escaped, stream) == EOF) return -1;
+        } else if (fputc(*p, stream) == EOF) return -1;
+    }
+    return 0;
+}
+
+static int xml_rest(FILE *stream, uint64_t ticks, size_t lane)
+{
+    return ticks != 0U && fprintf(stream,
+        "<note><rest/><duration>%" PRIu64 "</duration><voice>%zu</voice></note>\n",
+        ticks, lane+1U) < 0 ? -1 : 0;
+}
+
+static int musicxml(FILE *stream, const ScoreNote *notes, size_t count, size_t tracks,
+                     size_t omitted, const HWAEventAudio *source,
+                     const HWAEventScoreOptions *options, const HWANumericLocale *locale)
+{
+    static const char steps[] = "CCDDEFFGGAAB";
+    static const int alters[] = {0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0};
+    uint64_t end_tick;
+    size_t first, i;
+    if (tick_at(source->format.frames, source->format.sample_rate_hz,
+                options->tempo_bpm, &end_tick) != 0) return -1;
+    for (i = 0U; i < count; ++i)
+        if (notes[i].end_tick > end_tick) end_tick = notes[i].end_tick;
+    if (fprintf(stream, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!-- HWA_MUSICXML_SCORE 1 source_id=%" PRIu64 " sample_rate_hz=%u notes=%zu tracks=%zu omitted_unpitched_notes=%zu\n"
+        "pitch=nearest-semitone-A440 rhythm=nearest-128th ties=up minimum_note=1-tick tempo_source=caller\n"
+        "No key, meter, instrument, articulation, or ornament was inferred. -->\n"
+        "<score-partwise version=\"4.0\">\n<part-list>\n",
+        source->id, source->format.sample_rate_hz, count, tracks, omitted) < 0) return -1;
+    for (i = 0U; i < count; ++i) {
+        if (i != 0U && notes[i].track == notes[i-1U].track) continue;
+        if (track_comment(stream, "<!--", notes[i].track, notes[i].event) != 0 ||
+            fprintf(stream, "-->\n<score-part id=\"P%zu\"><part-name>", notes[i].track) < 0 ||
+            xml_text(stream, notes[i].event->part) != 0 || fputs(" / ", stream) == EOF ||
+            xml_text(stream, notes[i].event->voice) != 0 ||
+            fputs("</part-name></score-part>\n", stream) == EOF) return -1;
+    }
+    if (fputs("</part-list>\n", stream) == EOF) return -1;
+    first = 0U;
+    while (first < count) {
+        size_t last = first, lanes = 0U, lane;
+        while (last < count && notes[last].track == notes[first].track) {
+            if (notes[last].lane >= lanes) lanes = notes[last].lane+1U;
+            last++;
+        }
+        if (fprintf(stream, "<part id=\"P%zu\"><measure number=\"1\" implicit=\"yes\">\n"
+            "<attributes><divisions>32</divisions><time><senza-misura/></time></attributes>\n"
+            "<sound tempo=\"%u\"/>\n", notes[first].track, options->tempo_bpm) < 0) return -1;
+        for (lane = 0U; lane < lanes; ++lane) {
+            uint64_t cursor = 0U;
+            if (lane != 0U && fprintf(stream, "<backup><duration>%" PRIu64 "</duration></backup>\n",
+                                      end_tick) < 0) return -1;
+            for (i = first; i < last; ++i) {
+                const HWAPerformanceEvent *event = notes[i].event;
+                int pitch = notes[i].midi;
+                if (notes[i].lane != lane) continue;
+                if (xml_rest(stream, notes[i].start_tick-cursor, lane) != 0 ||
+                    fprintf(stream, "<!-- event_id=%" PRIu64 " start_sample=%" PRIu64 " end_sample=%" PRIu64 " pitch_hz=",
+                        event->id, event->start_sample, event->end_sample) < 0 ||
+                    number(stream, locale, notes[i].pitch) != 0 ||
+                    fprintf(stream, " -->\n<note id=\"E%" PRIu64 "\"><pitch><step>%c</step><alter>%d</alter><octave>%d</octave></pitch>"
+                        "<duration>%" PRIu64 "</duration><voice>%zu</voice></note>\n", event->id,
+                        steps[pitch%12], alters[pitch%12], pitch/12-1,
+                        notes[i].end_tick-notes[i].start_tick, lane+1U) < 0) return -1;
+                cursor = notes[i].end_tick;
+            }
+            if (xml_rest(stream, end_tick-cursor, lane) != 0) return -1;
+        }
+        if (fputs("<barline location=\"right\"><bar-style>none</bar-style></barline>\n"
+                  "</measure></part>\n", stream) == EOF) return -1;
+        first = last;
+    }
+    return fputs("</score-partwise>\n", stream) == EOF ? -1 : 0;
+}
+
 int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
                           uint64_t source_recording_id, const HWAEventScoreOptions *options,
                           char *error, size_t error_size)
@@ -395,13 +491,15 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     uint64_t bytes;
     HWANumericLocale locale;
     int result = -1;
+    int notation;
     if (error != NULL && error_size != 0U) error[0] = '\0';
     if (options != NULL) copied = *options;
     else hwa_event_score_options_default(&copied);
+    notation = copied.kind == HWA_EVENT_SCORE_LILYPOND || copied.kind == HWA_EVENT_SCORE_MUSICXML;
     if (stream == NULL || bundle == NULL ||
-        (copied.kind != HWA_EVENT_SCORE_CSOUND && copied.kind != HWA_EVENT_SCORE_LILYPOND && copied.kind != HWA_EVENT_SCORE_MIDI) ||
-        (copied.kind == HWA_EVENT_SCORE_LILYPOND && (copied.tempo_bpm < 10U || copied.tempo_bpm > 1000U)) ||
-        (copied.kind != HWA_EVENT_SCORE_LILYPOND && copied.tempo_bpm != 0U) ||
+        (copied.kind != HWA_EVENT_SCORE_CSOUND && !notation && copied.kind != HWA_EVENT_SCORE_MIDI) ||
+        (notation && (copied.tempo_bpm < 10U || copied.tempo_bpm > 1000U)) ||
+        (!notation && copied.tempo_bpm != 0U) ||
         copied.max_notes == 0U || copied.max_tracks == 0U || copied.max_tracks > 65535U ||
         copied.max_lanes_per_track == 0U || copied.max_lanes_per_track > 256U || copied.max_work_bytes == 0U) {
         hwa_set_error(error, error_size, "invalid event score arguments or options");
@@ -462,6 +560,11 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
             goto cleanup;
         }
         if (present == 0) { omitted++; continue; }
+        if (copied.kind == HWA_EVENT_SCORE_MUSICXML &&
+            (xml_text(NULL, event->part) != 0 || xml_text(NULL, event->voice) != 0)) {
+            hwa_set_error(error, error_size, "MusicXML label contains a forbidden XML character");
+            goto cleanup;
+        }
         notes[count].event = event;
         notes[count].pitch = pitch;
         if (copied.kind != HWA_EVENT_SCORE_CSOUND) {
@@ -474,7 +577,7 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
                 bad_clock = tick_at(event->start_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].start_tick) != 0 ||
                     tick_at(event->end_sample, source->format.sample_rate_hz, copied.tempo_bpm, &notes[count].end_tick) != 0;
             }
-            if (!isfinite(midi) || midi < 0.0 || midi > 127.0 || bad_clock) {
+            if (!isfinite(midi) || midi < (copied.kind == HWA_EVENT_SCORE_MUSICXML ? 12.0 : 0.0) || midi > 127.0 || bad_clock) {
                 hwa_set_error(error, error_size, "note is outside the score export pitch or time range");
                 goto cleanup;
             }
@@ -502,10 +605,10 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
             goto cleanup;
         }
         notes[i].track = tracks;
-        if (copied.kind != HWA_EVENT_SCORE_LILYPOND) continue;
+        if (!notation) continue;
         while (lane < copied.max_lanes_per_track && lane_ends[lane] > notes[i].start_tick) lane++;
         if (lane == copied.max_lanes_per_track) {
-            hwa_set_error(error, error_size, "LilyPond overlap lane limit exceeded");
+            hwa_set_error(error, error_size, "notation overlap lane limit exceeded");
             goto cleanup;
         }
         notes[i].lane = lane;
@@ -522,6 +625,8 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     }
     result = copied.kind == HWA_EVENT_SCORE_CSOUND ?
         csound(stream, notes, count, tracks, omitted, source, &locale) :
+        copied.kind == HWA_EVENT_SCORE_MUSICXML ?
+        musicxml(stream, notes, count, tracks, omitted, source, &copied, &locale) :
         lilypond(stream, notes, count, tracks, omitted, source, &copied, &locale);
     if (hwa_c_numeric_locale_end(&locale) != 0 || ferror(stream)) result = -1;
     if (result != 0) hwa_set_error(error, error_size, "cannot write event score");

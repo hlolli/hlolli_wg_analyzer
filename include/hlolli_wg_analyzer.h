@@ -2702,12 +2702,13 @@ typedef struct HWAEventFileBinding {
 typedef enum HWAEventScoreKind {
     HWA_EVENT_SCORE_CSOUND = 1,
     HWA_EVENT_SCORE_LILYPOND = 2,
-    HWA_EVENT_SCORE_MIDI = 3
+    HWA_EVENT_SCORE_MIDI = 3,
+    HWA_EVENT_SCORE_MUSICXML = 4
 } HWAEventScoreKind;
 
 typedef struct HWAEventScoreOptions {
     HWAEventScoreKind kind;
-    uint32_t tempo_bpm; /* Required for LilyPond; zero for Csound and MIDI. */
+    uint32_t tempo_bpm; /* Required for LilyPond/MusicXML; zero for Csound/MIDI. */
     size_t max_notes;
     size_t max_tracks;
     size_t max_lanes_per_track;
@@ -2738,6 +2739,11 @@ void hwa_event_score_options_default(HWAEventScoreOptions *options);
  * before writing. Velocity is fixed at 64; no programs or pitch bends are
  * inferred. Labels use track-name metadata; exact values stay in the bundle.
  * MIDI requires a binary stream, including stdout on Windows.
+ * MusicXML 4.0 uses LilyPond's pitch/timing grid and overlap lanes, with one
+ * unmetered measure per (part, voice) part and a common end time. Each note
+ * has id E<event_id>; comments retain exact bounds, pitch, and label bytes.
+ * Pitches must round to MIDI 12..127 (C0..G9). Labels must contain only XML
+ * 1.0 characters; invalid labels fail before writing. No bars are inferred.
  * Work limits cover export arrays, not the caller-owned bundle or stream.
  */
 int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
@@ -2912,6 +2918,105 @@ void hwa_body_envelope_result_free(HWABodyEnvelopeResult *result);
 
 void hwa_alignment_options_default(HWAAlignmentOptions *options);
 
+typedef enum HWAMusicXMLEventKind {
+    HWA_MUSICXML_NOTE = 1,
+    HWA_MUSICXML_REST = 2,
+    HWA_MUSICXML_GRACE = 3,
+    HWA_MUSICXML_TEMPO = 4,
+    HWA_MUSICXML_DIRECTION = 5,
+    HWA_MUSICXML_CONTROL = 6,
+    HWA_MUSICXML_MARK = 7
+} HWAMusicXMLEventKind;
+
+typedef struct HWAMusicXMLEvent {
+    HWAMusicXMLEventKind kind;
+    const char *id; /* Original XML id, or empty. */
+    const char *part;
+    const char *part_name;
+    const char *voice;
+    const char *staff;
+    const char *measure;
+    double start_beats; /* Quarter-note units, without a quantization grid. */
+    double duration_beats; /* Zero for grace, tempo and direction events. */
+    double midi_pitch; /* Sounding pitch; fractional semitones are retained. */
+    double tempo_bpm; /* Quarter notes/minute, only for TEMPO. */
+    unsigned tie; /* Bit 1 starts a sound tie; bit 2 stops it. */
+    size_t source_offset; /* Byte span in score.xml_data, including for .mxl. */
+    size_t source_size; /* Includes notation/markings not interpreted here. */
+    double written_start_beats; /* Position before repeat/jump expansion. */
+    size_t measure_index; /* Zero-based written measure ordinal. */
+    unsigned occurrence; /* One-based visit to this written measure. */
+    double written_duration_beats;
+    const char *mark; /* Mark name/text, or empty; original XML remains available. */
+    unsigned controller; /* CONTROL: MIDI CC 64 (damper), 66 (sostenuto), 67 (soft). */
+    double value; /* CONTROL: continuous 0..127; MARK: optional numeric value. */
+    double velocity; /* Continuous MIDI 0..127, valid only when velocity_valid. */
+    int velocity_valid;
+    unsigned interpretation; /* 1: baseline playback policy, 2: XML playback data. */
+    double grace_previous, grace_following, grace_make; /* -1 when absent. */
+    unsigned sequence; /* Orders multiple generated events at one source position. */
+    unsigned articulations; /* 1 staccato, 2 staccatissimo, 4 tenuto, 8 accent, 16 strong-accent. */
+    int chord; /* Shares onset with the preceding written note. */
+} HWAMusicXMLEvent;
+
+typedef struct HWAMusicXMLOptions {
+    size_t max_events;
+    size_t max_nodes;
+    uint64_t max_input_bytes;
+    uint64_t max_work_bytes;
+    double default_tempo_bpm; /* Used only if no tempo at beat 0; 0 disables. */
+    size_t max_measure_visits; /* Bounds repeat/jump traversal. */
+    int performance; /* 0: written notes, 1: explicit baseline playback policy. */
+    double grace_fraction; /* Baseline share of following note, default 0.125. */
+    double trill_notes_per_beat; /* Baseline rate when no XML beats, default 8. */
+    double staccato_ratio; /* Baseline gate fraction, default 0.5. */
+    double default_velocity; /* Baseline MIDI velocity, default 64. */
+} HWAMusicXMLOptions;
+
+typedef struct HWAMusicXMLScore {
+    HWAMusicXMLEvent *events; /* Beat order; tempo first, then document order. */
+    size_t event_count;
+    size_t part_count;
+    size_t grace_count;
+    double duration_beats;
+    int used_default_tempo;
+    void *storage; /* Owned string storage; do not alter. */
+    unsigned char *xml_data; /* Owned, uncompressed XML; source spans index this. */
+    size_t xml_size;
+    size_t measure_visits;
+    int unfolded;
+    size_t interpreted_events;
+    size_t unrendered_marks; /* Marks without a baseline playback rule. */
+} HWAMusicXMLScore;
+
+void hwa_musicxml_options_default(HWAMusicXMLOptions *options);
+/*
+ * Read plain UTF-8 score-partwise MusicXML or a stored/DEFLATE .mxl archive
+ * from memory, without file or network access. Result owns strings, events
+ * and uncompressed xml_data. Source spans index xml_data. Free before reuse.
+ * Initializes result even on failure. Options may alias result-owned memory.
+ * Defaults: 100000 events, 1000000 XML nodes, 32 MiB input, 128 MiB work,
+ * 100000 measure visits, and 120 BPM fallback reported by used_default_tempo.
+ * Reads notes/rests/chords, backup/forward, divisions, meter/pickups, ties,
+ * chromatic transposition, sound/metronome tempo and timed directions.
+ * Expands nested repeats, numbered endings and measure-boundary D.C./D.S./
+ * coda/fine jumps. Events keep written positions and per-measure occurrences.
+ * CONTROL events retain continuous pedal values; MARK events retain notation.
+ * Written mode leaves grace notes at zero duration. Performance mode applies
+ * baseline grace borrowing, articulation gates, dynamics and common ornaments;
+ * interpretation bits distinguish policy from explicit XML playback data.
+ * This is not a performer model. Unrendered marks stay in XML/mark events and
+ * are counted. See README for supported rules and rejected navigation forms.
+ * External DOCTYPE identifiers are never opened; internal DTDs are rejected.
+ */
+int hwa_musicxml_read(const unsigned char *data, size_t size,
+                      const HWAMusicXMLOptions *options,
+                      HWAMusicXMLScore *score, char *error, size_t error_size);
+void hwa_musicxml_score_free(HWAMusicXMLScore *score);
+/* Native regular-file adapter; the memory reader is also available in WASM. */
+int hwa_musicxml_read_file(const char *path, const HWAMusicXMLOptions *options,
+                          HWAMusicXMLScore *score, char *error, size_t error_size);
+
 /*
  * Each alignment call initializes every field in `alignment`, including on
  * failure when `alignment` is non-null. Call hwa_alignment_free() before
@@ -2929,6 +3034,10 @@ int hwa_align_audio_wav(const char *reference_path,
                         char *error,
                         size_t error_size);
 
+/* score_path accepts CSV, plain MusicXML or .mxl, detected by content.
+ * MusicXML alignment retains timed notes/rests, requires integral MIDI pitch,
+ * and reports written-timeline reduction and any 120 BPM fallback warnings.
+ */
 int hwa_align_score_manifest_wav(const char *score_path,
                                  const char *audio_path,
                                  const HWAAlignmentOptions *options,

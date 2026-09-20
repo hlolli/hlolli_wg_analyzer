@@ -4,6 +4,7 @@ set(HWA_FUZZERS
   hwa_fuzz_alignment
   hwa_fuzz_probe
   hwa_fuzz_readers
+  hwa_fuzz_musicxml
 )
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -104,3 +105,4 @@ hwa_fuzzer(hwa_fuzz_manifests fuzz_manifests.c manifests)
 hwa_fuzzer(hwa_fuzz_alignment fuzz_alignment.c alignment)
 hwa_fuzzer(hwa_fuzz_probe fuzz_probe.c probe)
 hwa_fuzzer(hwa_fuzz_readers fuzz_readers.c readers)
+hwa_fuzzer(hwa_fuzz_musicxml fuzz_musicxml.c musicxml)

@@ -21,6 +21,9 @@ add_library(hlolli_wg_analyzer_portable STATIC
   ../src/analysis.c
   ../src/dsp.c
   ../src/features.c
+  ../src/musicxml.c
+  ../src/musicxml_zip.c
+  ../src/musicxml_performance.c
   ../src/separation_eval.c
   ../src/wav_reader.c)
 target_include_directories(hlolli_wg_analyzer_portable

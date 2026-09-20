@@ -1,4 +1,9 @@
 add_executable(hlolli_wg_analyzer_cli_tests cli_tests.c)
+add_executable(hlolli_wg_analyzer_musicxml_tests musicxml_tests.c)
+target_link_libraries(hlolli_wg_analyzer_musicxml_tests PRIVATE hlolli_wg_analyzer_core)
+hwa_set_warnings(hlolli_wg_analyzer_musicxml_tests)
+add_test(NAME unit.musicxml COMMAND hlolli_wg_analyzer_musicxml_tests)
+set_tests_properties(unit.musicxml PROPERTIES TIMEOUT 30)
 add_executable(hlolli_wg_analyzer_separation_eval_tests separation_eval_tests.c)
 target_link_libraries(hlolli_wg_analyzer_separation_eval_tests PRIVATE hlolli_wg_analyzer_core)
 target_compile_features(hlolli_wg_analyzer_separation_eval_tests PRIVATE c_std_11)
@@ -1350,6 +1355,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/stage2_cli_tests.c")
     stage2-summary-line-endings
     stage2-audio
     stage2-score
+    stage2-musicxml
     stage2-json
     stage2-amend
     stage2-block-invariance
@@ -1499,4 +1505,7 @@ if(HWA_PYTHON3_EXECUTABLE)
     --fixture=$<TARGET_FILE:hlolli_wg_analyzer_event_score_tests>
     ${HWA_EVENT_SCORE_RENDER_ARGS})
   set_tests_properties(cli.event-score PROPERTIES TIMEOUT 120)
+  add_test(NAME cli.musicxml-import COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_musicxml_cli.py $<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.musicxml-import PROPERTIES TIMEOUT 120)
 endif()
