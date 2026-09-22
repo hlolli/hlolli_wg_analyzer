@@ -248,6 +248,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Check browser MusicXML reader
+        run: node tests/musicxml_browser_tests.mjs build-wasm/hwa_musicxml_browser.wasm
       - name: Install browser test runtime
         shell: bash
         run: |

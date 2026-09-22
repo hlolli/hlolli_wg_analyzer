@@ -235,12 +235,23 @@ build/hlolli-wg-analyzer import-score score.mxl --score-mode performance \
 ```
 
 Output uses schema `hwa-musicxml-score`, version 1, with quarter-note time
-units and `note`, `rest`, `grace`, `tempo`, `direction`, `control`, and `mark`
+units and `note`, `rest`, `grace`, `cue`, `tempo`, `direction`, `control`, and `mark`
 events. Positions and durations use full double precision. Each occurrence
 keeps the source ID, written beat position/duration, measure ordinal, visit
 number, part/voice/staff and XML byte span. Repeated IDs refer to the same
 written source; the event index identifies a playback occurrence. Inapplicable
 numeric output fields are `null`, not guessed values.
+
+Mark events also retain `mark_tag`, `mark_text`, `mark_type`, and `mark_number`.
+These fields preserve words, dynamics, and numbered hairpin starts, continuations,
+and stops without their layout attributes. `mark` keeps its existing name/text
+form. Empty staff or voice fields on directions mean the score omitted them;
+note events still default to staff and voice 1. Hairpin numbers distinguish
+overlapping spans, as defined by [MusicXML](https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/wedge/).
+
+`cue` events retain silent cue notation and its place in the score. A cue rest
+has no pitch; a cue grace note has zero duration. Neither becomes a played note
+in performance mode. Small notes marked only with `<type size="cue">` still play.
 
 The reader handles parts, voices, staves, chords, rests, pickups, meter,
 divisions changes, backup/forward, sound ties, chromatic transposition, and
@@ -270,6 +281,16 @@ free the input buffer. Free the result with `hwa_musicxml_score_free()`.
 `hwa_musicxml_read_file()` provides the native regular-file adapter. The
 path-free portable build includes ZIP decoding and the same score reader.
 
+The portable target `hwa_musicxml_browser` builds a WASI reactor that writes
+the same written-mode JSON as `import-score`. `portable/musicxml.mjs` exposes
+`createMusicXMLReader(wasmBytes)`: await it, then pass XML or MXL as a
+`Uint8Array` to the returned function. It returns JSON text and throws on invalid
+input. Run it in a worker so large scores do not block the page. The host grants
+no filesystem or network access; each call frees its C input, score, and report.
+It uses the reader's default limits, including 32 MiB input and 100,000 events.
+Test it with `node tests/musicxml_browser_tests.mjs MODULE.wasm [ANALYZER]`;
+the optional native executable checks report parity too.
+
 Pedal controls use continuous MIDI values 0..127 and controller numbers 64
 (damper), 66 (sostenuto), and 67 (soft). Explicit `sound` values win over the
 displayed pedal mark. A pedal change emits ordered release/depress events.
@@ -290,8 +311,10 @@ not a trained performer:
 Use `--score-grace-fraction`, `--score-trill-rate`, `--score-staccato-ratio`,
 and `--score-default-velocity` to change these rules. Output records the policy.
 Event `interpretation` is a bit mask: 1 means a baseline choice, 2 means explicit
-XML playback data, 4 means a repaired tuplet duration, and 8 means a tempo
-conflict resolved by policy. Written positions remain separate from playback choices.
+XML playback data, 4 means a repaired tuplet duration, 8 means a tempo
+conflict resolved by policy, 16 means a preserved overfull measure, and 32 marks
+cue notation that must not affect played notes. Written positions remain separate
+from playback choices.
 `unrendered_marks` reports marks/attributes without a playback rule, including
 grace `make-time`, ornament acceleration/uneven spacing/terminal turns,
 hairpins, and free text. Their XML remains available; no performer-specific
@@ -302,19 +325,33 @@ Import stays strict by default. For exports with rounded tuplet durations,
 dots, and `time-modification` ratio, but only when the source uses integer
 divisions and rounds that duration to the nearest integer tick. It leaves
 fractional durations and larger differences unchanged. It also handles full-voice
-backups stated as either the rounded sum or the repaired span; partial backups
-after a changed span are rejected. JSON reports `repaired_tuplets` as a count of
+backups stated as either the rounded sum or the repaired span. Partial backups
+may rewind unchanged notes after the last repair, but cannot cross a repaired
+span. JSON reports `repaired_tuplets` as a count of
 written note/rest durations, before repeat expansion. The original XML stays intact.
+When a `forward` exactly fills the ticks lost to rounded tuplets, the repaired
+notes already cover that time. The reader absorbs that padding and reports
+`repaired_tuplet_forwards`; it leaves other forward durations unchanged.
+A `backup` that exactly cancels extra rounded ticks also leaves the repaired
+clock in place. JSON counts these and other reconciled backups in
+`repaired_tuplet_backups`, before repeat expansion.
 
 `import-score --score-tempo-conflicts last` selects the last tempo in document
 order when several different tempos occupy one beat; `error` is the default.
 JSON records this policy and counts the resolved `tempo_conflicts` after repeat
 expansion. Rejected tempo instructions remain accessible in the source XML.
-Both options also work through `HWAMusicXMLOptions` in the memory/WASM reader;
+`import-score --score-overfull-measures preserve` retains a measure's declared
+span when it exceeds the meter. The default, `error`, rejects it. This option
+does not shorten notes or guess a new meter. JSON counts affected part-measures
+in `overfull_measures` before repeat expansion and flags their events with
+interpretation bit 16. This can handle written cadenzas, but it can also retain
+bad source durations: check the score/audio alignment before using its labels.
+
+These options also work through `HWAMusicXMLOptions` in the memory/WASM reader;
 `align` still uses strict score parsing.
 
 This is a written-score reader, not a complete MusicXML player or an XML schema
-validator. It rejects timewise scores, namespaced elements, cue/unpitched notes,
+validator. It rejects timewise scores, namespaced elements, unpitched notes,
 multi-measure rests, staff-specific or doubled transposition, and note playback
 overrides. Navigation requires measure-boundary signs, matching parts and
 closed numbered endings (1..32); sound `time-only`, numeric fine durations,

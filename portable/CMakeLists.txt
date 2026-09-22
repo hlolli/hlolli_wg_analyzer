@@ -69,6 +69,30 @@ endif()
 
 include(CTest)
 
+add_executable(hwa_musicxml_browser
+  musicxml_browser.c
+  ../src/musicxml_report.c
+  ../src/numeric_locale.c
+  ../src/output.c)
+target_include_directories(hwa_musicxml_browser PRIVATE ../src)
+target_link_libraries(hwa_musicxml_browser PRIVATE hlolli_wg_analyzer_portable m)
+target_compile_options(hwa_musicxml_browser PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(hwa_musicxml_browser PRIVATE
+  -mexec-model=reactor
+  "LINKER:--export-memory"
+  "LINKER:-z,stack-size=1048576"
+  "LINKER:--export=hwa_browser_score_input"
+  "LINKER:--export=hwa_browser_score_read"
+  "LINKER:--export=hwa_browser_score_output"
+  "LINKER:--export=hwa_browser_score_output_size"
+  "LINKER:--export=hwa_browser_score_error"
+  "LINKER:--export=hwa_browser_score_clear")
+set_target_properties(hwa_musicxml_browser PROPERTIES SUFFIX ".wasm")
+if(HLOLLI_WG_ANALYZER_STRICT)
+  target_compile_options(hwa_musicxml_browser PRIVATE
+    -Werror -Wconversion -Wformat=2 -Wshadow -Wstrict-prototypes)
+endif()
+
 add_executable(hwa_basic_pitch_browser_tests
   ../src/basic_pitch.c
   ../tests/basic_pitch_wasm_bridge.c)

@@ -219,6 +219,7 @@ static void hwa_print_usage(FILE *stream)
         "  --score-tempo-bpm N          Import tempo fallback (0 disables; default 120).\n"
         "  --score-repair-tuplets       Import: repair nearest-tick rounding from tuplet notation.\n"
         "  --score-tempo-conflicts error|last  Import: reject conflicting tempos (default) or use document order.\n"
+        "  --score-overfull-measures error|preserve  Import: reject (default) or retain spans beyond the meter.\n"
         "  --score-grace-fraction N     Baseline share borrowed from following note (default 0.125).\n"
         "  --score-trill-rate N         Baseline notes per quarter beat (default 8).\n"
         "  --score-staccato-ratio N     Baseline note gate (default 0.5).\n"
@@ -1501,6 +1502,11 @@ static int hwa_parse_option_with_value(HWACli *cli,
     } else if (strcmp(option, "--score-tempo-conflicts") == 0) {
         if (strcmp(value, "error") == 0) cli->musicxml_options.last_tempo_wins = 0;
         else if (strcmp(value, "last") == 0) cli->musicxml_options.last_tempo_wins = 1;
+        else return -1;
+        cli->musicxml_option_set = 1;
+    } else if (strcmp(option, "--score-overfull-measures") == 0) {
+        if (strcmp(value, "error") == 0) cli->musicxml_options.preserve_overfull_measures = 0;
+        else if (strcmp(value, "preserve") == 0) cli->musicxml_options.preserve_overfull_measures = 1;
         else return -1;
         cli->musicxml_option_set = 1;
     } else if (strcmp(option, "--score-tempo-bpm") == 0) {
@@ -4272,33 +4278,50 @@ static int hwa_run_inference_capabilities(const HWACli *cli)
 
 static int hwa_run_import_score(const HWACli *cli)
 {
-    HWAMusicXMLScore score;
+    HWAMusicXMLScore score = {0};
     HWAFileOutput output;
     char error[HWA_ERROR_SIZE] = {0};
     const char *protected_path;
     int result = 1;
     if (cli->positional_count != 2U || strcmp(cli->positionals[1], "-") == 0 ||
-        cli->export_kind || cli->score_path || cli->alignment_path || cli->labels_path || cli->amend_path || cli->items_path ||
-        cli->room_ir_path || cli->renderer_path || cli->resume_path || cli->allow_run || cli->physical_binding_count ||
-        cli->analysis_clock_option_set || cli->analysis_only_option_set || cli->analysis_resource_option_set ||
-        cli->analysis_spectral_resource_option_set || cli->frame_size_option_set || cli->hop_size_option_set ||
-        cli->silence_option_set || cli->decode_block_option_set || cli->max_bytes_option_set || cli->input_frame_limit_set ||
-        cli->alignment_option_set || cli->segmentation_option_set || cli->measurement_option_set || cli->comparison_option_set ||
-        cli->physical_option_set || cli->production_option_set || cli->run_option_set || cli->experiment_option_set ||
-        cli->gap_report_option_set || cli->isolated_note_option_set || cli->isolated_note_expected_set ||
-        cli->isolated_note_metrics_set || cli->harmonic_decay_expected_set) return -1;
-    protected_path = cli->positionals[1];
-    if (hwa_musicxml_read_file(protected_path, &cli->musicxml_options, &score, error, sizeof(error)) != 0) goto done;
-    if (hwa_file_output_open(&output, cli->output_path ? cli->output_path : "-", &protected_path, 1U,
-            cli->replace, error, sizeof(error)) == 0) {
-        if (hwa_musicxml_report(hwa_file_output_stream(&output), &score, &cli->musicxml_options) != 0) {
-            (void)hwa_file_output_abort(&output);
-            (void)snprintf(error, sizeof(error), "cannot write MusicXML report");
-        } else if (hwa_file_output_finish(&output, "MusicXML report", error, sizeof(error)) == 0) result = 0;
+        cli->export_kind != 0 || cli->score_path != NULL || cli->alignment_path != NULL ||
+        cli->labels_path != NULL || cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->renderer_path != NULL || cli->resume_path != NULL ||
+        cli->allow_run || cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_resource_option_set || cli->analysis_spectral_resource_option_set ||
+        cli->frame_size_option_set || cli->hop_size_option_set || cli->silence_option_set ||
+        cli->decode_block_option_set || cli->max_bytes_option_set || cli->input_frame_limit_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set ||
+        cli->run_option_set || cli->experiment_option_set || cli->gap_report_option_set ||
+        cli->isolated_note_option_set || cli->isolated_note_expected_set ||
+        cli->isolated_note_metrics_set || cli->harmonic_decay_expected_set) {
+        return -1;
     }
-    hwa_musicxml_score_free(&score);
+    protected_path = cli->positionals[1];
+    if (hwa_musicxml_read_file(protected_path, &cli->musicxml_options, &score,
+                               error, sizeof(error)) != 0) {
+        goto done;
+    }
+    if (hwa_file_output_open(&output, cli->output_path ? cli->output_path : "-", &protected_path, 1U,
+                             cli->replace, error, sizeof(error)) != 0) {
+        goto done;
+    }
+    if (hwa_musicxml_report(hwa_file_output_stream(&output), &score, &cli->musicxml_options) != 0) {
+        (void)hwa_file_output_abort(&output);
+        (void)snprintf(error, sizeof(error), "cannot write MusicXML report");
+        goto done;
+    }
+    if (hwa_file_output_finish(&output, "MusicXML report", error, sizeof(error)) == 0) {
+        result = 0;
+    }
 done:
-    if (result) (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+    hwa_musicxml_score_free(&score);
+    if (result != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+    }
     return result;
 }
 

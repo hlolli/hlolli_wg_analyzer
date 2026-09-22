@@ -57,6 +57,32 @@ class MusicXML(unittest.TestCase):
     def notes(parsed):
         return [e for e in parsed['events'] if e['kind'] == 'note']
 
+    def test_expression_metadata_survives_repeat_expansion(self):
+        body = (FORWARD + '<direction><direction-type><words>Andante &amp; dolce</words>'
+                '<dynamics><p/></dynamics><wedge type="crescendo" number="2"/>'
+                '</direction-type></direction>' + note(duration=1) +
+                '<direction><direction-type><wedge type="continue" number="2"/>'
+                '</direction-type></direction>' + note(duration=1) +
+                '<direction><direction-type><wedge type="stop" number="2"/>'
+                '<dynamics><other-dynamics>subito pp</other-dynamics></dynamics>'
+                '</direction-type><voice>2</voice><staff>2</staff></direction>' +
+                note(duration=1, extra='<notations><dynamics><ff/></dynamics></notations>') + BACKWARD)
+        parsed = self.run_score(score(measure(body)))
+        marks = [e for e in parsed['events'] if e['kind'] == 'mark']
+        words = [e for e in marks if e['mark_tag'] == 'words']
+        self.assertEqual([e['mark_text'] for e in words], ['Andante & dolce'] * 2)
+        self.assertEqual([e['occurrence'] for e in words], [1, 2])
+        self.assertTrue(all(e['staff'] == '' and e['voice'] == '' for e in words))
+        wedges = [e for e in marks if e['mark_tag'] == 'wedge']
+        self.assertEqual([e['mark_type'] for e in wedges], ['crescendo', 'continue', 'stop'] * 2)
+        self.assertTrue(all(e['mark_number'] == '2' for e in wedges))
+        self.assertEqual([e['written_start_beats'] for e in wedges], [0, 1, 2] * 2)
+        other = [e for e in marks if e['mark_tag'] == 'other-dynamics']
+        self.assertTrue(all(e['mark_text'] == 'subito pp' and e['staff'] == '2' and e['voice'] == '2'
+                            for e in other))
+        self.assertEqual(len([e for e in marks if e['mark_tag'] == 'ff']), 2)
+        self.assertTrue(all(e['velocity'] is None for e in self.notes(parsed)))
+
     def archive(self, xml, method=zipfile.ZIP_DEFLATED, descriptor=False):
         class Unseekable(io.BytesIO):
             def seek(self, *args):
@@ -68,6 +94,48 @@ class MusicXML(unittest.TestCase):
             z.writestr('scores/main.xml', xml)
         return target.getvalue()
 
+    def test_note_dynamics_keep_written_marks_separate_from_playback(self):
+        body = note(extra='<notations><dynamics><ff/></dynamics></notations>')
+        xml = score(measure(body.replace('<note>', '<note dynamics="50">') + note('D')))
+        parsed = self.run_score(xml, '--score-mode', 'performance')
+        mark = next(e for e in parsed['events'] if e['kind'] == 'mark' and e['mark'] == 'ff')
+        self.assertFalse(mark['interpretation'] & 2)
+        self.assertEqual([e['velocity'] for e in self.notes(parsed)], [45, 104])
+
+    def test_note_attached_dynamics_apply_to_the_note_but_cues_do_not_play(self):
+        for cue in (False, True):
+            body = note(before='<cue/>' if cue else '',
+                        extra='<notations><dynamics><ff/></dynamics></notations>')
+            parsed = self.run_score(score(measure(body + note('D'))),
+                                    '--score-mode', 'performance')
+            self.assertEqual([e['velocity'] for e in self.notes(parsed)],
+                             [64] if cue else [104, 104])
+            mark = next(e for e in parsed['events'] if e['kind'] == 'mark' and e['mark'] == 'ff')
+            self.assertEqual(bool(mark['interpretation'] & 32), cue)
+
+    def test_direction_and_sound_offsets_keep_separate_positions(self):
+        for sound_attribute, explicit, expected in [('', '', 2), (' sound="no"', '', 2),
+                (' sound="yes"', '', 1), ('', '<offset>1</offset>', 3),
+                (' sound="yes"', '<offset>1</offset>', 3)]:
+            with self.subTest(sound_attribute=sound_attribute, explicit=explicit):
+                direction = ('<direction><direction-type><words>Andante</words>'
+                    '<dynamics><p/></dynamics></direction-type>'
+                    f'<offset{sound_attribute}>-1</offset>'
+                    f'<sound tempo="90" dynamics="50" damper-pedal="yes">{explicit}</sound>'
+                    '</direction>')
+                parsed = self.run_score(score(measure(note(duration=2) + direction + note('D', 2))),
+                                        '--score-tempo-bpm', '0')
+                written = [e for e in parsed['events'] if e['kind'] == 'direction'
+                           or e.get('mark_tag') in ('words', 'p')]
+                playback = [e for e in parsed['events'] if e['kind'] in ('tempo', 'control')
+                            or e.get('mark') == 'velocity']
+                self.assertEqual(len(written), 3)
+                self.assertEqual(len(playback), 3)
+                self.assertTrue(all(e['start_beats'] == e['written_start_beats'] == 1
+                                    for e in written))
+                self.assertTrue(all(e['start_beats'] == e['written_start_beats'] == expected
+                                    for e in playback))
+
     def test_zip_methods_and_descriptors(self):
         xml = score(measure(note() + note('E')))
         expected = self.run_score(xml)
@@ -78,6 +146,93 @@ class MusicXML(unittest.TestCase):
         # Enough text to exercise a dynamic Huffman block and long back-references.
         xml = score(*(measure(note('G') * 20, i) for i in range(30)))
         self.assertEqual(len(self.notes(self.run_score(self.archive(xml)))), 600)
+
+    def test_cues_keep_notation_without_becoming_played_notes(self):
+        cue = note(before='<cue/>', extra='<notations><articulations><staccato/></articulations>'
+                   '<ornaments><trill-mark/></ornaments></notations>')
+        xml = score(measure(cue.replace('<note>', '<note dynamics="90">') + note('D')))
+        for mode in ('written', 'performance'):
+            with self.subTest(mode=mode):
+                parsed = self.run_score(xml, '--score-mode', mode, '--score-tempo-bpm', '0')
+                cues = [e for e in parsed['events'] if e['kind'] == 'cue']
+                self.assertEqual(len(cues), 1)
+                self.assertEqual(cues[0]['midi_pitch'], 60)
+                self.assertEqual(cues[0]['start_beats'], 0)
+                self.assertEqual(cues[0]['duration_beats'], 1)
+                self.assertIsNone(cues[0]['velocity'])
+                self.assertEqual([(e['midi_pitch'], e['start_beats'])
+                                 for e in self.notes(parsed)], [(62, 1)])
+                self.assertEqual(parsed['duration_beats'], 2)
+
+    def test_cue_chords_rests_grace_and_small_played_notes(self):
+        grace = ('<note><grace steal-time-following="50"/><cue/>'
+                 '<pitch><step>B</step><octave>4</octave></pitch></note>')
+        body = (FORWARD + grace + note(before='<cue/>')
+                + note('E', before='<chord/>')
+                + note('G', before='<cue/><chord/>')
+                + '<note><cue/><rest/><duration>1</duration></note>'
+                + note('D', extra='<type size="cue">quarter</type>') + BACKWARD)
+        for mode in ('written', 'performance'):
+            with self.subTest(mode=mode):
+                parsed = self.run_score(score(measure(body)), '--score-mode', mode,
+                                        '--score-tempo-bpm', '0')
+                self.assertEqual([(e['midi_pitch'], e['start_beats'], e['duration_beats'])
+                                 for e in self.notes(parsed)],
+                                 [(64, 0, 1), (62, 2, 1), (64, 3, 1), (62, 5, 1)])
+                cues = [e for e in parsed['events'] if e['kind'] == 'cue']
+                self.assertEqual(len(cues), 8)
+                self.assertEqual(sum(e['midi_pitch'] is None for e in cues), 2)
+                self.assertEqual(sum(e['duration_beats'] == 0 for e in cues), 2)
+                self.assertTrue(all(e['velocity'] is None for e in cues))
+                self.assertEqual(parsed['duration_beats'], 6)
+
+    def test_cues_still_validate_durations_and_sound_ties(self):
+        for body in (note(before='<cue/><cue/>'), note(duration=0, before='<cue/>'),
+                     note(before='<cue/>', extra='<tie type="start"/>')):
+            self.run_score(score(measure(body)), ok=False)
+
+    def test_tuplet_rounding_padding_does_not_extend_measure(self):
+        ratio = ('<type>32nd</type><time-modification><actual-notes>9</actual-notes>'
+                 '<normal-notes>8</normal-notes></time-modification>')
+        attrs = ('<attributes><divisions>480</divisions>'
+                 '<time><beats>3</beats><beat-type>4</beat-type></time></attributes>')
+        body = (note(duration=480) + note(duration=53, extra=ratio) * 9
+                + '<forward><duration>3</duration></forward>' + note('D', duration=480))
+        xml = score('<measure number="1">' + attrs + body + '</measure>')
+        strict = self.run_score(xml)
+        self.assertEqual(strict['repaired_tuplets'], 0)
+        parsed = self.run_score(xml, '--score-repair-tuplets')
+        self.assertEqual(parsed['duration_beats'], 3)
+        self.assertEqual(parsed['repaired_tuplets'], 9)
+        self.assertEqual(parsed['repaired_tuplet_forwards'], 1)
+        self.assertAlmostEqual(self.notes(parsed)[-1]['start_beats'], 2)
+        # A different forward duration is not evidence of rounding padding.
+        for ticks in (2, 4, 483):
+            self.run_score(xml.replace(b'<duration>3</duration>',
+                                       f'<duration>{ticks}</duration>'.encode()),
+                           '--score-repair-tuplets', ok=False)
+
+    def test_overfull_measure_policy_preserves_declared_time(self):
+        attrs = '<attributes><time><beats>1</beats><beat-type>4</beat-type></time></attributes>'
+        xml = score(measure(attrs + FORWARD + note(duration=2) + BACKWARD),
+                    measure(note('D'), 2))
+        result = self.run_score(xml, ok=False)
+        self.assertIn('measure exceeds its meter', result.stderr)
+        self.assertIn('part P, measure 1', result.stderr)
+        self.assertIn('2 > 1 quarter notes', result.stderr)
+        parsed = self.run_score(xml, '--score-overfull-measures', 'preserve')
+        self.assertEqual(parsed['policy']['overfull_measures'], 'preserve')
+        self.assertEqual(parsed['overfull_measures'], 1)
+        self.assertEqual(parsed['duration_beats'], 5)
+        notes = self.notes(parsed)
+        self.assertEqual([e['start_beats'] for e in notes], [0, 2, 4])
+        self.assertEqual([bool(e['interpretation'] & 16) for e in notes], [True, True, False])
+        self.run_score(xml, '--score-overfull-measures', 'error', ok=False)
+        self.run_score(xml, '--score-overfull-measures', 'guess', ok=False)
+        # This policy does not accept a backup before beat zero.
+        self.run_score(score(measure('<backup><duration>1</duration></backup>' + note())),
+                       '--score-overfull-measures', 'preserve', ok=False)
+
 
     def test_rounded_tuplet_repair(self):
         tuplet = ('<voice>1</voice><type>16th</type><time-modification>'
@@ -121,6 +276,36 @@ class MusicXML(unittest.TestCase):
         parsed = self.run_score(xml, '--score-repair-tuplets')
         self.assertEqual(parsed['repaired_tuplets'], 0)
         self.assertAlmostEqual(self.notes(parsed)[0]['duration_beats'], 68.6/480)
+
+    def test_tuplet_repair_absorbs_backward_rounding_padding(self):
+        ratio = ('<type>16th</type><time-modification><actual-notes>7</actual-notes>'
+                 '<normal-notes>4</normal-notes></time-modification>')
+        xml = score('<measure number="1"><attributes><divisions>480</divisions></attributes>'
+                    + note(duration=69, extra=ratio)*7
+                    + '<backup><duration>3</duration></backup>' + note('D', duration=480)
+                    + '</measure>')
+        for mode in ('written', 'performance'):
+            parsed = self.run_score(xml, '--score-repair-tuplets', '--score-mode', mode)
+            self.assertEqual(parsed['repaired_tuplet_backups'], 1)
+            self.assertEqual(parsed['repaired_tuplet_forwards'], 0)
+            self.assertAlmostEqual(self.notes(parsed)[-1]['start_beats'], 1)
+            self.assertAlmostEqual(parsed['duration_beats'], 2)
+        # Nearby values are not enough evidence of rounding padding.
+        self.run_score(xml.replace(b'<duration>3</duration>', b'<duration>4</duration>'),
+                       '--score-repair-tuplets', ok=False)
+
+    def test_partial_backup_after_tuplets_can_rewind_unchanged_notes(self):
+        ratio = ('<voice>1</voice><type>16th</type><time-modification><actual-notes>7</actual-notes>'
+                 '<normal-notes>4</normal-notes></time-modification>')
+        xml = score('<measure number="1"><attributes><divisions>484</divisions></attributes>'
+                    + note(duration=69, extra=ratio)*7 + note('D', duration=484)
+                    + note('E', duration=484) + '<backup><duration>484</duration></backup>'
+                    + note('F', duration=484, extra='<voice>2</voice>') + '</measure>')
+        parsed = self.run_score(xml, '--score-repair-tuplets')
+        self.assertEqual(parsed['repaired_tuplet_backups'], 1)
+        self.assertAlmostEqual(parsed['duration_beats'], 3)
+        lower = next(e for e in self.notes(parsed) if e['voice'] == '2')
+        self.assertAlmostEqual(lower['start_beats'], 2)
 
     def test_dotted_tuplet_chords_and_rests(self):
         ratio = ('<type>16th</type><dot/><time-modification><actual-notes>7</actual-notes>'
@@ -242,6 +427,112 @@ class MusicXML(unittest.TestCase):
         self.assertEqual([e['written_duration_beats'] for e in notes[3:]], [1]*4)
         self.assertGreater(performed['interpreted_events'], 0)
         self.assertEqual(self.notes(written)[0]['velocity'], None)
+
+    def test_voice_dynamics_precedence_and_part_reset(self):
+        body = ('<direction><voice>1</voice><sound dynamics="40"/></direction>'
+                + note('C', extra='<voice>1</voice>')
+                + '<backup><duration>1</duration></backup>'
+                + note('E', extra='<voice>2</voice>')
+                + '<sound dynamics="100"/>'
+                + note('D', extra='<voice>1</voice>')
+                + '<backup><duration>1</duration></backup>'
+                + note('F', extra='<voice>2</voice>')
+                + note('G', extra='<voice>1</voice>').replace('<note>', '<note dynamics="10">'))
+        xml = ('<score-partwise><part-list>'
+               '<score-part id="A"><part-name>A</part-name></score-part>'
+               '<score-part id="B"><part-name>B</part-name></score-part>'
+               '</part-list><part id="A">' + measure(body) + '</part>'
+               '<part id="B">' + measure(note(duration=3)) + '</part></score-partwise>').encode()
+        for mode, default in [('written', None), ('performance', 64)]:
+            with self.subTest(mode=mode):
+                parsed = self.run_score(xml, '--score-mode', mode)
+                velocities = {(e['part'], e['midi_pitch']): e['velocity'] for e in self.notes(parsed)}
+                self.assertEqual(velocities, {('A', 60): 36, ('A', 64): default,
+                                             ('A', 62): 90, ('A', 65): 90,
+                                             ('A', 67): 9, ('B', 60): default})
+
+    def test_staff_dynamics_do_not_change_the_other_staff(self):
+        for mode in ('written', 'performance'):
+            marks = ('<sound dynamics="50"/>'
+                '<direction><staff>2</staff><sound dynamics="100"/></direction>')
+            body = (marks + note('C', extra='<voice>1</voice><staff>1</staff>')
+                + '<backup><duration>1</duration></backup>'
+                + note('E', extra='<voice>1</voice><staff>2</staff>')
+                + '<sound dynamics="60"/>'
+                + note('D', extra='<voice>1</voice><staff>1</staff>')
+                + '<backup><duration>1</duration></backup>'
+                + note('F', extra='<voice>1</voice><staff>2</staff>'))
+            parsed = self.run_score(score(measure(body)), '--score-mode', mode)
+            self.assertEqual([e['velocity'] for e in self.notes(parsed)], [45, 90, 54, 54])
+
+    def test_grace_group_borrows_from_previous_chord(self):
+        grace = ('<note><grace steal-time-previous="25"/>{chord}'
+                 '<pitch><step>{step}</step><octave>4</octave></pitch></note>')
+        xml = score(measure(note(duration=2) + note('E', duration=2, before='<chord/>')
+                            + grace.format(step='D', chord='')
+                            + grace.format(step='F', chord='<chord/>')
+                            + grace.format(step='G', chord='') + note('B')))
+        parsed = self.run_score(xml, '--score-mode', 'performance')
+        notes = self.notes(parsed)
+        self.assertEqual([(e['midi_pitch'], e['start_beats'], e['duration_beats']) for e in notes],
+                         [(60, 0, 1.5), (64, 0, 1.5), (62, 1.5, .25),
+                          (65, 1.5, .25), (67, 1.75, .25), (71, 2, 1)])
+        for event in notes[2:5]:
+            self.assertEqual(event['written_start_beats'], 2)
+            self.assertEqual(event['written_duration_beats'], 0)
+            self.assertEqual(event['grace_previous_percent'], 25)
+            self.assertIsNone(event['grace_following_percent'])
+            self.assertEqual(event['interpretation'], 3)  # Default velocity plus XML timing.
+        self.assertEqual(parsed['interpreted_events'], 6)
+
+    def test_grace_timing_errors_and_unrendered_group(self):
+        grace = '<note><grace {timing}/><pitch><step>D</step><octave>4</octave></pitch></note>'
+        cases = [
+            (grace.format(timing='steal-time-previous="25"') + note(), 'no preceding note'),
+            (note() + grace.format(timing='steal-time-following="25"'), 'no following note'),
+            (note() + grace.format(timing='steal-time-previous="25"')
+             + grace.format(timing='steal-time-previous="50"'), 'conflicting timing attributes'),
+        ]
+        for body, error in cases:
+            with self.subTest(error=error):
+                result = self.run_score(score(measure(body)), '--score-mode', 'performance', ok=False)
+                self.assertIn(error, result.stderr)
+        body = grace.format(timing='') + '<note><rest/><duration>1</duration></note>'
+        parsed = self.run_score(score(measure(body)), '--score-mode', 'performance')
+        self.assertEqual(parsed['unrendered_marks'], 1)
+        remaining = [e for e in parsed['events'] if e['kind'] == 'grace']
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]['duration_beats'], 0)
+
+    def test_report_nullable_fields_and_source_order(self):
+        xml = score(measure('<sound tempo="90" damper-pedal="50"/>'
+                            '<direction><direction-type><words>A &amp; &quot;B&quot;</words>'
+                            '</direction-type></direction>' + note()
+                            + '<note><rest/><duration>1</duration></note>'))
+        parsed = self.run_score(xml)
+        fields = {'index', 'kind', 'id', 'part', 'part_name', 'voice', 'staff', 'measure', 'mark',
+                  'start_beats', 'duration_beats', 'written_start_beats', 'written_duration_beats',
+                  'measure_index', 'occurrence', 'tie', 'source_offset', 'source_size', 'sequence',
+                  'interpretation', 'articulations', 'chord', 'midi_pitch', 'velocity', 'tempo_bpm',
+                  'controller', 'value', 'grace_previous_percent', 'grace_following_percent',
+                  'grace_make_beats', 'mark_tag', 'mark_text', 'mark_type', 'mark_number'}
+        for index, event in enumerate(parsed['events']):
+            self.assertEqual(set(event), fields)
+            self.assertEqual(event['index'], index)
+            self.assertIsNone(event['velocity'])
+            for key in ('grace_previous_percent', 'grace_following_percent', 'grace_make_beats'):
+                self.assertIsNone(event[key])
+            if event['kind'] != 'note':
+                self.assertIsNone(event['midi_pitch'])
+            if event['kind'] != 'tempo':
+                self.assertIsNone(event['tempo_bpm'])
+            if event['kind'] != 'control':
+                self.assertIsNone(event['controller'])
+                self.assertIsNone(event['value'])
+        self.assertEqual(parsed['events'][0]['kind'], 'tempo')
+        controls = [e for e in parsed['events'] if e['kind'] == 'control']
+        self.assertEqual([(e['controller'], e['value']) for e in controls], [(64, 63.5)])
+        self.assertTrue(any(e['mark'] == 'A & "B"' for e in parsed['events']))
 
     def test_sostenuto_release_and_grace_chord(self):
         grace = '<note><grace/><pitch><step>D</step><octave>4</octave></pitch></note>'

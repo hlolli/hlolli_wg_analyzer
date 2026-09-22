@@ -2925,7 +2925,8 @@ typedef enum HWAMusicXMLEventKind {
     HWA_MUSICXML_TEMPO = 4,
     HWA_MUSICXML_DIRECTION = 5,
     HWA_MUSICXML_CONTROL = 6,
-    HWA_MUSICXML_MARK = 7
+    HWA_MUSICXML_MARK = 7,
+    HWA_MUSICXML_CUE = 8 /* Silent notation, never a played note. */
 } HWAMusicXMLEventKind;
 
 typedef struct HWAMusicXMLEvent {
@@ -2938,7 +2939,7 @@ typedef struct HWAMusicXMLEvent {
     const char *measure;
     double start_beats; /* Quarter-note units, without a quantization grid. */
     double duration_beats; /* Zero for grace, tempo and direction events. */
-    double midi_pitch; /* Sounding pitch; fractional semitones are retained. */
+    double midi_pitch; /* Transposed pitch; fractional semitones retained; -1 for a cue rest. */
     double tempo_bpm; /* Quarter notes/minute, only for TEMPO. */
     unsigned tie; /* Bit 1 starts a sound tie; bit 2 stops it. */
     size_t source_offset; /* Byte span in score.xml_data, including for .mxl. */
@@ -2948,11 +2949,15 @@ typedef struct HWAMusicXMLEvent {
     unsigned occurrence; /* One-based visit to this written measure. */
     double written_duration_beats;
     const char *mark; /* Mark name/text, or empty; original XML remains available. */
+    const char *mark_tag; /* Original element name, including "words". */
+    const char *mark_text; /* Element text, without layout attributes. */
+    const char *mark_type; /* Span type, e.g. crescendo, diminuendo, continue or stop. */
+    const char *mark_number; /* Span identifier as written; empty means the XML default. */
     unsigned controller; /* CONTROL: MIDI CC 64 (damper), 66 (sostenuto), 67 (soft). */
     double value; /* CONTROL: continuous 0..127; MARK: optional numeric value. */
     double velocity; /* Continuous MIDI 0..127, valid only when velocity_valid. */
     int velocity_valid;
-    unsigned interpretation; /* Bits: 1 baseline policy, 2 XML playback data, 4 tuplet repair, 8 tempo conflict choice. */
+    unsigned interpretation; /* Bits: 1 baseline policy, 2 XML playback data, 4 tuplet repair, 8 tempo choice, 16 overfull measure, 32 cue notation. */
     double grace_previous, grace_following, grace_make; /* -1 when absent. */
     unsigned sequence; /* Orders multiple generated events at one source position. */
     unsigned articulations; /* 1 staccato, 2 staccatissimo, 4 tenuto, 8 accent, 16 strong-accent. */
@@ -2973,6 +2978,7 @@ typedef struct HWAMusicXMLOptions {
     double default_velocity; /* Baseline MIDI velocity, default 64. */
     int repair_tuplets; /* Opt in to repairing nearest-integer-tick tuplet rounding. */
     int last_tempo_wins; /* Opt in to document-order resolution of same-beat tempos. */
+    int preserve_overfull_measures; /* Retain declared durations beyond the meter; default rejects. */
 } HWAMusicXMLOptions;
 
 typedef struct HWAMusicXMLScore {
@@ -2991,6 +2997,9 @@ typedef struct HWAMusicXMLScore {
     size_t unrendered_marks; /* Marks without a baseline playback rule. */
     size_t repaired_tuplets; /* Written note/rest durations repaired, before repeats. */
     size_t tempo_conflicts; /* Same-beat tempo disagreements resolved after repeats. */
+    size_t repaired_tuplet_forwards; /* Forward padding absorbed by exact tuplet repair, before repeats. */
+    size_t overfull_measures; /* Part-measures beyond their meter, before repeats. */
+    size_t repaired_tuplet_backups; /* Backups reconciled with exact tuplets, before repeats. */
 } HWAMusicXMLScore;
 
 void hwa_musicxml_options_default(HWAMusicXMLOptions *options);
@@ -3001,7 +3010,7 @@ void hwa_musicxml_options_default(HWAMusicXMLOptions *options);
  * Initializes result even on failure. Options may alias result-owned memory.
  * Defaults: 100000 events, 1000000 XML nodes, 32 MiB input, 128 MiB work,
  * 100000 measure visits, and 120 BPM fallback reported by used_default_tempo.
- * Reads notes/rests/chords, backup/forward, divisions, meter/pickups, ties,
+ * Reads notes/rests/chords, silent cues, backup/forward, divisions, meter/pickups, ties,
  * chromatic transposition, sound/metronome tempo and timed directions.
  * Expands nested repeats, numbered endings and measure-boundary D.C./D.S./
  * coda/fine jumps. Events keep written positions and per-measure occurrences.

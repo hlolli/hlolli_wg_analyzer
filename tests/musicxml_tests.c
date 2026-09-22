@@ -96,6 +96,8 @@ static void simple_and_limits(void)
     reject(xml, &options, "options");
     hwa_musicxml_options_default(&options); options.last_tempo_wins = -1;
     reject(xml, &options, "options");
+    hwa_musicxml_options_default(&options); options.preserve_overfull_measures = 2;
+    reject(xml, &options, "options");
     for (i = 0U; i < strlen(xml); i++) {
         char saved = xml[i]; xml[i] = '\0';
         reject(xml, NULL, NULL);
@@ -119,7 +121,7 @@ static void timeline(void)
         "<backup><duration>3</duration></backup>"
         "<note><pitch><step>G</step><octave>3</octave></pitch><duration>3</duration><voice>2</voice></note>"
         "</measure><measure number='1'><attributes><divisions>3</divisions></attributes>"
-        "<direction><offset>3</offset><sound tempo='90'/></direction>"
+        "<direction><offset sound='yes'>3</offset><sound tempo='90'/></direction>"
         "<note><pitch><step>C</step><octave>4</octave></pitch><duration>3</duration><tie type='start'/></note>"
         "<note><pitch><step>C</step><octave>4</octave></pitch><duration>3</duration><tie type='stop'/></note>"
         "<forward><duration>6</duration></forward></measure></part>"
@@ -187,6 +189,7 @@ static void rounded_tuplets(void)
         if (pass == 0U) reject(xml, NULL, "measure exceeds its meter");
         if (read(xml, &options, &score) == 0) {
             CHECK(score.repaired_tuplets == 7U && score.event_count == 9U);
+            CHECK(score.repaired_tuplet_backups == 1U);
             CHECK(fabs(score.duration_beats-2.0) < 1e-12);
             CHECK(score.xml_size == strlen(xml) && memcmp(score.xml_data, xml, strlen(xml)) == 0);
             for (i = 0U; i < score.event_count; i++) {
@@ -258,8 +261,55 @@ static void malformed(void)
     hwa_musicxml_score_free(NULL);
 }
 
+static void attached_dynamics(void)
+{
+    HWAMusicXMLOptions options;
+    unsigned cue;
+    hwa_musicxml_options_default(&options);
+    options.performance = 1;
+    options.default_tempo_bpm = 0.0;
+    for (cue = 0U; cue < 2U; cue++) {
+        char body[1024], *xml;
+        HWAMusicXMLScore score;
+        size_t i, notes = 0U, cues = 0U, marks = 0U, parent = SIZE_MAX;
+        (void)snprintf(body, sizeof(body),
+            "<attributes><divisions>1</divisions></attributes>"
+            "<direction><direction-type><dynamics><p/></dynamics></direction-type></direction>"
+            "<note>%s<pitch><step>C</step><octave>4</octave></pitch><duration>1</duration>"
+            "<notations><dynamics><ff/></dynamics></notations></note>"
+            "<note><pitch><step>D</step><octave>4</octave></pitch><duration>1</duration></note>",
+            cue ? "<cue/>" : "");
+        xml = document(body);
+        if (xml == NULL) continue;
+        if (read(xml, &options, &score) == 0) {
+            for (i = 0U; i < score.event_count; i++) {
+                const HWAMusicXMLEvent *event = &score.events[i];
+                if (event->kind == HWA_MUSICXML_NOTE) {
+                    CHECK(event->velocity_valid);
+                    CHECK(event->velocity == (cue ? 45.0 : 104.0));
+                    if (event->midi_pitch == 60.0) parent = i;
+                    notes++;
+                } else if (event->kind == HWA_MUSICXML_CUE) {
+                    CHECK(!event->velocity_valid);
+                    parent = i;
+                    cues++;
+                } else if (event->kind == HWA_MUSICXML_MARK && strcmp(event->mark, "ff") == 0) {
+                    /* Dynamics processing must not change public source order. */
+                    CHECK(parent < i);
+                    marks++;
+                }
+            }
+            CHECK(notes == 2U - cue && cues == cue && marks == 1U);
+            hwa_musicxml_score_free(&score);
+        } else {
+            CHECK(0);
+        }
+        free(xml);
+    }
+}
+
 int main(void)
 {
-    simple_and_limits(); timeline(); rounded_tuplets(); malformed();
+    simple_and_limits(); timeline(); rounded_tuplets(); malformed(); attached_dynamics();
     return failures != 0;
 }
