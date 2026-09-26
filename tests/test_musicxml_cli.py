@@ -515,7 +515,8 @@ class MusicXML(unittest.TestCase):
                   'measure_index', 'occurrence', 'tie', 'source_offset', 'source_size', 'sequence',
                   'interpretation', 'articulations', 'chord', 'midi_pitch', 'velocity', 'tempo_bpm',
                   'controller', 'value', 'grace_previous_percent', 'grace_following_percent',
-                  'grace_make_beats', 'mark_tag', 'mark_text', 'mark_type', 'mark_number'}
+                  'grace_make_beats', 'mark_tag', 'mark_text', 'mark_type', 'mark_number',
+                  'tempo_source', 'metronome'}
         for index, event in enumerate(parsed['events']):
             self.assertEqual(set(event), fields)
             self.assertEqual(event['index'], index)
@@ -555,6 +556,73 @@ class MusicXML(unittest.TestCase):
         self.assertEqual(source.read_bytes(), xml)
         self.run_score(xml, '--score-mode', 'performance', '--score-grace-fraction', '2', ok=False)
         self.run_score(xml, '--fft-size', '1024', ok=False)
+
+    def test_tempo_sources_and_metronome_units(self):
+        default = self.run_score(score(measure(note())))
+        self.assertEqual(default['events'][0]['tempo_source'], 'default')
+        for unit, dots, rate, expected in [('half', 0, 80, 160),
+                                          ('quarter', 1, 80, 120),
+                                          ('eighth', 2, 80, 70)]:
+            with self.subTest(unit=unit, dots=dots):
+                xml = score(measure('<direction><direction-type><metronome>'
+                    f'<beat-unit>{unit}</beat-unit>' + '<beat-unit-dot/>' * dots +
+                    f'<per-minute>{rate}</per-minute></metronome></direction-type>'
+                    '</direction>' + note()))
+                parsed = self.run_score(xml)
+                tempo = next(e for e in parsed['events'] if e['kind'] == 'tempo')
+                self.assertEqual((tempo['tempo_source'], tempo['tempo_bpm']),
+                                 ('metronome', expected))
+                mark = next(e for e in parsed['events'] if e['mark_tag'] == 'metronome')
+                self.assertEqual(mark['metronome'], dict(beat_unit=unit, dots=dots,
+                    per_minute=str(rate), quarter_bpm=expected, visible=True))
+
+    def test_playback_tempo_does_not_discard_printed_mark(self):
+        for printed in ('yes', 'no'):
+            with self.subTest(printed=printed):
+                xml = score(measure('<direction><direction-type><words>Andante</words>'
+                    f'</direction-type><direction-type><metronome print-object="{printed}">'
+                    '<beat-unit>half</beat-unit><per-minute>50</per-minute></metronome>'
+                    '</direction-type><offset>1</offset><sound tempo="120"><offset>2</offset>'
+                    '</sound></direction>' + note(duration=3)))
+                parsed = self.run_score(xml, '--score-tempo-bpm', '0')
+                tempo = next(e for e in parsed['events'] if e['kind'] == 'tempo')
+                mark = next(e for e in parsed['events'] if e['mark_tag'] == 'metronome')
+                self.assertEqual((tempo['tempo_source'], tempo['tempo_bpm'], tempo['start_beats']),
+                                 ('sound', 120, 2))
+                self.assertEqual(mark['start_beats'], 1)
+                self.assertEqual(mark['metronome'], dict(beat_unit='half', dots=0,
+                    per_minute='50', quarter_bpm=100, visible=printed == 'yes'))
+                self.assertTrue(any(e['mark_text'] == 'Andante' for e in parsed['events']))
+
+    def test_tempo_source_survives_repeat_restore(self):
+        xml = score(measure('<sound tempo="80"/>' + note()),
+                    measure(FORWARD + note('D'), 2),
+                    measure('<sound tempo="120"/>' + note('E') + BACKWARD, 3))
+        parsed = self.run_score(xml)
+        restored = next(e for e in parsed['events'] if e['mark'] == 'tempo-restore')
+        self.assertEqual((restored['tempo_source'], restored['tempo_bpm']), ('sound', 80))
+        xml = score(measure(FORWARD + note()),
+                    measure('<sound tempo="90"/>' + note('D') + BACKWARD, 2))
+        parsed = self.run_score(xml)
+        restored = next(e for e in parsed['events'] if e['mark'] == 'tempo-restore')
+        self.assertEqual((restored['tempo_source'], restored['tempo_bpm']), ('default', 120))
+
+    def test_non_numeric_metronomes_are_not_guessed(self):
+        for content in ('<beat-unit>quarter</beat-unit><per-minute>80-100</per-minute>',
+                        '<beat-unit>half</beat-unit><beat-unit>quarter</beat-unit>',
+                        '<beat-unit>quarter</beat-unit><beat-unit-tied><beat-unit>eighth</beat-unit>'
+                        '</beat-unit-tied><per-minute>60</per-minute>',
+                        '<beat-unit>quarter</beat-unit><per-minute>80<x/></per-minute>'):
+            with self.subTest(content=content):
+                direction = ('<direction><direction-type><metronome>' + content +
+                             '</metronome></direction-type>{}</direction>')
+                self.assertIn('unsupported metronome',
+                    self.run_score(score(measure(direction.format('') + note())), ok=False).stderr)
+                parsed = self.run_score(score(measure(direction.format('<sound tempo="90"/>') + note())))
+                mark = next(e for e in parsed['events'] if e['mark_tag'] == 'metronome')
+                self.assertIsNone(mark['metronome']['quarter_bpm'])
+                self.assertEqual(parsed['events'][0]['tempo_source'], 'sound')
+                self.assertEqual(parsed['events'][0]['tempo_bpm'], 90)
 
 
 if __name__ == '__main__':

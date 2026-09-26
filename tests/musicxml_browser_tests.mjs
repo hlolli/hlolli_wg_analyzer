@@ -28,6 +28,20 @@ for (const occurrence of [1, 2]) {
     [['direction', 0], ['control', 1], ['control', 2], ['control', 3]]);
 }
 const expected = JSON.parse(read(small));
+assert.equal(expected.events.find(event => event.kind === 'tempo').tempo_source, 'default');
+const tempoInput = xml(`<measure number="1"><attributes><divisions>1</divisions></attributes>
+<direction><direction-type><metronome print-object="no"><beat-unit>quarter</beat-unit>
+<beat-unit-dot/><per-minute>80</per-minute></metronome></direction-type><offset>1</offset>
+<sound tempo="90"><offset>2</offset></sound></direction>
+<note><rest/><duration>3</duration></note></measure>`);
+const tempoScore = JSON.parse(read(tempoInput));
+const tempoMark = tempoScore.events.find(event => event.mark_tag === 'metronome');
+assert.equal(tempoMark.start_beats, 1);
+assert.deepEqual(tempoMark.metronome, {beat_unit: 'quarter', dots: 1, per_minute: '80',
+  quarter_bpm: 120, visible: false});
+assert.deepEqual(tempoScore.events.filter(event => event.kind === 'tempo')
+  .map(event => [event.start_beats, event.tempo_bpm, event.tempo_source]),
+  [[0, 120, 'default'], [2, 90, 'sound']]);
 assert.equal(expected.mode, 'written');
 assert.equal(expected.part_count, 1);
 assert.equal(expected.events.find(event => event.kind === 'note').duration_beats, 2 / 3);
@@ -52,7 +66,7 @@ assert.deepEqual(JSON.parse(read(compressed)), mxl);
 if (native) {
   const root = await mkdtemp(join(tmpdir(), 'musicxml-wasm-test-'));
   try {
-    for (const bytes of [small, large, compressed, pedal]) {
+    for (const bytes of [small, large, compressed, pedal, tempoInput]) {
       const source = join(root, 'score.input');
       await writeFile(source, bytes);
       const result = execFileSync(resolve(native), ['import-score', source], {maxBuffer: 16 * 1024 * 1024});

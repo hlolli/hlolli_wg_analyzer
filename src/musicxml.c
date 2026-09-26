@@ -22,6 +22,7 @@ typedef struct XMLMeasure {
     const char *segno, *coda, *dalsegno, *tocoda;
     int dacapo, fine;
     double jump_at, initial_tempo;
+    const char *initial_tempo_source;
 } XMLMeasure;
 
 typedef struct XMLReader {
@@ -829,38 +830,77 @@ static int meter(XMLReader *r, size_t time, double *length)
     return 0;
 }
 
-static int tempo(XMLReader *r, size_t n, double *bpm)
+static HWAMusicXMLMetronome metronome_data(const XMLReader *r, size_t n)
+{
+    HWAMusicXMLMetronome result = {0};
+    size_t i;
+    unsigned units = 0U, rates = 0U;
+    int simple = 1;
+    double rate, multiplier = 1.0, addition = 0.5, unit;
+    result.beat_unit = value(r, n, "beat-unit", "");
+    result.per_minute = value(r, n, "per-minute", "");
+    result.visible = strcmp(attribute(r, n, "print-object"), "no") != 0;
+    for (i = r->nodes[n].first; i != 0U; i = r->nodes[i].next) {
+        const char *tag = r->nodes[i].name;
+        size_t nested;
+        if (r->nodes[i].attribute) {
+            continue;
+        }
+        for (nested = r->nodes[i].first; nested != 0U; nested = r->nodes[nested].next) {
+            if (!r->nodes[nested].attribute) {
+                simple = 0;
+            }
+        }
+        if (strcmp(tag, "beat-unit") == 0) {
+            units++;
+        } else if (strcmp(tag, "per-minute") == 0) {
+            rates++;
+        } else if (strcmp(tag, "beat-unit-dot") == 0) {
+            result.dots++;
+            multiplier += addition;
+            addition *= 0.5;
+        } else {
+            /* Do not turn a tied unit or metric relation into a BPM guess. */
+            simple = 0;
+        }
+    }
+    unit = beat_unit(result.beat_unit);
+    if (simple && units == 1U && rates == 1U && unit > 0.0 &&
+        decimal(result.per_minute, &rate) == 0 && rate > 0.0) {
+        result.quarter_bpm = rate * unit * multiplier;
+    }
+    return result;
+}
+
+static int tempo(XMLReader *r, size_t n, double *bpm, const char **source)
 {
     size_t sound = strcmp(r->nodes[n].name, "sound") == 0 ? n : child(r, n, "sound");
     const char *s = attribute(r, sound, "tempo");
     size_t type;
     *bpm = 0.0;
+    *source = NULL;
     if (*s != '\0') {
         if (decimal(s, bpm) != 0 || *bpm <= 0.0) {
             return fail(r, "invalid sound tempo");
         }
+        *source = "sound";
         return 0;
     }
     for (type = r->nodes[n].first; type != 0U; type = r->nodes[type].next) {
-        size_t metronome = child(r, type, "metronome"), i;
-        double unit, multiplier = 1.0, addition = 0.5, rate;
+        size_t metronome = child(r, type, "metronome");
+        HWAMusicXMLMetronome mark;
         if (metronome == 0U || r->nodes[type].attribute) {
             continue;
         }
-        unit = beat_unit(value(r, metronome, "beat-unit", ""));
-        if (unit == 0.0 || number(r, metronome, "per-minute", &rate) != 0 || rate <= 0.0) {
+        mark = metronome_data(r, metronome);
+        if (mark.quarter_bpm == 0.0) {
             return fail(r, "unsupported metronome; supply sound tempo in quarter notes/minute");
-        }
-        for (i = r->nodes[metronome].first; i != 0U; i = r->nodes[i].next) {
-            if (!r->nodes[i].attribute && strcmp(r->nodes[i].name, "beat-unit-dot") == 0) {
-                multiplier += addition;
-                addition *= 0.5;
-            }
         }
         if (*bpm != 0.0) {
             return fail(r, "multiple metronomes in one direction");
         }
-        *bpm = rate * unit * multiplier;
+        *bpm = mark.quarter_bpm;
+        *source = "metronome";
     }
     return 0;
 }
@@ -929,6 +969,8 @@ static int mark_event(XMLReader *r, const HWAMusicXMLEvent *parent, size_t n, si
     event.mark_number = attribute(r, n, "number");
     if (strcmp(event.mark, "words") == 0) {
         event.mark = r->nodes[n].text;
+    } else if (strcmp(event.mark, "metronome") == 0) {
+        event.metronome = metronome_data(r, n);
     }
     event.source_offset = r->nodes[n].start;
     event.source_size = r->nodes[n].end - r->nodes[n].start;
@@ -992,7 +1034,7 @@ static int controls(XMLReader *r, const HWAMusicXMLEvent *parent, double playbac
         }
         for (j = r->nodes[i].first; j != 0U; j = r->nodes[j].next) {
             const char *tag = r->nodes[j].name;
-            if (r->nodes[j].attribute || strcmp(tag, "metronome") == 0) {
+            if (r->nodes[j].attribute) {
                 continue;
             }
             if (strcmp(tag, "dynamics") == 0) {
@@ -1062,7 +1104,8 @@ static int controls(XMLReader *r, const HWAMusicXMLEvent *parent, double playbac
                 if (mark_event(r, parent, j, measure) != 0) {
                     return -1;
                 }
-                if (strcmp(tag, "segno") != 0 && strcmp(tag, "coda") != 0) {
+                if (strcmp(tag, "segno") != 0 && strcmp(tag, "coda") != 0 &&
+                    (strcmp(tag, "metronome") != 0 || metronome_data(r, j).quarter_bpm == 0.0)) {
                     r->score->unrendered_marks++;
                 }
             }
@@ -1468,23 +1511,29 @@ static int unfold(XMLReader *r)
     }
     {
         double carry = r->limits.default_tempo_bpm;
+        const char *carry_source = "default";
         for (i = 0U; i < r->measure_count; i++) {
             XMLMeasure *m = &r->measures[i];
             size_t e;
             double last_at = -1.0, latest = carry;
+            const char *latest_source = carry_source;
             m->initial_tempo = carry;
+            m->initial_tempo_source = carry_source;
             for (e = m->head; e != SIZE_MAX; e = next[e]) {
                 if (original[e].kind == HWA_MUSICXML_TEMPO) {
                     if (original[e].start_beats == m->start) {
                         m->initial_tempo = original[e].tempo_bpm;
+                        m->initial_tempo_source = original[e].tempo_source;
                     }
                     if (original[e].start_beats >= last_at) {
                         last_at = original[e].start_beats;
                         latest = original[e].tempo_bpm;
+                        latest_source = original[e].tempo_source;
                     }
                 }
             }
             carry = latest;
+            carry_source = latest_source;
         }
     }
     r->score->events = NULL;
@@ -1530,6 +1579,7 @@ static int unfold(XMLReader *r)
             restored.measure_index = index;
             restored.occurrence = m->visits;
             restored.tempo_bpm = m->initial_tempo;
+            restored.tempo_source = m->initial_tempo_source;
             restored.mark = "tempo-restore";
             restored.id = restored.part = restored.part_name = restored.voice = restored.staff =
                 restored.measure = "";
@@ -1870,6 +1920,7 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
             } else if (strcmp(tag, "direction") == 0 || strcmp(tag, "sound") == 0) {
                 static const char *const fields[] = {"sound", "offset", "voice", "staff"};
                 double offset = 0.0, bpm, playback_start = cursor;
+                const char *tempo_source = NULL;
                 size_t sound = strcmp(tag, "sound") == 0 ? n : child(r, n, "sound");
                 size_t direction_offset = child(r, n, "offset");
                 event.voice = value(r, n, "voice", "");
@@ -1893,7 +1944,7 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
                 }
                 event.kind = HWA_MUSICXML_DIRECTION;
                 event.written_start_beats = event.start_beats;
-                if (append(r, &event, ordinal) != 0 || tempo(r, n, &bpm) != 0) {
+                if (append(r, &event, ordinal) != 0 || tempo(r, n, &bpm, &tempo_source) != 0) {
                     return -1;
                 }
                 if (strcmp(tag, "sound") == 0 ||
@@ -1918,6 +1969,7 @@ static int read_part(XMLReader *r, size_t part, const char *part_name)
                     }
                     event.kind = HWA_MUSICXML_TEMPO;
                     event.tempo_bpm = bpm;
+                    event.tempo_source = tempo_source;
                     if (append(r, &event, ordinal) != 0) {
                         return -1;
                     }
@@ -2078,6 +2130,7 @@ static int read_score(XMLReader *r, size_t root)
         memset(&event, 0, sizeof(event));
         event.kind = HWA_MUSICXML_TEMPO;
         event.tempo_bpm = r->limits.default_tempo_bpm;
+        event.tempo_source = "default";
         event.id = event.part = event.part_name = event.voice = event.staff = event.measure = "";
         event.mark = "";
         if (append(r, &event, 0U) != 0) {

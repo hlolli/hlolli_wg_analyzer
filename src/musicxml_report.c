@@ -12,6 +12,36 @@ static int optional_number(FILE *stream, const char *name, double value, int val
                  : (fputs("null", stream) == EOF ? -1 : 0);
 }
 
+static int write_tempo_details(FILE *stream, const HWAMusicXMLEvent *event)
+{
+    const HWAMusicXMLMetronome *mark = &event->metronome;
+    if (fputs(",\"tempo_source\":", stream) == EOF) {
+        return -1;
+    }
+    if (event->kind == HWA_MUSICXML_TEMPO) {
+        if (hwa_json_write_string(stream, event->tempo_source ? event->tempo_source : "unknown") != 0) {
+            return -1;
+        }
+    } else if (fputs("null", stream) == EOF) {
+        return -1;
+    }
+    if (fputs(",\"metronome\":", stream) == EOF) {
+        return -1;
+    }
+    if (event->kind != HWA_MUSICXML_MARK || mark->beat_unit == NULL) {
+        return fputs("null", stream) == EOF ? -1 : 0;
+    }
+    if (fputs("{\"beat_unit\":", stream) == EOF ||
+        hwa_json_write_string(stream, mark->beat_unit) != 0 ||
+        fprintf(stream, ",\"dots\":%u,\"per_minute\":", mark->dots) < 0 ||
+        hwa_json_write_string(stream, mark->per_minute) != 0 ||
+        optional_number(stream, "quarter_bpm", mark->quarter_bpm, mark->quarter_bpm > 0.0) != 0 ||
+        fprintf(stream, ",\"visible\":%s}", mark->visible ? "true" : "false") < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int write_event(FILE *stream, const HWAMusicXMLEvent *event, size_t index)
 {
     static const char *const kinds[] = {"invalid", "note",      "rest",    "grace",
@@ -70,6 +100,9 @@ static int write_event(FILE *stream, const HWAMusicXMLEvent *event, size_t index
                         grace && event->grace_following >= 0.0) != 0 ||
         optional_number(stream, "grace_make_beats", event->grace_make,
                         grace && event->grace_make >= 0.0) != 0) {
+        return -1;
+    }
+    if (write_tempo_details(stream, event) != 0) {
         return -1;
     }
     return fputs("}", stream) == EOF ? -1 : 0;

@@ -242,6 +242,21 @@ number, part/voice/staff and XML byte span. Repeated IDs refer to the same
 written source; the event index identifies a playback occurrence. Inapplicable
 numeric output fields are `null`, not guessed values.
 
+Tempo events report `tempo_source`: `sound` for MusicXML playback data,
+`metronome` for a numeric notation mark, or `default` for the importer's
+fallback. Repeat/jump restores keep this source. `tempo_bpm` always means
+quarter notes per minute; it does not imply a printed or performer-chosen tempo.
+MusicXML playback data does not tell us whether its exporter guessed the value.
+
+Metronome marks also appear as `mark` events, even when a `sound` tempo takes
+precedence. Their `metronome` object keeps `beat_unit`, `dots`, the original
+`per_minute` text, converted `quarter_bpm`, and `visible` (`print-object`).
+Printed and playback offsets remain separate. Ranges and unsupported metric
+relations have a null `quarter_bpm`; they need a separate `sound` tempo to import.
+Other events have null `metronome` fields. Tempo words remain plain mark text.
+These additive fields and marks do not change the playback tempo policy.
+Re-imports may change event indices; do not pair them with labels from an older import.
+
 Mark events also retain `mark_tag`, `mark_text`, `mark_type`, and `mark_number`.
 These fields preserve words, dynamics, and numbered hairpin starts, continuations,
 and stops without their layout attributes. `mark` keeps its existing name/text

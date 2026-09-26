@@ -2929,6 +2929,14 @@ typedef enum HWAMusicXMLEventKind {
     HWA_MUSICXML_CUE = 8 /* Silent notation, never a played note. */
 } HWAMusicXMLEventKind;
 
+typedef struct HWAMusicXMLMetronome {
+    const char *beat_unit; /* Written unit, before conversion to quarter notes. */
+    const char *per_minute; /* Original text, including ranges; empty for metric relations. */
+    unsigned dots;
+    double quarter_bpm; /* Zero when the mark is not a supported numeric tempo. */
+    int visible; /* False for print-object="no". */
+} HWAMusicXMLMetronome;
+
 typedef struct HWAMusicXMLEvent {
     HWAMusicXMLEventKind kind;
     const char *id; /* Original XML id, or empty. */
@@ -2962,6 +2970,8 @@ typedef struct HWAMusicXMLEvent {
     unsigned sequence; /* Orders multiple generated events at one source position. */
     unsigned articulations; /* 1 staccato, 2 staccatissimo, 4 tenuto, 8 accent, 16 strong-accent. */
     int chord; /* Shares onset with the preceding written note. */
+    const char *tempo_source; /* TEMPO: "default", "sound", or "metronome"; NULL otherwise. */
+    HWAMusicXMLMetronome metronome; /* MARK with mark_tag="metronome" only. */
 } HWAMusicXMLEvent;
 
 typedef struct HWAMusicXMLOptions {
