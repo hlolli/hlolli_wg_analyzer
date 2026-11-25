@@ -165,7 +165,7 @@ class EventScoreTests(unittest.TestCase):
 
     def command(self, *args, ok=True):
         result = subprocess.run([str(ANALYZER), "export-event-score", str(self.bundle), *map(str, args)],
-                                capture_output=True, text=True)
+                                capture_output=True, encoding="utf-8")
         if ok:
             self.assertEqual(result.returncode, 0, result.stderr)
         else:

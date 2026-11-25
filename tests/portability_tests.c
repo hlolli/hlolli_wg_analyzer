@@ -357,7 +357,8 @@ static void test_musicxml(void)
     CHECK(status == 0);
     if (status == 0) {
         CHECK(score.event_count == 2U && score.used_default_tempo);
-        CHECK(score.events[1].midi_pitch == 69.0 && score.events[1].duration_beats == 1.0/3.0);
+        CHECK(score.events[1].midi_pitch == 69.0);
+        CHECK(fabs(score.events[1].duration_beats - 1.0 / 3.0) < 1e-12);
         hwa_musicxml_score_free(&score);
     }
     {

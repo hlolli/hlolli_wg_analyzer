@@ -1239,10 +1239,12 @@ bad_tie:
 
 static uint64_t hwa_seg_seconds_count(double seconds, uint32_t rate)
 {
-    long double value = ceill((long double)seconds * (long double)rate);
+    /* Convert at double precision before rounding up to a whole sample. */
+    double samples = seconds * (double)rate;
+    double value = ceil(samples);
 
-    if (value <= 0.0L) return 0U;
-    if (value >= (long double)UINT64_MAX) return UINT64_MAX;
+    if (value <= 0.0) return 0U;
+    if (value >= (double)UINT64_MAX) return UINT64_MAX;
     return (uint64_t)value;
 }
 

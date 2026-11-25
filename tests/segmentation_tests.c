@@ -1049,6 +1049,13 @@ static void test_unsettled_attack_fallback(void)
     CHECK(bounds[1] == 400U && confidence[1] == 0.0,
           "fallback did not honor the longer minimum phase");
 
+    options.min_phase_seconds = 0.2001;
+    CHECK(hwa_segmentation_note_bounds(&analysis, &options, 200U, 700U,
+                                      bounds, confidence, error, sizeof(error)) == 0,
+          "fractional minimum phase failed: %s", error);
+    CHECK(bounds[1] == 401U && confidence[1] == 0.0,
+          "fallback did not round up the fractional minimum phase");
+
     options.min_phase_seconds = 0.02;
     CHECK(hwa_segmentation_note_bounds(&analysis, &options, 200U, 300U,
                                       bounds, confidence, error, sizeof(error)) == 0,

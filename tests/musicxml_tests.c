@@ -64,7 +64,8 @@ static void simple_and_limits(void)
         CHECK(score.event_count == 3U && score.part_count == 1U && score.used_default_tempo);
         CHECK(score.events[0].kind == HWA_MUSICXML_TEMPO && score.events[0].tempo_bpm == 120.0);
         CHECK(n->kind == HWA_MUSICXML_NOTE && n->midi_pitch == 60.0);
-        CHECK(n->duration_beats == 1.0/3.0 && score.duration_beats == 1.0/3.0);
+        CHECK(fabs(n->duration_beats-1.0/3.0) < 1e-12);
+        CHECK(fabs(score.duration_beats-1.0/3.0) < 1e-12);
         CHECK(strcmp(n->id, "original") == 0 && strcmp(n->voice, "one") == 0);
         CHECK(strcmp(n->part_name, "A & B \xf0\x9d\x84\x9e") == 0);
         CHECK(n->source_size == strlen(note) && memcmp(xml+n->source_offset, note, n->source_size) == 0);

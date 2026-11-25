@@ -42,6 +42,12 @@ static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
     }
 };
 
+static int hwa_isolation_supports_float32(void)
+{
+    return sizeof(float) == 4U && FLT_RADIX == 2 &&
+           FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128;
+}
+
 static int hwa_isolation_snapshot_read(void *context, uint64_t offset,
                                        unsigned char *destination, size_t size)
 {
@@ -344,8 +350,7 @@ int hwa_isolate_instrument_wav(const char *source_path,
     }
     work_available = input_limits->max_work_bytes -
                      (uint64_t)count * (2U * sizeof(double));
-    if (sizeof(float) != 4U || FLT_RADIX != 2 ||
-        FLT_MANT_DIG != 24 || FLT_MAX_EXP != 128) {
+    if (!hwa_isolation_supports_float32()) {
         hwa_set_error(error, error_size, "instrument isolation requires IEEE binary32 float");
         goto cleanup;
     }
