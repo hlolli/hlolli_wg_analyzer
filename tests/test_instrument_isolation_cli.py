@@ -330,7 +330,7 @@ class ViolinIsolation(InstrumentIsolationTest):
 
     def test_rejects_unsupported_instrument_and_bad_ranges_without_output(self):
         write_pcm(self.source, [0] * 1024, 22050, 1)
-        unsupported = self.isolate(instrument="cello")
+        unsupported = self.isolate(instrument="double-bass")
         self.assertNotEqual(unsupported.returncode, 0)
         self.assertFalse(self.output.exists())
         for spans in (("0:0",), ("20:10",), ("1:",), ("-1:8",), ("20:1025",),
@@ -470,6 +470,140 @@ class ViolaIsolation(InstrumentIsolationTest):
                 mixture_error = sum((mixed[i] - clean[i]) ** 2 for i in range(start, end))
                 stem_error = sum((estimate[i] * 32768 - clean[i]) ** 2 for i in range(start, end))
                 self.assertLess(stem_error, 1.25 * mixture_error)
+
+
+class CelloIsolation(InstrumentIsolationTest):
+    instrument = "cello"
+
+    @staticmethod
+    def bowed_note(rate, frames, hz, amplitude):
+        envelope_edge = rate // 25
+        samples = []
+        for i in range(frames):
+            phase = math.tau * hz * i / rate
+            envelope = min(1.0, i / envelope_edge, (frames - i) / envelope_edge)
+            tone = (math.sin(phase) + 0.45 * math.sin(2 * phase)
+                    + 0.2 * math.sin(3 * phase) + 0.1 * math.sin(4 * phase))
+            samples.append(round(amplitude * envelope * tone))
+        return samples
+
+    def test_stereo_cello_bundle_preserves_source_clock(self):
+        rate, frames = 48000, 14603
+        left = self.bowed_note(rate, frames, 65.41, 9000)
+        right = self.bowed_note(rate, frames, 65.41, 6500)
+        samples = [sample for pair in zip(left, right) for sample in pair]
+        write_pcm(self.source, samples, rate, 2, mask=3)
+        result = self.isolate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = self.cli("validate-event-bundle", self.output)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        provider, = manifest["providers"]
+        self.assertEqual(provider["settings"]["instrument"], "cello")
+        audio = {row["kind"]: row for row in manifest["audio"]}
+        for row in audio.values():
+            fmt = row["format"]
+            self.assertEqual((fmt["sample_rate_hz"], fmt["channels"], fmt["channel_mask"],
+                              fmt["frames"]), (rate, 2, 3, frames))
+        target = audio["instrument-stem"]
+        removed = audio["derived-audio"]
+        self.assertEqual((target["name"], target["relative_path"]), ("cello", "audio/cello.wav"))
+        self.assertEqual(removed["relative_path"], "audio/removed.wav")
+        self.assertEqual(target["source_recording_id"], audio["source-recording"]["id"])
+        events = (self.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        event, = map(json.loads, events)
+        self.assertEqual((event["part"], event["start_sample"], event["end_sample"],
+                          event["evidence_audio_id"]), ("cello", 0, frames, target["id"]))
+        stem_audio = read_float_pcm(self.output / target["relative_path"])
+        removed_audio = read_float_pcm(self.output / removed["relative_path"])
+        self.assertEqual((len(stem_audio), len(removed_audio)), (len(samples), len(samples)))
+        self.assertLess(max(abs(a + b - source / 32768)
+                            for a, b, source in zip(stem_audio, removed_audio, samples)), 1e-7)
+
+    def test_open_c_and_lower_tuning_survive_cleanup(self):
+        for rate in (8000, 48000):
+            start, end = rate // 4, rate * 3 // 4
+            for hz in (65.41, 61.74):
+                samples = self.bowed_note(rate, rate, hz, 10000)
+                write_pcm(self.source, samples, rate, 1)
+                for flags in ((), ("--disturbance-samples", f"{start}:{end}")):
+                    with self.subTest(rate=rate, hz=hz, marked=bool(flags)):
+                        self.output = self.root / f"c2-{rate}-{hz}-{bool(flags)}.hwa-events"
+                        result = self.isolate(*flags)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        estimate = read_float_pcm(self.output / "audio" / "cello.wav")
+                        signal = sum(value ** 2 for value in samples[start:end])
+                        error = sum((estimate[i] * 32768 - samples[i]) ** 2
+                                    for i in range(start, end))
+                        self.assertLess(error, signal / 1000)
+
+    def test_automatic_cleanup_preserves_a_short_open_c(self):
+        rate, hz = 22050, 65.41
+        start, frames = rate * 2 // 5, rate // 50
+        samples = [0] * rate
+        for i in range(frames):
+            phase = math.tau * hz * i / rate
+            envelope = math.sin(math.pi * i / frames) ** 2
+            tone = (math.sin(phase) + 0.45 * math.sin(2 * phase)
+                    + 0.2 * math.sin(3 * phase) + 0.1 * math.sin(4 * phase))
+            samples[start + i] = round(6500 * envelope * tone)
+        write_pcm(self.source, samples, rate, 1)
+        result = self.isolate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        estimate = read_float_pcm(self.output / "audio" / "cello.wav")
+        note = range(start, start + frames)
+        signal = sum(samples[i] ** 2 for i in note)
+        error = sum((estimate[i] * 32768 - samples[i]) ** 2 for i in note)
+        self.assertLess(error, signal / 10000)
+
+    def test_cleanup_improves_cello_with_recorded_disturbances(self):
+        rate = 22050
+        clean = (self.bowed_note(rate, rate * 5 // 4, 65.41, 7000)
+                 + [0] * rate + self.bowed_note(rate, rate, 98.0, 6000))
+        mixed = clean.copy()
+        spans = []
+        for name, offset, gain in (("cough", 9000, 2), ("step", 34500, 24)):
+            noise = read_fixture(name)
+            for i, sample in enumerate(noise, offset):
+                mixed[i] += gain * sample
+            spans.append((offset - 256, offset + len(noise) + 256))
+        reference = self.root / "reference.wav"
+        write_pcm(reference, clean, rate, 1)
+        write_pcm(self.source, mixed, rate, 1)
+        marked = [value for start, end in spans
+                  for value in ("--disturbance-samples", f"{start}:{end}")]
+        for mode, flags in (("automatic", ()), ("marked", marked)):
+            with self.subTest(mode=mode):
+                self.output = self.root / (mode + ".hwa-events")
+                result = self.isolate(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem = self.output / "audio" / "cello.wav"
+                report = self.evaluate(reference, stem)
+                self.assertGreater(report["si_sdr_improvement_db"], 0.5, report)
+                estimate = read_float_pcm(stem)
+                for start, end in spans:
+                    frames = range(start + 256, end - 256)
+                    mixture_error = sum((mixed[i] - clean[i]) ** 2 for i in frames)
+                    stem_error = sum((estimate[i] * 32768 - clean[i]) ** 2 for i in frames)
+                    self.assertLess(stem_error, mixture_error)
+
+    def test_marked_cleanup_preserves_a_low_double_stop_with_a_quiet_cough(self):
+        rate = 22050
+        start = rate // 3
+        cough = read_fixture("cough")
+        end = start + len(cough)
+        clean = [a + b for a, b in zip(self.bowed_note(rate, rate, 65.41, 6500),
+                                       self.bowed_note(rate, rate, 98.0, 4200))]
+        mixed = clean.copy()
+        for i, sample in enumerate(cough, start):
+            mixed[i] += round(sample / 8)
+        write_pcm(self.source, mixed, rate, 1)
+        result = self.isolate("--disturbance-samples", f"{start - 256}:{end + 256}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        estimate = read_float_pcm(self.output / "audio" / "cello.wav")
+        mixture_error = sum((mixed[i] - clean[i]) ** 2 for i in range(start, end))
+        estimate_error = sum((estimate[i] * 32768 - clean[i]) ** 2 for i in range(start, end))
+        self.assertLess(estimate_error, 1.25 * mixture_error)
 
 
 if __name__ == "__main__":

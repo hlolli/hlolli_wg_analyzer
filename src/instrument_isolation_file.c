@@ -36,6 +36,9 @@ static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
     },
     [HWA_ISOLATION_VIOLA] = {
         "viola", "audio/viola.wav", "hwa.viola-isolation", "viola-isolation-2"
+    },
+    [HWA_ISOLATION_CELLO] = {
+        "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-1"
     }
 };
 
@@ -313,7 +316,8 @@ int hwa_isolate_instrument_wav(const char *source_path,
     int result = -1;
     if (source_path == NULL || source_path[0] == '\0' ||
         output_directory == NULL || output_directory[0] == '\0' ||
-        (instrument != HWA_ISOLATION_VIOLIN && instrument != HWA_ISOLATION_VIOLA) ||
+        (instrument != HWA_ISOLATION_VIOLIN && instrument != HWA_ISOLATION_VIOLA &&
+         instrument != HWA_ISOLATION_CELLO) ||
         (range_count != 0U && ranges == NULL) ||
         input_limits == NULL || bundle_limits == NULL ||
         input_limits->max_input_bytes == 0U ||

@@ -130,21 +130,21 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
-### Isolate solo violin or viola
+### Isolate solo violin, viola, or cello
 
 ```sh
 build/hlolli-wg-analyzer isolate-instrument recital.wav \
-  --instrument viola --output viola.hwa-events
+  --instrument cello --output cello.hwa-events
 ```
 
-Use `--instrument violin` or `--instrument viola` for a mostly solo
-recording with interference such as coughs and footsteps. The viola
-profile accounts for notes as low as its open C string. The command runs
-offline in C and accepts mono or stereo WAVE at 8–192 kHz with finite samples
-within float32 range.
-The bundle contains `audio/violin.wav` or `audio/viola.wav` alongside
-`audio/removed.wav` on the source sample clock. You can pass the instrument
-stem to `analyze-events`.
+Use `--instrument violin`, `--instrument viola`, or `--instrument cello`
+for a mostly solo recording with interference such as coughs and footsteps.
+Each profile accounts for the instrument's low notes, including the viola's
+C3 and the cello's C2. The command runs offline in C and accepts mono or stereo
+WAVE at 8–192 kHz with finite samples within float32 range.
+The bundle contains `audio/violin.wav`, `audio/viola.wav`, or `audio/cello.wav`
+alongside `audio/removed.wav` on the source sample clock. You can pass the
+instrument stem to `analyze-events`.
 
 Automatic cleanup looks for brief disturbances between quiet windows and
 compares non-harmonic energy across nearby frames during stable notes.

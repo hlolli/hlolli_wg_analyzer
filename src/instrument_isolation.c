@@ -15,11 +15,30 @@ typedef struct IsolationProfile {
     double low_band_hz;
     double low_mask_start_hz;
     double low_mask_width_hz;
+    unsigned windows_per_second;
+    int protect_marked_chords;
+    int require_pitch_for_rumble;
 } IsolationProfile;
 
-static const IsolationProfile violin_profile = {175.0, 145.0, 105.0, 75.0};
-/* Keep the low-frequency mask below the viola's open C string at 131 Hz. */
-static const IsolationProfile viola_profile = {115.0, 100.0, 65.0, 50.0};
+static const IsolationProfile isolation_profiles[] = {
+    [HWA_ISOLATION_VIOLIN] = {
+        .min_pitch_hz = 175.0, .low_band_hz = 145.0,
+        .low_mask_start_hz = 105.0, .low_mask_width_hz = 75.0,
+        .windows_per_second = 16U
+    },
+    /* Keep the low-frequency masks below the respective open C strings. */
+    [HWA_ISOLATION_VIOLA] = {
+        .min_pitch_hz = 115.0, .low_band_hz = 100.0,
+        .low_mask_start_hz = 65.0, .low_mask_width_hz = 50.0,
+        .windows_per_second = 16U, .protect_marked_chords = 1
+    },
+    [HWA_ISOLATION_CELLO] = {
+        .min_pitch_hz = 55.0, .low_band_hz = 45.0,
+        .low_mask_start_hz = 28.0, .low_mask_width_hz = 25.0,
+        .windows_per_second = 8U, .protect_marked_chords = 1,
+        .require_pitch_for_rumble = 1
+    }
+};
 
 typedef struct IsolationFrame {
     double power;
@@ -283,6 +302,10 @@ static void isolation_gain(const IsolationWorkspace *work, size_t index,
 
     /* Strong low-frequency events can sit between notes as well as over them. */
     *low_strength = 0.88 * smooth_step((frame->low_power / frame->power - 0.10) / 0.25);
+    /* Unpitched low energy can be part of a cello attack. */
+    if (work->profile->require_pitch_for_rumble && matched_pitch == 0.0 &&
+        !likely_instrument_pitch(frame))
+        *low_strength = 0.0;
     if (matched_pitch == 0.0 ||
         (likely_instrument_pitch(frame) && !pitches_agree(*pitch_hz, matched_pitch))) {
         return;
@@ -524,7 +547,7 @@ static int accumulate_correction(IsolationWorkspace *work,
                 if (alternate.confidence < 0.70) alternate.pitch_hz = 0.0;
             }
         }
-        if (range_count != 0U && work->profile == &viola_profile) {
+        if (range_count != 0U && work->profile->protect_marked_chords) {
             int conflict = has_marked_pitch_conflict(work, index, pitch_hz);
             if (conflict < 0) return -1;
             if (conflict > 0) continue;
@@ -590,7 +613,7 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
         hwa_set_error(error, error_size, "instrument isolation requires nonempty mono or stereo audio at 8000 to 192000 Hz");
         return -1;
     }
-    if (instrument != HWA_ISOLATION_VIOLIN && instrument != HWA_ISOLATION_VIOLA) {
+    if ((size_t)instrument >= sizeof(isolation_profiles) / sizeof(isolation_profiles[0])) {
         hwa_set_error(error, error_size, "unsupported isolation instrument");
         return -1;
     }
@@ -609,14 +632,14 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
             return -1;
         }
     }
-    work.profile = instrument == HWA_ISOLATION_VIOLIN ? &violin_profile : &viola_profile;
+    work.profile = &isolation_profiles[instrument];
     work.input = input;
     work.frame_count = frame_count;
     work.channels = channels;
     work.sample_rate = sample_rate_hz;
     work.length = 512U;
-    /* Use about 64–128 ms at any supported rate. */
-    while (work.length * 16U < sample_rate_hz) work.length *= 2U;
+    /* Keep enough cycles of the lowest notes in each power-of-two window. */
+    while (work.length * work.profile->windows_per_second < sample_rate_hz) work.length *= 2U;
     work.hop = work.length / 4U;
     /* Include every overlapping window at both ends of the recording. */
     work.padding = work.hop * 3U;
