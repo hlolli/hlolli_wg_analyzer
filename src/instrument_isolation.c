@@ -15,28 +15,29 @@ typedef struct IsolationProfile {
     double low_band_hz;
     double low_mask_start_hz;
     double low_mask_width_hz;
-    unsigned windows_per_second;
+    double min_window_seconds;
     int protect_marked_chords;
-    int require_pitch_for_rumble;
+    int protect_marked_spectrum;
+    int protect_low_notes;
 } IsolationProfile;
 
 static const IsolationProfile isolation_profiles[] = {
     [HWA_ISOLATION_VIOLIN] = {
         .min_pitch_hz = 175.0, .low_band_hz = 145.0,
         .low_mask_start_hz = 105.0, .low_mask_width_hz = 75.0,
-        .windows_per_second = 16U
+        .min_window_seconds = 0.0625
     },
     /* Keep the low-frequency masks below the respective open C strings. */
     [HWA_ISOLATION_VIOLA] = {
         .min_pitch_hz = 115.0, .low_band_hz = 100.0,
         .low_mask_start_hz = 65.0, .low_mask_width_hz = 50.0,
-        .windows_per_second = 16U, .protect_marked_chords = 1
+        .min_window_seconds = 0.0625, .protect_marked_chords = 1
     },
     [HWA_ISOLATION_CELLO] = {
         .min_pitch_hz = 55.0, .low_band_hz = 45.0,
         .low_mask_start_hz = 28.0, .low_mask_width_hz = 25.0,
-        .windows_per_second = 8U, .protect_marked_chords = 1,
-        .require_pitch_for_rumble = 1
+        .min_window_seconds = 0.125, .protect_marked_spectrum = 1,
+        .protect_low_notes = 1
     }
 };
 
@@ -62,6 +63,8 @@ typedef struct IsolationWorkspace {
     double *window;
     double *power;
     double *normalizer;
+    double *low_peaks;
+    double *marked_background;
     HwaDspComplex *spectrum;
     HwaDspComplex *autocorrelation;
     IsolationFrame *frames;
@@ -205,6 +208,20 @@ static int measure_frames(IsolationWorkspace *work,
             }
         }
         if (frame->power == 0.0) continue;
+        if (work->low_peaks != NULL) {
+            size_t first_low_bin = (size_t)ceil(work->profile->min_pitch_hz / work->bin_hz);
+            size_t last_low_bin = (size_t)(250.0 / work->bin_hz);
+            double peak_power = 0.05 * frame->power;
+            /* Low partials can stay stable even when bow noise hides a pitch. */
+            for (bin = first_low_bin; bin <= last_low_bin; ++bin) {
+                if (work->power[bin] > peak_power &&
+                    work->power[bin] > work->power[bin - 1U] &&
+                    work->power[bin] >= work->power[bin + 1U]) {
+                    work->low_peaks[index] = (double)bin * work->bin_hz;
+                    peak_power = work->power[bin];
+                }
+            }
+        }
         if (measure_pitch(work, frame, 0.0) != 0) return -1;
         if (frame->pitch_hz > 0.0) {
             frame->off_harmonic_power = off_harmonic_power(work, frame->pitch_hz);
@@ -226,13 +243,18 @@ static int pitches_agree(double first, double second)
 }
 
 static const IsolationFrame *nearby_pitch(const IsolationWorkspace *work,
-                                          size_t index, int forward)
+                                          size_t index, int forward, int marked)
 {
+    int cello_auto = work->profile->protect_low_notes && !marked;
+    size_t limit = cello_auto ? work->sample_rate / (8U * work->hop) :
+                               PITCH_CONTEXT_FRAMES;
     size_t step;
-    for (step = 1U; step <= PITCH_CONTEXT_FRAMES; ++step) {
+    for (step = 1U; step <= limit; ++step) {
         const IsolationFrame *other;
         if (forward ? step >= work->grid_count - index : step > index) break;
         other = &work->frames[forward ? index + step : index - step];
+        if (cello_auto && other->power <= 0.06 * work->frames[index].power)
+            break;
         if (likely_instrument_pitch(other)) return other;
     }
     return NULL;
@@ -276,8 +298,8 @@ static void isolation_gain(const IsolationWorkspace *work, size_t index,
                            double *low_strength)
 {
     const IsolationFrame *frame = &work->frames[index];
-    const IsolationFrame *left = nearby_pitch(work, index, 0);
-    const IsolationFrame *right = nearby_pitch(work, index, 1);
+    const IsolationFrame *left = nearby_pitch(work, index, 0, marked);
+    const IsolationFrame *right = nearby_pitch(work, index, 1, marked);
     double matched_pitch = 0.0;
     double surrounding_off_harmonic_power = 0.0;
     *pitch_hz = frame->pitch_hz;
@@ -291,6 +313,13 @@ static void isolation_gain(const IsolationWorkspace *work, size_t index,
             fmax(left->off_harmonic_power, right->off_harmonic_power);
     }
     if (marked) {
+        if (work->profile->protect_marked_spectrum) {
+            *pitch_hz = likely_instrument_pitch(frame) ? frame->pitch_hz : 0.0;
+            /* A pitch that emerges after this window can be a bow attack. */
+            *strength = left == NULL && right != NULL ? 0.10 : 0.82;
+            *low_strength = 0.88;
+            return;
+        }
         if (matched_pitch > 0.0 && !likely_instrument_pitch(frame) &&
             !pitches_agree(*pitch_hz, matched_pitch)) {
             *pitch_hz = matched_pitch;
@@ -303,7 +332,7 @@ static void isolation_gain(const IsolationWorkspace *work, size_t index,
     /* Strong low-frequency events can sit between notes as well as over them. */
     *low_strength = 0.88 * smooth_step((frame->low_power / frame->power - 0.10) / 0.25);
     /* Unpitched low energy can be part of a cello attack. */
-    if (work->profile->require_pitch_for_rumble && matched_pitch == 0.0 &&
+    if (work->profile->protect_low_notes && matched_pitch == 0.0 &&
         !likely_instrument_pitch(frame))
         *low_strength = 0.0;
     if (matched_pitch == 0.0 ||
@@ -354,6 +383,7 @@ static int overlaps_short_note(const IsolationWorkspace *work, size_t index)
     size_t last = index + overlap < work->grid_count ? index + overlap : work->grid_count - 1U;
     double minimum_power = 0.12 * work->frames[index].power;
     double previous_pitch = 0.0;
+    double previous_low_peak = 0.0;
     size_t i;
 
     /* Short notes spread energy across extra bins, but their pitch stays steady. */
@@ -362,12 +392,20 @@ static int overlaps_short_note(const IsolationWorkspace *work, size_t index)
         double pitch = frame->power >= minimum_power && frame->confidence >= 0.65 &&
             frame->off_harmonic_power <= 0.48 * frame->power ? frame->pitch_hz : 0.0;
         if (pitches_agree(previous_pitch, pitch)) return 1;
+        if (work->low_peaks != NULL) {
+            double low_peak = frame->power >= minimum_power ? work->low_peaks[i] : 0.0;
+            if (previous_low_peak > 0.0 && low_peak > 0.0 &&
+                fabs(previous_low_peak - low_peak) <= work->bin_hz)
+                return 1;
+            previous_low_peak = low_peak;
+        }
         previous_pitch = pitch;
     }
     return 0;
 }
 
-static double rest_disturbance_strength(const IsolationWorkspace *work, size_t index)
+static double rest_disturbance_strength(const IsolationWorkspace *work, size_t index,
+                                        double *low_strength)
 {
     const IsolationFrame *frame = &work->frames[index];
     /* Limit automatic cleanup here to bursts bracketed by quiet within 600 ms. */
@@ -382,6 +420,11 @@ static double rest_disturbance_strength(const IsolationWorkspace *work, size_t i
     right = find_quiet_shoulder(work, index, limit - left, 1, &right_floor);
     if (right == 0U || overlaps_short_note(work, index)) return 0.0;
     floor = fmax(left_floor, right_floor);
+    /* A burst dominated by sub-cello frequencies can be filtered even if
+     * no note provides pitch evidence and the burst is too short for broadband cleanup. */
+    if (work->profile->protect_low_notes && frame->low_power >= 0.65 * frame->power) {
+        *low_strength = fmax(*low_strength, 0.88 * (1.0 - sqrt(floor / frame->power)));
+    }
     for (i = index - left + 1U; i < index + right; ++i) {
         double power = fmax(0.0, work->frames[i].power - floor);
         total_power += power;
@@ -471,6 +514,57 @@ static int has_marked_pitch_conflict(IsolationWorkspace *work,
     return 1;
 }
 
+static double marked_broadband_weight(const IsolationWorkspace *work, size_t bin,
+                                       int reliable_pitch)
+{
+    size_t half = work->length / 2U;
+    double left, right, floor, weight;
+    if (bin < 4U || bin + 4U > half || work->power[bin] == 0.0) return 0.0;
+    left = fmin(work->power[bin - 3U], work->power[bin - 4U]);
+    right = fmin(work->power[bin + 3U], work->power[bin + 4U]);
+    /* Leave narrow spectral peaks intact, including partials of a second note. */
+    floor = fmin(left, right);
+    weight = smooth_step((floor / work->power[bin] - 0.04) / 0.21);
+    /* An uncertain cello attack can carry broad energy below its upper partials. */
+    if (!reliable_pitch) {
+        double frequency = (double)bin * work->bin_hz;
+        weight *= smooth_step((frequency - 400.0) / 1200.0);
+    }
+    return weight;
+}
+
+static int measure_marked_background(IsolationWorkspace *work,
+                                      const HwaIsolationRange *ranges,
+                                      size_t range_count, size_t range)
+{
+    size_t half = work->length / 2U;
+    uint64_t before = range > 0U ? ranges[range - 1U].end_sample : 0U;
+    uint64_t after = range + 1U < range_count ?
+        ranges[range + 1U].start_sample : work->frame_count;
+    size_t starts[2];
+    size_t count = 0U;
+    size_t index;
+    if (ranges[range].start_sample - before >= work->length) {
+        starts[count++] = (size_t)ranges[range].start_sample - work->length + work->padding;
+    }
+    if (after - ranges[range].end_sample >= work->length) {
+        starts[count++] = (size_t)ranges[range].end_sample + work->padding;
+    }
+    memset(work->marked_background, 0, (half + 1U) * sizeof(*work->marked_background));
+    for (index = 0U; index < count; ++index) {
+        size_t bin;
+        if (spectral_frame(work, starts[index]) != 0) return -1;
+        for (bin = 0U; bin <= half; ++bin) {
+            /* Include an adjacent bin on either side to allow slight pitch changes. */
+            double power = work->power[bin];
+            if (bin > 0U) power = fmax(power, work->power[bin - 1U]);
+            if (bin < half) power = fmax(power, work->power[bin + 1U]);
+            work->marked_background[bin] = fmax(work->marked_background[bin], power);
+        }
+    }
+    return 0;
+}
+
 static int add_correction(IsolationWorkspace *work, size_t start,
                           double pitch_hz, double alternate_pitch_hz,
                           double strength, double low_strength,
@@ -483,6 +577,8 @@ static int add_correction(IsolationWorkspace *work, size_t start,
     unsigned channel;
     for (bin = 0U; bin <= half; ++bin) {
         double harmonic = period_bins > 0.0 ? harmonic_weight(bin, period_bins, 1.0) : 0.0;
+        double weight = work->marked_background != NULL ?
+            marked_broadband_weight(work, bin, pitch_hz > 0.0) : 1.0;
         double low = 1.0 - smooth_step(((double)bin * work->bin_hz -
                                         work->profile->low_mask_start_hz) /
                                        work->profile->low_mask_width_hz);
@@ -490,7 +586,11 @@ static int add_correction(IsolationWorkspace *work, size_t start,
             /* Short notes occupy wider bins than a sustained pitch. */
             harmonic = fmax(harmonic, harmonic_weight(bin, alternate_period, 1.8));
         }
-        double correction = -fmax(strength * (1.0 - harmonic), low_strength * low);
+        double correction = -fmax(strength * (1.0 - harmonic) * weight, low_strength * low);
+        if (work->marked_background != NULL && work->power[bin] > 0.0) {
+            double background = work->marked_background[bin] / work->power[bin];
+            correction *= smooth_step((1.0 - 1.4 * background) / 0.82);
+        }
         for (channel = 0U; channel < work->channels; ++channel) {
             HwaDspComplex *spectrum = work->spectrum + work->length * channel;
             spectrum[bin].real *= correction;
@@ -523,6 +623,7 @@ static int accumulate_correction(IsolationWorkspace *work,
                                  size_t range_count, double *output)
 {
     size_t range = 0U;
+    size_t measured_range = SIZE_MAX;
     size_t index;
     for (index = 0U; index < work->grid_count; ++index) {
         size_t start = index * work->hop;
@@ -533,10 +634,14 @@ static int accumulate_correction(IsolationWorkspace *work,
         if (!frame_intersects_ranges(work, start, 0U, ranges, range_count, &range))
             continue;
         if (work->frames[index].power == 0.0) continue;
+        if (work->marked_background != NULL && measured_range != range) {
+            if (measure_marked_background(work, ranges, range_count, range) != 0) return -1;
+            measured_range = range;
+        }
         if (spectral_frame(work, start) != 0) return -1;
         isolation_gain(work, index, range_count != 0U, &pitch_hz, &strength, &low_strength);
         if (range_count == 0U) {
-            double rest_strength = rest_disturbance_strength(work, index);
+            double rest_strength = rest_disturbance_strength(work, index, &low_strength);
             if (rest_strength > 0.0) {
                 strength = rest_strength;
                 pitch_hz = 0.0;
@@ -602,8 +707,11 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
 {
     IsolationWorkspace work = {0};
     size_t fixed_work;
+    size_t per_frame_work;
     size_t sample_count;
     size_t index;
+    int use_marked_background;
+    int measure_low_peaks;
     int result = -1;
     if (input == NULL || output == NULL || input == output || frame_count == 0U ||
         (channels != 1U && channels != 2U) ||
@@ -633,13 +741,16 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
         }
     }
     work.profile = &isolation_profiles[instrument];
+    use_marked_background = range_count != 0U && work.profile->protect_marked_spectrum;
+    measure_low_peaks = work.profile->protect_low_notes && range_count == 0U;
     work.input = input;
     work.frame_count = frame_count;
     work.channels = channels;
     work.sample_rate = sample_rate_hz;
     work.length = 512U;
     /* Keep enough cycles of the lowest notes in each power-of-two window. */
-    while (work.length * work.profile->windows_per_second < sample_rate_hz) work.length *= 2U;
+    while ((double)work.length < work.profile->min_window_seconds * sample_rate_hz)
+        work.length *= 2U;
     work.hop = work.length / 4U;
     /* Include every overlapping window at both ends of the recording. */
     work.padding = work.hop * 3U;
@@ -647,9 +758,13 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     work.grid_count = (frame_count + work.padding - 1U) / work.hop + 1U;
     fixed_work = (work.length + work.length / 2U + 1U + work.hop) * sizeof(double) +
                  work.length * (channels + 1U) * sizeof(HwaDspComplex);
+    if (use_marked_background)
+        fixed_work += (work.length / 2U + 1U) * sizeof(*work.marked_background);
+    per_frame_work = sizeof(*work.frames);
+    if (measure_low_peaks) per_frame_work += sizeof(*work.low_peaks);
     if (fixed_work > max_work_bytes ||
-        work.grid_count > SIZE_MAX / sizeof(*work.frames) ||
-        work.grid_count > (max_work_bytes - fixed_work) / sizeof(*work.frames)) {
+        work.grid_count > SIZE_MAX / per_frame_work ||
+        work.grid_count > (max_work_bytes - fixed_work) / per_frame_work) {
         hwa_set_error(error, error_size, "instrument isolation exceeds the work limit");
         return -1;
     }
@@ -659,8 +774,15 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     work.spectrum = malloc(work.length * channels * sizeof(*work.spectrum));
     work.autocorrelation = malloc(work.length * sizeof(*work.autocorrelation));
     work.frames = calloc(work.grid_count, sizeof(*work.frames));
-    if (work.window == NULL || work.power == NULL || work.normalizer == NULL ||
-        work.spectrum == NULL || work.autocorrelation == NULL || work.frames == NULL) {
+    if (measure_low_peaks) work.low_peaks = calloc(work.grid_count, sizeof(*work.low_peaks));
+    if (use_marked_background) {
+        work.marked_background = malloc((work.length / 2U + 1U) *
+                                        sizeof(*work.marked_background));
+    }
+    if ((use_marked_background && work.marked_background == NULL) ||
+        work.window == NULL || work.power == NULL || work.normalizer == NULL ||
+        work.spectrum == NULL || work.autocorrelation == NULL || work.frames == NULL ||
+        (measure_low_peaks && work.low_peaks == NULL)) {
         hwa_set_error(error, error_size, "cannot allocate instrument isolation workspace");
         goto cleanup;
     }
@@ -679,6 +801,8 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
 transform_error:
     hwa_set_error(error, error_size, "instrument isolation spectral transform failed");
 cleanup:
+    free(work.marked_background);
+    free(work.low_peaks);
     free(work.window);
     free(work.power);
     free(work.normalizer);

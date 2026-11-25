@@ -38,7 +38,7 @@ static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
         "viola", "audio/viola.wav", "hwa.viola-isolation", "viola-isolation-2"
     },
     [HWA_ISOLATION_CELLO] = {
-        "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-1"
+        "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-2"
     }
 };
 

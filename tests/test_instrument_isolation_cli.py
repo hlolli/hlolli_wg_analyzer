@@ -476,8 +476,8 @@ class CelloIsolation(InstrumentIsolationTest):
     instrument = "cello"
 
     @staticmethod
-    def bowed_note(rate, frames, hz, amplitude):
-        envelope_edge = rate // 25
+    def bowed_note(rate, frames, hz, amplitude, edge_ms=40):
+        envelope_edge = rate * edge_ms // 1000
         samples = []
         for i in range(frames):
             phase = math.tau * hz * i / rate
@@ -486,6 +486,28 @@ class CelloIsolation(InstrumentIsolationTest):
                     + 0.2 * math.sin(3 * phase) + 0.1 * math.sin(4 * phase))
             samples.append(round(amplitude * envelope * tone))
         return samples
+
+    @staticmethod
+    def textured_c2(rate, frames, attack, release, bow_level, bow_decay_seconds=None):
+        rng = random.Random(123)
+        samples = []
+        for i in range(frames):
+            t = i / rate
+            envelope = min(1.0, t / attack, (frames - i) / (rate * release))
+            phase = math.tau * 65.41 * t
+            tone = sum(gain * math.sin(harmonic * phase)
+                       for harmonic, gain in enumerate((0.7, 1.0, 0.42, 0.32), 1))
+            bow_envelope = 1.0 if bow_decay_seconds is None else math.exp(-t / bow_decay_seconds)
+            bow = bow_level * rng.uniform(-1.0, 1.0) * bow_envelope
+            samples.append(round(4000 * envelope * (tone + bow)))
+        return samples
+
+    def isolate_mono(self, samples, rate, span=None):
+        write_pcm(self.source, samples, rate, 1)
+        flags = () if span is None else ("--disturbance-samples", f"{span[0]}:{span[1]}")
+        result = self.isolate(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [value * 32768 for value in read_float_pcm(self.output / "audio" / "cello.wav")]
 
     def test_stereo_cello_bundle_preserves_source_clock(self):
         rate, frames = 48000, 14603
@@ -556,6 +578,43 @@ class CelloIsolation(InstrumentIsolationTest):
         error = sum((estimate[i] * 32768 - samples[i]) ** 2 for i in note)
         self.assertLess(error, signal / 10000)
 
+    def test_automatic_cleanup_preserves_a_short_textured_c2_between_rests(self):
+        rate = 48000
+        start = rate * 52 // 100
+        note = self.textured_c2(rate, rate // 10, 0.012, 0.012, 1.0)
+        estimate = self.isolate_mono([0] * start + note + [0] * rate, rate)
+        signal = sum(value ** 2 for value in note)
+        error = sum((value - estimate[i]) ** 2 for i, value in enumerate(note, start))
+        self.assertLess(error, 0.03 * signal)
+
+    def test_automatic_cleanup_preserves_a_short_c2_between_g2_notes(self):
+        rate = 22050
+        g2 = self.bowed_note(rate, rate * 430 // 1000, 98.0, 6500, edge_ms=17)
+        c2 = self.bowed_note(rate, rate * 45 // 1000, 65.41, 6500, edge_ms=10)
+        gap = [0] * (rate * 130 // 1000)
+        padding = [0] * (rate * 110 // 1000)
+        prefix = padding + g2 + gap
+        estimate = self.isolate_mono(prefix + c2 + gap + g2 + padding, rate)
+        signal = sum(value ** 2 for value in c2)
+        error = sum((value - estimate[i]) ** 2 for i, value in enumerate(c2, len(prefix)))
+        self.assertLess(error, 0.03 * signal)
+
+    def test_automatic_cleanup_reduces_a_low_thump_in_a_rest(self):
+        rate = 22050
+        clean = (self.bowed_note(rate, rate // 2, 65.406, 6900, edge_ms=60)
+                 + [0] * rate + self.bowed_note(rate, rate // 2, 98.0, 6900, edge_ms=60))
+        start, length = round(0.95 * rate), rate // 10
+        thump = [round(0.35 * 32768 * math.sin(math.pi * i / length) ** 2
+                       * math.sin(math.tau * 32.0 * i / rate)) for i in range(length)]
+        mixed = clean.copy()
+        mixed[start:start + length] = thump
+        estimate = self.isolate_mono(mixed, rate)
+        self.assertLess(sum(value ** 2 for value in estimate[start:start + length]),
+                        0.5 * sum(value ** 2 for value in thump))
+        note_samples = (*range(rate // 2), *range(3 * rate // 2, 2 * rate))
+        note_error = sum((estimate[i] - clean[i]) ** 2 for i in note_samples)
+        self.assertLess(note_error, 0.02 * sum(clean[i] ** 2 for i in note_samples))
+
     def test_cleanup_improves_cello_with_recorded_disturbances(self):
         rate = 22050
         clean = (self.bowed_note(rate, rate * 5 // 4, 65.41, 7000)
@@ -587,23 +646,41 @@ class CelloIsolation(InstrumentIsolationTest):
                     stem_error = sum((estimate[i] * 32768 - clean[i]) ** 2 for i in frames)
                     self.assertLess(stem_error, mixture_error)
 
-    def test_marked_cleanup_preserves_a_low_double_stop_with_a_quiet_cough(self):
+    def test_marked_cleanup_preserves_a_textured_c2_attack(self):
         rate = 22050
-        start = rate // 3
+        note = self.textured_c2(rate, rate * 3 // 4, 0.014, 0.04, 2.0, bow_decay_seconds=0.085)
+        clean = [0] * (rate // 2) + note + [0] * rate
+        start = rate // 2 - 100
         cough = read_fixture("cough")
-        end = start + len(cough)
-        clean = [a + b for a, b in zip(self.bowed_note(rate, rate, 65.41, 6500),
-                                       self.bowed_note(rate, rate, 98.0, 4200))]
         mixed = clean.copy()
         for i, sample in enumerate(cough, start):
-            mixed[i] += round(sample / 8)
-        write_pcm(self.source, mixed, rate, 1)
-        result = self.isolate("--disturbance-samples", f"{start - 256}:{end + 256}")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        estimate = read_float_pcm(self.output / "audio" / "cello.wav")
-        mixture_error = sum((mixed[i] - clean[i]) ** 2 for i in range(start, end))
-        estimate_error = sum((estimate[i] * 32768 - clean[i]) ** 2 for i in range(start, end))
-        self.assertLess(estimate_error, 1.25 * mixture_error)
+            mixed[i] += sample
+        span = (start - 256, start + len(cough) + 256)
+        estimate = self.isolate_mono(mixed, rate, span)
+        self.assertLess(sum((estimate[i] - clean[i]) ** 2 for i in range(*span)),
+                        1.02 * sum(sample ** 2 for sample in cough))
+
+    def test_marked_cleanup_reduces_disturbances_over_a_low_double_stop(self):
+        rate = 22050
+        frames = rate * 2
+        start = rate * 2 // 3
+        clean = [a + b for a, b in zip(self.bowed_note(rate, frames, 65.406, 6900, edge_ms=60),
+                                       self.bowed_note(rate, frames, 98.0, 5300, edge_ms=60))]
+        length = rate * 24 // 100
+        thump = [round(3000 * math.sin(math.pi * i / length) ** 2
+                       * math.sin(math.tau * 31.0 * i / rate)) for i in range(length)]
+        for kind, noise in (("cough", read_fixture("cough")), ("thump", thump)):
+            with self.subTest(kind=kind):
+                self.output = self.root / f"{kind}.hwa-events"
+                mixed = clean.copy()
+                for i, sample in enumerate(noise, start):
+                    mixed[i] += sample
+                span = (start - 441, start + len(noise) + 441)
+                estimate = self.isolate_mono(mixed, rate, span)
+                self.assertLess(sum((estimate[i] - clean[i]) ** 2 for i in range(*span)),
+                                0.95 * sum(sample ** 2 for sample in noise))
+                self.assertEqual(estimate[:span[0]], clean[:span[0]])
+                self.assertEqual(estimate[span[1]:], clean[span[1]:])
 
 
 if __name__ == "__main__":
