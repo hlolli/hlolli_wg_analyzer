@@ -2,6 +2,7 @@
 #include "musicxml_internal.h"
 #include "musicxml_zip.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@ typedef struct XMLMeasure {
     size_t head, tail, ending_end;
     unsigned repeat_start, repeat_times, ending_mask, ending_stop, visits;
     const char *segno, *coda, *dalsegno, *tocoda;
-    int dacapo, fine;
+    int dacapo, fine, has_start_tempo;
     double jump_at, initial_tempo;
     const char *initial_tempo_source;
 } XMLMeasure;
@@ -1022,6 +1023,8 @@ static int controls(XMLReader *r, const HWAMusicXMLEvent *parent, double playbac
         event.value = fmin(127.0, offset * 0.9);
         event.mark = "velocity";
         event.interpretation = HWA_MUSICXML_PLAYBACK_DATA;
+        event.source_offset = r->nodes[sound].start;
+        event.source_size = r->nodes[sound].end - r->nodes[sound].start;
         event.sequence = ++sequence;
         if (append(r, &event, measure) != 0) {
             return -1;
@@ -1118,7 +1121,6 @@ static int note_expression(XMLReader *r, HWAMusicXMLEvent *event, size_t n, size
                            double divisions)
 {
     size_t notation, ornament = 0U, grace = child(r, n, "grace");
-    double gate = 1.0;
     event->written_duration_beats = event->duration_beats;
     event->grace_previous = event->grace_following = event->grace_make = -1.0;
     if (*attribute(r, n, "dynamics") != '\0') {
@@ -1205,9 +1207,29 @@ static int note_expression(XMLReader *r, HWAMusicXMLEvent *event, size_t n, size
             }
         }
     }
-    if (!r->limits.performance || event->kind != HWA_MUSICXML_NOTE) {
-        return append(r, event, measure);
+    if (r->limits.performance && event->kind == HWA_MUSICXML_NOTE && ornament != 0U) {
+        if (ornament > UINT_MAX) {
+            return fail(r, "ornament node index exceeds the supported range");
+        }
+        if (strcmp(attribute(r, ornament, "accelerate"), "yes") == 0 ||
+            *attribute(r, ornament, "second-beat") != '\0' ||
+            *attribute(r, ornament, "last-beat") != '\0' ||
+            (*attribute(r, ornament, "two-note-turn") != '\0' &&
+             strcmp(attribute(r, ornament, "two-note-turn"), "none") != 0)) {
+            r->score->unrendered_marks++;
+        }
+        /* Carry the XML node through unfolding. Rendering assigns the final sequence. */
+        event->sequence = (unsigned)ornament;
     }
+    return append(r, event, measure);
+}
+
+static int render_note_timing(XMLReader *r, size_t index)
+{
+    HWAMusicXMLEvent note = r->score->events[index], *event = &note;
+    size_t ornament = event->sequence;
+    double gate = 1.0;
+    event->sequence = 0U;
     if (event->articulations & HWA_MUSICXML_STACCATISSIMO) {
         gate = 0.25;
     } else if (event->articulations & HWA_MUSICXML_STACCATO) {
@@ -1225,6 +1247,7 @@ static int note_expression(XMLReader *r, HWAMusicXMLEvent *event, size_t n, size
                                                    : 3.0;
         double interval = 2.0, fraction = strstr(s, "delayed") ? 0.5 : 0.0;
         unsigned k, total;
+        r->pos = r->nodes[ornament].start;
         if (*step != '\0') {
             if (strcmp(step, "half") == 0) {
                 interval = 1.0;
@@ -1238,21 +1261,12 @@ static int note_expression(XMLReader *r, HWAMusicXMLEvent *event, size_t n, size
             count > 1024.0 || floor(count) != count) {
             return fail(r, "ornament note count must be 2..1024");
         }
-        if (strcmp(attribute(r, ornament, "accelerate"), "yes") == 0 ||
-            *attribute(r, ornament, "second-beat") != '\0' ||
-            *attribute(r, ornament, "last-beat") != '\0' ||
-            (*attribute(r, ornament, "two-note-turn") != '\0' &&
-             strcmp(attribute(r, ornament, "two-note-turn"), "none") != 0)) {
-            r->score->unrendered_marks++;
-        }
         total = (unsigned)count;
         if (fraction > 0.0) {
             HWAMusicXMLEvent held = *event;
             held.duration_beats *= fraction;
             held.interpretation |= HWA_MUSICXML_BASELINE_POLICY;
-            if (append(r, &held, measure) != 0) {
-                return -1;
-            }
+            r->score->events[index] = held;
         }
         for (k = 0U; k < total; k++) {
             HWAMusicXMLEvent played = *event;
@@ -1279,14 +1293,34 @@ static int note_expression(XMLReader *r, HWAMusicXMLEvent *event, size_t n, size
             if (played.midi_pitch < 0.0 || played.midi_pitch > 127.0) {
                 return fail(r, "ornament pitch outside MIDI range");
             }
-            if (append(r, &played, measure) != 0) {
+            if (k == 0U && fraction == 0.0) {
+                r->score->events[index] = played;
+            } else if (append(r, &played, event->measure_index) != 0) {
                 return -1;
             }
         }
         return 0;
     }
     event->duration_beats *= gate;
-    return append(r, event, measure);
+    r->score->events[index] = *event;
+    return 0;
+}
+
+static int render_timing(XMLReader *r)
+{
+    size_t i, count = r->score->event_count;
+    if (hwa_musicxml_grace_timing(r->score, &r->limits, r->limits.max_work_bytes - r->work,
+                                 r->error, r->error_size) != 0) {
+        return -1;
+    }
+    for (i = 0U; i < count; i++) {
+        const HWAMusicXMLEvent *event = &r->score->events[i];
+        if (event->kind == HWA_MUSICXML_NOTE && event->written_duration_beats > 0.0 &&
+            render_note_timing(r, i) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static int ending_mask(XMLReader *r, const char *s, unsigned *mask)
@@ -1426,6 +1460,15 @@ static int navigation(XMLReader *r, size_t n, size_t ordinal, double cursor)
     return 0;
 }
 
+static int prefer_equal_tempo(const HWAMusicXMLEvent *event, const HWAMusicXMLEvent *previous)
+{
+    if ((event->source_size == 0U) != (previous->source_size == 0U)) {
+        return event->source_size != 0U;
+    }
+    return strcmp(event->tempo_source, "sound") == 0 &&
+           strcmp(previous->tempo_source, "sound") != 0;
+}
+
 static int unfold(XMLReader *r)
 {
     struct RepeatFrame {
@@ -1514,26 +1557,28 @@ static int unfold(XMLReader *r)
         const char *carry_source = "default";
         for (i = 0U; i < r->measure_count; i++) {
             XMLMeasure *m = &r->measures[i];
+            const HWAMusicXMLEvent *latest = NULL;
             size_t e;
-            double last_at = -1.0, latest = carry;
-            const char *latest_source = carry_source;
             m->initial_tempo = carry;
             m->initial_tempo_source = carry_source;
             for (e = m->head; e != SIZE_MAX; e = next[e]) {
-                if (original[e].kind == HWA_MUSICXML_TEMPO) {
-                    if (original[e].start_beats == m->start) {
-                        m->initial_tempo = original[e].tempo_bpm;
-                        m->initial_tempo_source = original[e].tempo_source;
-                    }
-                    if (original[e].start_beats >= last_at) {
-                        last_at = original[e].start_beats;
-                        latest = original[e].tempo_bpm;
-                        latest_source = original[e].tempo_source;
-                    }
+                const HWAMusicXMLEvent *event = &original[e];
+                if (event->kind != HWA_MUSICXML_TEMPO) {
+                    continue;
+                }
+                if (event->start_beats == m->start) {
+                    m->has_start_tempo = 1;
+                }
+                if (latest == NULL || event->start_beats > latest->start_beats ||
+                    (event->start_beats == latest->start_beats &&
+                     (event->tempo_bpm != latest->tempo_bpm || prefer_equal_tempo(event, latest)))) {
+                    latest = event;
                 }
             }
-            carry = latest;
-            carry_source = latest_source;
+            if (latest != NULL) {
+                carry = latest->tempo_bpm;
+                carry_source = latest->tempo_source;
+            }
         }
     }
     r->score->events = NULL;
@@ -1570,7 +1615,8 @@ static int unfold(XMLReader *r)
         }
         m->visits++;
         r->score->measure_visits++;
-        if (previous_index != SIZE_MAX && previous_index + 1U != index && m->initial_tempo > 0.0) {
+        if (previous_index != SIZE_MAX && previous_index + 1U != index &&
+            !m->has_start_tempo && m->initial_tempo > 0.0) {
             HWAMusicXMLEvent restored;
             memset(&restored, 0, sizeof(restored));
             restored.kind = HWA_MUSICXML_TEMPO;
@@ -2108,14 +2154,19 @@ static int read_score(XMLReader *r, size_t root)
         if (event->kind == HWA_MUSICXML_TEMPO) {
             if (last_tempo != SIZE_MAX &&
                 r->score->events[last_tempo].start_beats == event->start_beats) {
-                if (r->score->events[last_tempo].tempo_bpm != event->tempo_bpm) {
+                HWAMusicXMLEvent *previous = &r->score->events[last_tempo];
+                if (previous->tempo_bpm != event->tempo_bpm) {
                     if (!r->limits.last_tempo_wins) {
                         r->pos = event->source_offset;
                         return fail(r, "conflicting tempos at one beat");
                     }
-                    r->score->events[last_tempo] = *event;
-                    r->score->events[last_tempo].interpretation |= HWA_MUSICXML_TEMPO_CHOICE;
+                    *previous = *event;
+                    previous->interpretation |= HWA_MUSICXML_TEMPO_CHOICE;
                     r->score->tempo_conflicts++;
+                } else if (prefer_equal_tempo(event, previous)) {
+                    unsigned choice = previous->interpretation & HWA_MUSICXML_TEMPO_CHOICE;
+                    *previous = *event;
+                    previous->interpretation |= choice;
                 }
                 continue;
             }
@@ -2263,6 +2314,9 @@ static int read_document(const unsigned char *data, size_t size, const HWAMusicX
         result = 0;
     } else {
         result = read_score(&r, root);
+        if (result == 0 && r.limits.performance) {
+            result = render_timing(&r);
+        }
         if (result == 0) {
             result = hwa_musicxml_perform(score, &r.limits, r.limits.max_work_bytes - r.work, error,
                                           error_size);

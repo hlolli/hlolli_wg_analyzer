@@ -393,6 +393,27 @@ class MusicXML(unittest.TestCase):
                          [(0, 80), (2, 120), (3, 80), (4, 120)])
         self.run_score(score(measure('<sound dacapo="yes"/>' + note())), ok=False)
 
+    def test_repeated_tempo_at_measure_start_keeps_its_xml_source(self):
+        xml = score(measure(FORWARD + '<sound id="steady" tempo="90"/>' + note() + BACKWARD))
+        tempos = [e for e in self.run_score(xml)['events'] if e['kind'] == 'tempo']
+        self.assertEqual([(e['start_beats'], e['id'], e['tempo_source']) for e in tempos],
+                         [(0, 'steady', 'sound'), (1, 'steady', 'sound')])
+        for event in tempos:
+            start = event['source_offset']
+            self.assertEqual(xml[start:start + event['source_size']],
+                             b'<sound id="steady" tempo="90"/>')
+
+    def test_equal_tempos_preserve_sound_provenance_on_repeats(self):
+        metronome = ('<direction><direction-type><metronome><beat-unit>quarter</beat-unit>'
+                     '<per-minute>90</per-minute></metronome></direction-type></direction>')
+        sound = '<sound tempo="90"/>'
+        for body in (metronome + sound, sound + metronome):
+            xml = score(measure(body + note()), measure(FORWARD + note('D'), 2),
+                        measure('<sound tempo="120"/>' + note('E') + BACKWARD, 3))
+            tempos = [e for e in self.run_score(xml)['events'] if e['kind'] == 'tempo']
+            self.assertEqual([(e['start_beats'], e['tempo_source']) for e in tempos],
+                             [(0, 'sound'), (2, 'sound'), (3, 'sound'), (4, 'sound')])
+
     def test_da_capo_and_coda(self):
         xml = score(measure(note() + '<sound fine="yes"/>'),
                     measure(note('D') + '<sound dacapo="yes"/>', 2))
@@ -413,6 +434,25 @@ class MusicXML(unittest.TestCase):
         controls = [(e['controller'], e['value']) for e in parsed['events'] if e['kind'] == 'control']
         self.assertEqual(controls, [(64, 127), (64, 63.5), (67, 127), (64, 0), (64, 127)])
 
+    def test_words_cannot_change_playback_velocity(self):
+        body = ('<direction><direction-type><words>velocity</words></direction-type></direction>'
+                + note() + '<direction><direction-type><words>ff</words></direction-type>'
+                '</direction>' + note('D'))
+        for mode, velocity in [('written', None), ('performance', 64)]:
+            with self.subTest(mode=mode):
+                parsed = self.run_score(score(measure(body)), '--score-mode', mode)
+                self.assertEqual([e['velocity'] for e in self.notes(parsed)], [velocity] * 2)
+                marks = [e for e in parsed['events'] if e['mark_tag'] == 'words']
+                self.assertEqual([(e['mark'], e['value']) for e in marks],
+                                 [('velocity', None), ('ff', None)])
+
+    def test_sound_dynamics_win_over_the_same_direction_notation(self):
+        body = ('<direction><direction-type><dynamics><p/></dynamics></direction-type>'
+                '<sound dynamics="100"/></direction>' + note())
+        parsed = self.run_score(score(measure(body)), '--score-mode', 'performance')
+        self.assertEqual(self.notes(parsed)[0]['velocity'], 90)
+        self.assertTrue(any(e['mark_tag'] == 'p' for e in parsed['events']))
+
     def test_grace_ornaments_and_articulations(self):
         grace = '<note><grace steal-time-following="25"/><pitch><step>D</step><octave>4</octave></pitch></note>'
         xml = score(measure(grace + note(duration=2) + note('E', extra='<notations><articulations><staccato/><accent/></articulations></notations>')
@@ -427,6 +467,25 @@ class MusicXML(unittest.TestCase):
         self.assertEqual([e['written_duration_beats'] for e in notes[3:]], [1]*4)
         self.assertGreater(performed['interpreted_events'], 0)
         self.assertEqual(self.notes(written)[0]['velocity'], None)
+
+    def test_grace_borrows_before_articulation_and_ornament_playback(self):
+        grace = ('<note><grace steal-time-{side}="25"/>'
+                 '<pitch><step>D</step><octave>4</octave></pitch></note>')
+        staccato = '<notations><articulations><staccato/></articulations></notations>'
+        trill = '<notations><ornaments><trill-mark beats="4"/></ornaments></notations>'
+        cases = [
+            (grace.format(side='following') + note(duration=2, extra=staccato),
+             [(0, .5), (.5, .75)]),
+            (grace.format(side='following') + note(duration=2, extra=trill),
+             [(0, .5), (.5, .375), (.875, .375), (1.25, .375), (1.625, .375)]),
+            (note(duration=2, extra=trill) + grace.format(side='previous'),
+             [(0, .375), (.375, .375), (.75, .375), (1.125, .375), (1.5, .5)]),
+        ]
+        for body, timing in cases:
+            with self.subTest(timing=timing):
+                parsed = self.run_score(score(measure(body)), '--score-mode', 'performance')
+                self.assertEqual([(e['start_beats'], e['duration_beats'])
+                                  for e in self.notes(parsed)], timing)
 
     def test_voice_dynamics_precedence_and_part_reset(self):
         body = ('<direction><voice>1</voice><sound dynamics="40"/></direction>'
@@ -468,14 +527,14 @@ class MusicXML(unittest.TestCase):
     def test_grace_group_borrows_from_previous_chord(self):
         grace = ('<note><grace steal-time-previous="25"/>{chord}'
                  '<pitch><step>{step}</step><octave>4</octave></pitch></note>')
-        xml = score(measure(note(duration=2) + note('E', duration=2, before='<chord/>')
+        xml = score(measure(note(duration=2) + note('E', before='<chord/>')
                             + grace.format(step='D', chord='')
                             + grace.format(step='F', chord='<chord/>')
                             + grace.format(step='G', chord='') + note('B')))
         parsed = self.run_score(xml, '--score-mode', 'performance')
         notes = self.notes(parsed)
         self.assertEqual([(e['midi_pitch'], e['start_beats'], e['duration_beats']) for e in notes],
-                         [(60, 0, 1.5), (64, 0, 1.5), (62, 1.5, .25),
+                         [(60, 0, 1.5), (64, 0, 1), (62, 1.5, .25),
                           (65, 1.5, .25), (67, 1.75, .25), (71, 2, 1)])
         for event in notes[2:5]:
             self.assertEqual(event['written_start_beats'], 2)
@@ -492,6 +551,8 @@ class MusicXML(unittest.TestCase):
             (note() + grace.format(timing='steal-time-following="25"'), 'no following note'),
             (note() + grace.format(timing='steal-time-previous="25"')
              + grace.format(timing='steal-time-previous="50"'), 'conflicting timing attributes'),
+            (grace.format(timing='make-time="1"') + grace.format(timing='make-time="2"')
+             + note(), 'conflicting timing attributes'),
         ]
         for body, error in cases:
             with self.subTest(error=error):

@@ -1,4 +1,5 @@
 #include "musicxml_report.h"
+#include "musicxml_internal.h"
 #include "output.h"
 #include "numeric_locale.h"
 #include <string.h>
@@ -60,8 +61,8 @@ static int write_event(FILE *stream, const HWAMusicXMLEvent *event, size_t index
                 ((event->kind == HWA_MUSICXML_NOTE || event->kind == HWA_MUSICXML_CUE) &&
                  event->written_duration_beats == 0.0);
     int has_value = event->kind == HWA_MUSICXML_CONTROL ||
-                    (event->kind == HWA_MUSICXML_MARK && event->mark != NULL &&
-                     strcmp(event->mark, "velocity") == 0);
+                    (event->kind == HWA_MUSICXML_MARK &&
+                     (event->interpretation & HWA_MUSICXML_PLAYBACK_DATA));
     size_t field;
     const char *kind = event->kind >= HWA_MUSICXML_NOTE && event->kind <= HWA_MUSICXML_CUE
                            ? kinds[event->kind]

@@ -20,6 +20,9 @@
 /* Beat order, then tempo before other events, then source order. */
 int hwa_musicxml_event_order(const void *left, const void *right);
 
+int hwa_musicxml_grace_timing(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
+                             uint64_t work_bytes, char *error, size_t error_size);
+
 int hwa_musicxml_perform(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
                          uint64_t work_bytes, char *error, size_t error_size);
 

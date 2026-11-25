@@ -95,11 +95,11 @@ static const char *apply_dynamics(HWAMusicXMLEvent **refs, size_t count,
         }
         if (event->kind == HWA_MUSICXML_MARK &&
             !(event->interpretation & HWA_MUSICXML_CUE_NOTATION)) {
-            if (strcmp(event->mark, "velocity") == 0) {
+            if (event->interpretation & HWA_MUSICXML_PLAYBACK_DATA) {
                 velocity = event->value;
                 interpretation = HWA_MUSICXML_PLAYBACK_DATA;
-            } else if (options->performance) {
-                velocity = dynamic_velocity(event->mark);
+            } else if (options->performance && event->mark_tag != NULL) {
+                velocity = dynamic_velocity(event->mark_tag);
                 interpretation = HWA_MUSICXML_BASELINE_POLICY;
             }
         }
@@ -189,7 +189,19 @@ static const char *apply_grace_timing(HWAMusicXMLScore *score, HWAMusicXMLEvent 
             following = refs[end];
         }
         if (i > 0U && same_voice(refs[i - 1U], grace)) {
-            previous = refs[i - 1U];
+            k = i - 1U;
+            while (k > 0U && refs[k]->chord && same_voice(refs[k - 1U], grace) &&
+                   refs[k - 1U]->start_beats == refs[k]->start_beats) {
+                k--;
+            }
+            previous = refs[k];
+        }
+        for (k = i + 1U; k < end; k++) {
+            if (refs[k]->grace_previous != grace->grace_previous ||
+                refs[k]->grace_following != grace->grace_following ||
+                refs[k]->grace_make != grace->grace_make) {
+                return "grace group has conflicting timing attributes";
+            }
         }
         if (grace->grace_make >= 0.0) {
             score->unrendered_marks++;
@@ -218,13 +230,6 @@ static const char *apply_grace_timing(HWAMusicXMLScore *score, HWAMusicXMLEvent 
                 score->unrendered_marks++;
                 i = end;
                 continue;
-            }
-        }
-        for (k = i + 1U; k < end; k++) {
-            if (refs[k]->grace_previous != grace->grace_previous ||
-                refs[k]->grace_following != grace->grace_following ||
-                refs[k]->grace_make != grace->grace_make) {
-                return "grace group has conflicting timing attributes";
             }
         }
         start_beat = grace->start_beats - previous_beats;
@@ -277,25 +282,53 @@ static const char *apply_grace_timing(HWAMusicXMLScore *score, HWAMusicXMLEvent 
     return NULL;
 }
 
-int hwa_musicxml_perform(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
-                         uint64_t work_bytes, char *error, size_t error_size)
+static HWAMusicXMLEvent **expression_refs(size_t count, uint64_t work_bytes,
+                                         char *error, size_t error_size)
 {
     HWAMusicXMLEvent **refs;
-    size_t i, count = score->event_count;
-    const char *failure;
     if (count > SIZE_MAX / sizeof(*refs) || (uint64_t)count * sizeof(*refs) > work_bytes ||
         (refs = malloc(count * sizeof(*refs))) == NULL) {
         hwa_set_error(error, error_size,
                       "MusicXML expression work byte limit or allocation failure");
+        return NULL;
+    }
+    return refs;
+}
+
+int hwa_musicxml_grace_timing(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
+                             uint64_t work_bytes, char *error, size_t error_size)
+{
+    HWAMusicXMLEvent **refs;
+    const char *failure;
+    if (score->grace_count == 0U) {
+        return 0;
+    }
+    refs = expression_refs(score->event_count, work_bytes, error, error_size);
+    if (refs == NULL) {
+        return -1;
+    }
+    failure = apply_grace_timing(score, refs, options);
+    free(refs);
+    if (failure != NULL) {
+        hwa_set_error(error, error_size, "MusicXML playback: %s", failure);
+        return -1;
+    }
+    return 0;
+}
+
+int hwa_musicxml_perform(HWAMusicXMLScore *score, const HWAMusicXMLOptions *options,
+                         uint64_t work_bytes, char *error, size_t error_size)
+{
+    size_t i, count = score->event_count;
+    HWAMusicXMLEvent **refs = expression_refs(count, work_bytes, error, error_size);
+    const char *failure;
+    if (refs == NULL) {
         return -1;
     }
     for (i = 0U; i < count; i++) {
         refs[i] = &score->events[i];
     }
     failure = apply_dynamics(refs, count, options);
-    if (failure == NULL && options->performance) {
-        failure = apply_grace_timing(score, refs, options);
-    }
     free(refs);
     if (failure != NULL) {
         hwa_set_error(error, error_size, "MusicXML playback: %s", failure);

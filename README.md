@@ -310,15 +310,19 @@ Pedal controls use continuous MIDI values 0..127 and controller numbers 64
 (damper), 66 (sostenuto), and 67 (soft). Explicit `sound` values win over the
 displayed pedal mark. A pedal change emits ordered release/depress events.
 Pedal controls do not extend note key-down durations; the player applies them.
-Explicit note/sound dynamics preserve the MusicXML velocity convention.
+Explicit note and sound dynamics preserve the MusicXML velocity convention.
+Explicit sound dynamics take precedence over printed dynamics in the same
+direction.
 
 Written mode is the default. `--score-mode performance` selects a baseline,
 not a trained performer:
 
 - Grace groups borrow explicit previous/following percentages when present,
   otherwise 1/8 of the following note (or the preceding note at a phrase end).
-- Staccato uses half the note duration, staccatissimo a quarter, and accents
-  raise the chosen velocity. Dynamics from pppp through ffff use a fixed table.
+  Borrowing uses the written span before articulation and ornament playback.
+- Staccato uses half the remaining note duration, staccatissimo a quarter,
+  and accents raise the chosen velocity. Dynamics from pppp through ffff use
+  a fixed table.
 - Trills, mordents, turns and their inverted/delayed variants become note
   sequences. Trills default to eight notes per quarter beat; explicit `beats`
   and `trill-step` values take precedence. Baseline spacing is even.
