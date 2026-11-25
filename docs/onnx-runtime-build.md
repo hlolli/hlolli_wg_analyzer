@@ -61,9 +61,12 @@ runs real CPU inference, checks all six saved stems, and validates the saved
 bundle.
 
 The ONNX option builds the Basic Pitch and HTDemucs native runners into the
-command-line program. Both use `CPUExecutionProvider`; version 1 has no
-execution-provider flag. Supply an official-contract Basic Pitch ONNX model
-and a mono 22050 Hz WAVE file:
+command-line program. Both use `CPUExecutionProvider`. The CLI disables
+ONNX Runtime telemetry before starting inference. See [ONNX Runtime's
+telemetry controls](https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md).
+
+Supply an official-contract Basic Pitch ONNX model and a mono 22050 Hz WAVE
+file:
 
 ```sh
 build-onnx/hlolli-wg-analyzer infer-note-events INPUT.wav \

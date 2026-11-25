@@ -3461,6 +3461,18 @@ static int hwa_run_analyze_events(const HWACli *cli)
     return 0;
 }
 
+static int hwa_disable_onnx_telemetry(char *error, size_t error_size)
+{
+    /* Set this before CreateEnv, which can initialize telemetry itself. */
+#if defined(_WIN32)
+    if (_putenv_s("ORT_DISABLE_TELEMETRY", "1") == 0) return 0;
+#else
+    if (setenv("ORT_DISABLE_TELEMETRY", "1", 1) == 0) return 0;
+#endif
+    hwa_set_error(error, error_size, "cannot disable ONNX Runtime telemetry");
+    return -1;
+}
+
 static int hwa_run_infer_note_events(const HWACli *cli)
 {
     HWAWavReader reader;
@@ -3544,6 +3556,7 @@ static int hwa_run_infer_note_events(const HWACli *cli)
         hwa_basic_pitch_task_settings_build(
             &cli->basic_pitch_options, &settings_json,
             error, sizeof(error)) != 0 ||
+        hwa_disable_onnx_telemetry(error, sizeof(error)) != 0 ||
         hwa_inference_basic_pitch_onnx_runner_open(
             cli->model_path, cli->expected_model_sha256,
             cli->max_model_bytes, &runner, model_sha256,
@@ -3694,6 +3707,7 @@ static int hwa_run_separate_instruments(const HWACli *cli)
     if (hwa_inference_byte_source_sha256(
             &source, cli->options.max_input_bytes, source_sha256,
             error, sizeof(error)) != 0 ||
+        hwa_disable_onnx_telemetry(error, sizeof(error)) != 0 ||
         hwa_inference_htdemucs_onnx_runner_open(
             cli->model_path, cli->expected_model_sha256,
             cli->max_model_bytes, &model_runner, model_sha256,
@@ -4016,6 +4030,7 @@ static int hwa_run_infer_stem_note_events(const HWACli *cli)
     if (hwa_basic_pitch_task_settings_build(
             &cli->basic_pitch_options, &settings_json,
             error, sizeof(error)) != 0 ||
+        hwa_disable_onnx_telemetry(error, sizeof(error)) != 0 ||
         hwa_inference_basic_pitch_onnx_runner_open(
             cli->model_path, cli->expected_model_sha256,
             cli->max_model_bytes, &runner, model_sha256,

@@ -412,6 +412,10 @@ int hwa_inference_htdemucs_onnx_runner_open(
             error, error_size) != 0 ||
         hwa_htdemucs_onnx_status(
             context,
+            context->api->DisableTelemetryEvents(context->environment),
+            "cannot disable ONNX Runtime telemetry", error, error_size) != 0 ||
+        hwa_htdemucs_onnx_status(
+            context,
             context->api->CreateSessionOptions(&context->session_options),
             "cannot create ONNX Runtime session options",
             error, error_size) != 0 ||
