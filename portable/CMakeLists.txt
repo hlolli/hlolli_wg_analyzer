@@ -56,6 +56,7 @@ target_compile_options(hwa_wasi_tests PRIVATE
 target_link_options(hwa_wasi_tests PRIVATE
   -nostartfiles
   "LINKER:--no-entry"
+  "LINKER:-z,stack-size=1048576"
   "LINKER:--export=hwa_portability_test")
 set_target_properties(hwa_wasi_tests PROPERTIES SUFFIX ".wasm")
 if(HLOLLI_WG_ANALYZER_STRICT)
