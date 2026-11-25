@@ -128,6 +128,16 @@ int main(void)
         CHECK(fabs(result.estimate.estimate_level_dbfs.db - 10.0 * log10(2.5)) < 1e-12);
         CHECK(fabs(result.estimate.error_level_dbfs.db - 10.0 * log10(0.5)) < 1e-12);
     }
+    {
+        const double quiet[4] = {0.0, 1e-300, 0.0, -1e-300};
+        const double offset[4] = {1e300, 1e-300, 1e300, -1e-300};
+        CHECK(hwa_evaluate_separation_samples(quiet, offset, NULL,
+            2U, 2U, NULL, &result, error, sizeof(error)) == 0);
+        CHECK(!result.estimate.reference_silent && !result.estimate.estimate_silent);
+        CHECK(result.estimate.snr.status == HWA_SEPARATION_RATIO_POSITIVE_INFINITY);
+        CHECK(result.estimate.si_sdr.status == HWA_SEPARATION_RATIO_POSITIVE_INFINITY);
+        CHECK(result.estimate.estimate_level_dbfs.db == result.estimate.reference_level_dbfs.db);
+    }
     options.max_sample_values = 11U;
     CHECK(hwa_evaluate_separation_samples(reference, estimate, mixture,
         4U, 1U, &options, &result, error, sizeof(error)) != 0);

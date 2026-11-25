@@ -29,12 +29,66 @@ static HWASeparationRatio ratio(double numerator_log, double denominator_log,
     return value;
 }
 
+typedef struct SeparationScale {
+    double peak;
+    double origin[HWA_MAX_CHANNELS];
+    long double mean[HWA_MAX_CHANNELS];
+} SeparationScale;
+
+static long double scaled_sample(double value, uint32_t channel,
+                                  const SeparationScale *scale)
+{
+    return ((long double)value - scale->origin[channel]) / scale->peak;
+}
+
+static int prepare_scale(const double *samples, size_t count, size_t frames,
+                         uint32_t channels, int remove_mean, SeparationScale *scale)
+{
+    double low[HWA_MAX_CHANNELS];
+    double high[HWA_MAX_CHANNELS];
+    size_t index;
+    uint32_t channel;
+    memset(scale, 0, sizeof(*scale));
+    for (channel = 0U; channel < channels; ++channel) {
+        low[channel] = DBL_MAX;
+        high[channel] = -DBL_MAX;
+    }
+    for (index = 0U; index < count; ++index) {
+        double value = samples[index];
+        if (!isfinite(value)) return -1;
+        channel = (uint32_t)(index % channels);
+        if (value < low[channel]) low[channel] = value;
+        if (value > high[channel]) high[channel] = value;
+    }
+    for (channel = 0U; channel < channels; ++channel) {
+        double origin = 0.0;
+        if (remove_mean) {
+            /* Subtract the endpoint nearest zero for single-sign channels.
+             * The difference cannot overflow and constant offsets vanish. */
+            if (low[channel] > 0.0) origin = low[channel];
+            else if (high[channel] < 0.0) origin = high[channel];
+        }
+        scale->origin[channel] = origin;
+        scale->peak = fmax(scale->peak, fmax(high[channel] - origin, origin - low[channel]));
+    }
+    if (scale->peak == 0.0) scale->peak = 1.0;
+    if (remove_mean) {
+        for (index = 0U; index < count; ++index) {
+            channel = (uint32_t)(index % channels);
+            scale->mean[channel] += scaled_sample(samples[index], channel, scale);
+        }
+        for (channel = 0U; channel < channels; ++channel) {
+            scale->mean[channel] /= (long double)frames;
+        }
+    }
+    return 0;
+}
+
 static void evaluate_pair(const double *reference, const double *estimate,
-                           size_t frames, uint32_t channels,
-                           const long double *reference_mean,
-                           const long double *estimate_mean,
-                           double reference_peak, double estimate_peak,
-                           HWASeparationPair *pair)
+                          size_t count, uint32_t channels,
+                          const SeparationScale *reference_scale,
+                          const SeparationScale *estimate_scale,
+                          HWASeparationPair *pair)
 {
     long double target_energy = 0.0L;
     long double estimate_energy = 0.0L;
@@ -42,6 +96,8 @@ static void evaluate_pair(const double *reference, const double *estimate,
     long double residual_energy = 0.0L;
     long double error_energy = 0.0L;
     long double alpha;
+    double reference_peak = reference_scale->peak;
+    double estimate_peak = estimate_scale->peak;
     double common_peak;
     double reference_factor;
     double estimate_factor;
@@ -49,11 +105,10 @@ static void evaluate_pair(const double *reference, const double *estimate,
     double estimate_power_log;
     double error_power_log;
     size_t index;
-    size_t count = frames * channels;
     for (index = 0U; index < count; ++index) {
         uint32_t channel = (uint32_t)(index % channels);
-        long double target = (long double)reference[index] / reference_peak - reference_mean[channel];
-        long double predicted = (long double)estimate[index] / estimate_peak - estimate_mean[channel];
+        long double target = scaled_sample(reference[index], channel, reference_scale) - reference_scale->mean[channel];
+        long double predicted = scaled_sample(estimate[index], channel, estimate_scale) - estimate_scale->mean[channel];
         target_energy += target * target;
         estimate_energy += predicted * predicted;
         dot += target * predicted;
@@ -68,8 +123,8 @@ static void evaluate_pair(const double *reference, const double *estimate,
     alpha = target_energy > 0.0L ? dot / target_energy : 0.0L;
     for (index = 0U; index < count; ++index) {
         uint32_t channel = (uint32_t)(index % channels);
-        long double target = (long double)reference[index] / reference_peak - reference_mean[channel];
-        long double predicted = (long double)estimate[index] / estimate_peak - estimate_mean[channel];
+        long double target = scaled_sample(reference[index], channel, reference_scale) - reference_scale->mean[channel];
+        long double predicted = scaled_sample(estimate[index], channel, estimate_scale) - estimate_scale->mean[channel];
         long double residual = predicted - alpha * target;
         long double error = target * reference_factor - predicted * estimate_factor;
         residual_energy += residual * residual;
@@ -116,10 +171,8 @@ int hwa_evaluate_separation_samples(const double *reference,
     HWASeparationEvalOptions defaults;
     HWASeparationEvalOptions checked;
     const double *signals[3] = {reference, estimate, mixture};
-    long double means[3][HWA_MAX_CHANNELS];
-    double peaks[3] = {0.0, 0.0, 0.0};
+    SeparationScale scales[3];
     size_t count;
-    size_t index;
     unsigned signal;
     unsigned signal_count = mixture == NULL ? 2U : 3U;
     hwa_separation_eval_options_default(&defaults);
@@ -129,7 +182,6 @@ int hwa_evaluate_separation_samples(const double *reference,
         return -1;
     }
     memset(result, 0, sizeof(*result));
-    memset(means, 0, sizeof(means));
     if (reference == NULL || estimate == NULL || frames == 0U ||
         channels == 0U || channels > HWA_MAX_CHANNELS ||
         frames > SIZE_MAX / channels ||
@@ -142,34 +194,21 @@ int hwa_evaluate_separation_samples(const double *reference,
     }
     count = frames * channels;
     for (signal = 0U; signal < signal_count; ++signal) {
-        for (index = 0U; index < count; ++index) {
-            double value = signals[signal][index];
-            if (!isfinite(value)) {
-                hwa_set_error(error, error_size, "separation samples must be finite");
-                return -1;
-            }
-            peaks[signal] = fmax(peaks[signal], fabs(value));
-        }
-        if (peaks[signal] == 0.0) peaks[signal] = 1.0;
-        if (checked.remove_channel_mean) {
-            uint32_t channel;
-            for (channel = 0U; channel < channels; ++channel) {
-                long double sum = 0.0L;
-                for (index = channel; index < count; index += channels)
-                    sum += (long double)signals[signal][index] / peaks[signal];
-                means[signal][channel] = sum / (long double)frames;
-            }
+        if (prepare_scale(signals[signal], count, frames, channels,
+                          checked.remove_channel_mean, &scales[signal]) != 0) {
+            hwa_set_error(error, error_size, "separation samples must be finite");
+            return -1;
         }
     }
     result->options = checked;
     result->frames = frames;
     result->channels = channels;
     result->mixture_present = mixture != NULL;
-    evaluate_pair(reference, estimate, frames, channels, means[0], means[1],
-                   peaks[0], peaks[1], &result->estimate);
+    evaluate_pair(reference, estimate, count, channels, &scales[0], &scales[1],
+                  &result->estimate);
     if (mixture != NULL) {
-        evaluate_pair(reference, mixture, frames, channels, means[0], means[2],
-                       peaks[0], peaks[2], &result->mixture);
+        evaluate_pair(reference, mixture, count, channels, &scales[0], &scales[2],
+                      &result->mixture);
         if (result->estimate.si_sdr.status == HWA_SEPARATION_RATIO_FINITE &&
             result->mixture.si_sdr.status == HWA_SEPARATION_RATIO_FINITE) {
             result->si_sdr_improvement_db = result->estimate.si_sdr.db - result->mixture.si_sdr.db;

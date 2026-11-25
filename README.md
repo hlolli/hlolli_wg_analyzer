@@ -130,6 +130,22 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
+### Evaluate source separation
+
+```sh
+build/hlolli-wg-analyzer evaluate-separation reference-stem.wav estimated-stem.wav \
+  original-mixture.wav --output separation.json
+```
+
+The reference, estimate, and optional mixture must have the same sample rate,
+frame count, channel count, and speaker mask. The evaluator removes each
+channel's mean, reports the reference, estimate, and error levels, and computes
+SNR and SI-SDR. SNR includes gain error. SI-SDR fits one signed gain across
+all channels. With a mixture, the report gives the SI-SDR improvement when
+both scores are finite. The evaluator uses the supplied sample positions.
+Silence and infinite ratios have explicit statuses with `null` dB values.
+Use `--output -` for JSON on stdout.
+
 ### Export musical events
 
 ```sh

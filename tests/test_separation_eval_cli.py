@@ -147,6 +147,15 @@ class SeparationEvaluation(unittest.TestCase):
         self.assertEqual(value["si_sdr"], {"status": "undefined", "db": None})
         self.assertEqual(value["snr"], {"status": "finite", "db": 0})
 
+    def test_constant_stereo_offsets_are_silent(self):
+        pcm(self.reference, [30000, 10000] * 37, channels=2)
+        pcm(self.estimate, [-30000, 10000] * 37, channels=2)
+        value = self.report()["estimate"]
+        self.assertTrue(value["reference_silent"])
+        self.assertTrue(value["estimate_silent"])
+        self.assertEqual(value["snr"], {"status": "undefined", "db": None})
+        self.assertEqual(value["si_sdr"], {"status": "undefined", "db": None})
+
     def test_float_extremes_and_nonfinite_samples(self):
         floats(self.reference, [1e-300, -1e-300, 1e-300, -1e-300])
         floats(self.estimate, [1.5e300, -0.5e300, 0.5e300, -1.5e300])
