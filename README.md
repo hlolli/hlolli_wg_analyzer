@@ -245,6 +245,18 @@ build/hlolli-wg-analyzer note-phases solo.wav \
   --note-start-sample 44100 --note-end-sample 88200
 ```
 
+Use `compare-note-spectra` with a saved audio alignment and note spans to
+compare power in the held part of each pair. Supply separate bands to see
+where the spectra differ after accounting for gain. The JSON report keeps each
+recording's sample bounds, pitch checks, and reasons for skipped pairs.
+See [Paired note spectra](docs/paired-note-spectra.md) for the input and report formats.
+
+```sh
+build/hlolli-wg-analyzer compare-note-spectra reference.wav candidate.wav \
+  --alignment reference-candidate.hwa-align --notes notes.csv \
+  --band 2000:3000 --band 3000:4000 --group-by register --output spectra.json
+```
+
 ```sh
 build/hlolli-wg-analyzer align reference.wav candidate.wav \
   --output reference-candidate.hwa-align

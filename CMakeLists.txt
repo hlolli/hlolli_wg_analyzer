@@ -164,6 +164,9 @@ add_executable(hlolli_wg_analyzer
   src/main.c
   src/musicxml_report.c
   src/note_phase_report.c
+  src/paired_spectrum_dsp.c
+  src/paired_spectrum_report.c
+  src/paired_spectrum_spans.c
   src/measure_report.c
   src/physical_report.c
   src/production_report.c

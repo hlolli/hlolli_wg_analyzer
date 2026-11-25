@@ -36,6 +36,7 @@
 #include "numeric_locale.h"
 #include "musicxml_report.h"
 #include "output.h"
+#include "paired_spectrum_report.h"
 #include "physical_file.h"
 #include "physical_report.h"
 #include "production_file.h"
@@ -93,6 +94,14 @@ typedef struct HWACli {
     HWAPartialTrackingOptions partial_options;
     HWAEventScoreOptions event_score_options;
     HWAMusicXMLOptions musicxml_options;
+    HWAPairedSpectrumReportOptions paired_spectrum_options;
+    const char *paired_notes_path;
+    const char *paired_score_alignment_path;
+    const char *paired_alignment_reference_path;
+    const char *paired_alignment_target_path;
+    int paired_notes_clock_set;
+    int paired_notes_on_target;
+    int paired_spectrum_option_set;
     int musicxml_option_set;
     uint64_t event_score_source_id;
     unsigned event_score_option_set;
@@ -128,6 +137,7 @@ typedef struct HWACli {
     int analysis_only_option_set;
     int analysis_resource_option_set;
     int analysis_spectral_resource_option_set;
+    int max_track_points_option_set;
     int decode_block_option_set;
     int max_bytes_option_set;
     int input_frame_limit_set;
@@ -172,6 +182,8 @@ static void hwa_print_usage(FILE *stream)
         "--output FILE.hwa-align\n"
         "  hlolli-wg-analyzer note-phases INPUT.wav --note-start-sample N "
         "--note-end-sample N\n"
+        "  hlolli-wg-analyzer compare-note-spectra REFERENCE.wav TARGET.wav "
+        "--alignment MAP.hwa-align (--notes NOTES.csv|--score-alignment SCORE.hwa-align)\n"
         "  hlolli-wg-analyzer [OPTIONS] segment --alignment ALIGN.hwa-align "
         "AUDIO.wav --output FILE.hwa-items\n"
         "  hlolli-wg-analyzer [OPTIONS] measure --items ITEMS.hwa-items "
@@ -241,7 +253,7 @@ static void hwa_print_usage(FILE *stream)
         "  --format csound|lilypond|midi|musicxml  Score format; LilyPond/MusicXML require --tempo-bpm.\n"
         "  --source-id N               Source recording ID; may be omitted for one source.\n"
         "  --tempo-bpm N               Explicit quarter-note tempo (10..1000); no tempo inference.\n"
-        "  --alignment PATH            Segment a score-to-audio alignment.\n"
+        "  --alignment PATH            Use a saved alignment for the command.\n"
         "  --labels PATH               Add typed event labels while segmenting.\n"
         "  --amend PATH                Apply locked anchors or item edits.\n"
         "  --items PATH                Measure one canonical item file.\n"
@@ -255,6 +267,19 @@ static void hwa_print_usage(FILE *stream)
         "  --disturbance-samples START:END  Limit cleanup to a source span "
         "(0-based, end excluded; repeatable).\n"
         "  --allow-run                 Permit the named renderer to run.\n"
+        "\n"
+        "Paired note spectra:\n"
+        "  --notes PATH                Note spans as CSV.\n"
+        "  --notes-clock SIDE          CSV sample clock, reference (default) or target.\n"
+        "  --score-alignment PATH      Score-to-audio alignment for either WAV.\n"
+        "  --alignment-reference PATH  Same-clock WAV used to align the reference.\n"
+        "  --alignment-target PATH     Same-clock WAV used to align the target.\n"
+        "  --band LOW:HIGH             Band in Hz (repeatable, default 2000:3000 and 3000:4000).\n"
+        "  --normalize-band LOW:HIGH   Power reference range in Hz (default shared bandwidth).\n"
+        "  --group-by LABEL            Summarize by a note label (repeatable).\n"
+        "  --held-fraction FRACTION    Central fraction of each note (default 0.6).\n"
+        "  --min-pair-confidence N     Minimum mapping confidence (default 0.35).\n");
+    (void)fprintf(stream,
         "\n"
         "Channels and frames:\n"
         "  --channel N                 Analyze one 1-based input channel.\n"
@@ -518,6 +543,22 @@ static int hwa_parse_double(const char *text, double *value)
     return 0;
 }
 
+static int hwa_parse_spectrum_band(const char *text, HWAPairedSpectrumBand *band)
+{
+    char *end = NULL;
+    double low, high;
+
+    errno = 0;
+    low = strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != ':' || !isfinite(low) ||
+        low < 0.0 || hwa_parse_double(end + 1, &high) != 0 || high <= low) {
+        return -1;
+    }
+    band->low_hz = low;
+    band->high_hz = high;
+    return 0;
+}
+
 static int hwa_parse_isolated_note_metrics(const char *text,
                                            uint32_t *mask)
 {
@@ -752,6 +793,7 @@ static int hwa_parse_option_with_value(HWACli *cli,
         }
         cli->analysis_resource_option_set = 1;
         cli->analysis_spectral_resource_option_set = 1;
+        cli->max_track_points_option_set = 1;
     } else if (strcmp(option, "--max-spectrum-values") == 0) {
         if (hwa_parse_size(value, &cli->options.max_spectrum_values) != 0 ||
             cli->options.max_spectrum_values == 0U) {
@@ -782,6 +824,55 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->score_path = value;
     } else if (strcmp(option, "--alignment") == 0) {
         cli->alignment_path = value;
+    } else if (strcmp(option, "--notes") == 0) {
+        if (cli->paired_notes_path != NULL || value[0] == '\0') return -1;
+        cli->paired_notes_path = value;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--notes-clock") == 0) {
+        if (cli->paired_notes_clock_set ||
+            (strcmp(value, "reference") != 0 && strcmp(value, "target") != 0)) return -1;
+        cli->paired_notes_on_target = strcmp(value, "target") == 0;
+        cli->paired_notes_clock_set = 1;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--score-alignment") == 0) {
+        if (cli->paired_score_alignment_path != NULL || value[0] == '\0') return -1;
+        cli->paired_score_alignment_path = value;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--alignment-reference") == 0) {
+        if (cli->paired_alignment_reference_path != NULL || value[0] == '\0') return -1;
+        cli->paired_alignment_reference_path = value;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--alignment-target") == 0) {
+        if (cli->paired_alignment_target_path != NULL || value[0] == '\0') return -1;
+        cli->paired_alignment_target_path = value;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--band") == 0) {
+        HWAPairedSpectrumReportOptions *paired = &cli->paired_spectrum_options;
+        if (paired->band_count == HWA_PAIRED_SPECTRUM_MAX_BANDS ||
+            hwa_parse_spectrum_band(value, &paired->bands[paired->band_count]) != 0) return -1;
+        ++paired->band_count;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--normalize-band") == 0) {
+        HWAPairedSpectrumBand *band = &cli->paired_spectrum_options.normalization_band;
+        if (band->high_hz != 0.0 || hwa_parse_spectrum_band(value, band) != 0) return -1;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--group-by") == 0) {
+        HWAPairedSpectrumReportOptions *paired = &cli->paired_spectrum_options;
+        size_t index;
+        if (value[0] == '\0' || paired->group_count == HWA_PAIRED_SPECTRUM_MAX_GROUP_LABELS) return -1;
+        for (index = 0U; index < paired->group_count; ++index) {
+            if (strcmp(paired->group_labels[index], value) == 0) return -1;
+        }
+        paired->group_labels[paired->group_count++] = value;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--held-fraction") == 0) {
+        double *fraction = &cli->paired_spectrum_options.held_fraction;
+        if (hwa_parse_double(value, fraction) != 0 || *fraction <= 0.0 || *fraction > 1.0) return -1;
+        cli->paired_spectrum_option_set = 1;
+    } else if (strcmp(option, "--min-pair-confidence") == 0) {
+        double *confidence = &cli->paired_spectrum_options.min_pair_confidence;
+        if (hwa_parse_double(value, confidence) != 0 || *confidence < 0.0 || *confidence > 1.0) return -1;
+        cli->paired_spectrum_option_set = 1;
     } else if (strcmp(option, "--labels") == 0) {
         cli->labels_path = value;
     } else if (strcmp(option, "--amend") == 0) {
@@ -1620,6 +1711,9 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
     hwa_partial_tracking_options_default(&cli->partial_options);
     hwa_event_score_options_default(&cli->event_score_options);
     hwa_musicxml_options_default(&cli->musicxml_options);
+    hwa_paired_spectrum_dsp_options_default(&cli->paired_spectrum_options.dsp);
+    cli->paired_spectrum_options.held_fraction = 0.6;
+    cli->paired_spectrum_options.min_pair_confidence = 0.35;
     hwa_profile_comparison_options_default(&cli->comparison_options);
     hwa_physical_options_default(&cli->physical_options);
     hwa_production_options_default(&cli->production_options);
@@ -4449,6 +4543,44 @@ done:
     return result;
 }
 
+static int hwa_run_paired_spectra(const HWACli *cli)
+{
+    HWAPairedSpectrumReportOptions options = cli->paired_spectrum_options;
+    char error[HWA_ERROR_SIZE] = {0};
+
+    if (cli->positional_count != 3U || cli->alignment_path == NULL ||
+        (cli->paired_notes_path == NULL) == (cli->paired_score_alignment_path == NULL) ||
+        (cli->paired_notes_clock_set && cli->paired_notes_path == NULL) ||
+        cli->export_kind != 0 || cli->score_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->physical_binding_count != 0U || cli->options.channel_mode != HWA_CHANNEL_KEEP ||
+        cli->silence_option_set || cli->decode_block_option_set ||
+        cli->analysis_only_option_set || cli->max_track_points_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set || cli->run_option_set) {
+        return -1;
+    }
+    if (options.band_count == 0U) {
+        options.bands[0] = (HWAPairedSpectrumBand){2000.0, 3000.0};
+        options.bands[1] = (HWAPairedSpectrumBand){3000.0, 4000.0};
+        options.band_count = 2U;
+    }
+    if (cli->frame_size_option_set) options.dsp.fft_size = cli->options.frame_size;
+    if (cli->hop_size_option_set) options.dsp.hop_size = cli->options.hop_size;
+    options.dsp.max_decoded_frames = cli->options.max_input_frames;
+    options.dsp.max_transforms = cli->options.max_transforms;
+    if (hwa_paired_spectrum_report(cli->positionals[1], cli->positionals[2],
+            cli->alignment_path, cli->paired_alignment_reference_path, cli->paired_alignment_target_path,
+            cli->paired_notes_path, cli->paired_score_alignment_path, cli->paired_notes_on_target,
+            cli->output_path != NULL ? cli->output_path : "-", cli->replace,
+            &cli->options, &options, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     HWACli cli;
@@ -4480,6 +4612,9 @@ int main(int argc, char **argv)
     } else if (strcmp(cli.positionals[0], "note-phases") != 0 &&
         (cli.note_span_options != 0U || cli.note_phase_envelope || cli.note_phase_frames ||
          cli.note_phase_spectra || cli.note_phase_partials || cli.partial_option_set)) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "compare-note-spectra") != 0 &&
+               cli.paired_spectrum_option_set) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
         strcmp(cli.positionals[0], "separate-instruments") != 0 &&
@@ -4518,6 +4653,8 @@ int main(int argc, char **argv)
         result = hwa_run_body_envelope(&cli);
     } else if (strcmp(cli.positionals[0], "note-phases") == 0) {
         result = hwa_run_note_phases(&cli);
+    } else if (strcmp(cli.positionals[0], "compare-note-spectra") == 0) {
+        result = hwa_run_paired_spectra(&cli);
     } else if (strcmp(cli.positionals[0], "isolated-note") == 0) {
         result = hwa_run_isolated_note(&cli);
     } else if (strcmp(cli.positionals[0], "harmonic-decay") == 0) {
