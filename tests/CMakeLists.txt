@@ -1476,6 +1476,12 @@ if(HWA_PYTHON3_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/test_harmonic_decay_relative.py)
   set_tests_properties(unit.harmonic-decay-relative PROPERTIES TIMEOUT 30)
 
+  add_test(NAME unit.partial-reconstruction
+    COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+      ${CMAKE_CURRENT_SOURCE_DIR}/test_partial_reconstruction.py)
+  set_tests_properties(unit.partial-reconstruction PROPERTIES
+    TIMEOUT 60 SKIP_RETURN_CODE 77)
+
   add_test(
     NAME unit.analyzer-evidence
     COMMAND

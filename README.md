@@ -519,6 +519,10 @@ comparison scores against their points. Low-support reports remain readable;
 each caller decides whether they meet its needs. The body-envelope curve still
 includes effects from the room, microphone, strings, and playing.
 
+The optional [measured partial reconstruction](docs/partial-reconstruction.md)
+module uses NumPy and SciPy to extract complex partial traces and reconstruct
+their contribution to a recording.
+
 ## Supported input
 
 The built-in reader accepts seekable, little-endian RIFF/WAVE and RF64 files.
