@@ -481,7 +481,11 @@ class EventScoreTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("warning:", result.stderr)
         self.assertTrue((self.root / "quartet.pdf").is_file())
-        tracks, tempos = midi_notes(self.root / "quartet.midi")
+        midi = self.root / "quartet.midi"
+        details = []
+        tracks, tempos = midi_notes(midi, details)
+        division = int.from_bytes(midi.read_bytes()[12:14], "big")
+        self.assertEqual([tick for _, tick in details], [6 * division] * 5)
         self.assertTrue(tempos)
         self.assertTrue(all(tempo == 500000 for _, tempo in tempos))
         expected = [[(48, 0, 4)], [(60, 0, 4)], [(69, 0, 2), (72, 1, 3)], [(76, 1, 3)]]

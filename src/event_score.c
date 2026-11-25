@@ -334,7 +334,8 @@ static int duration(FILE *stream, const char *pitch, uint64_t ticks)
 
 static int lilypond(FILE *stream, const ScoreNote *notes, size_t count, size_t tracks,
                     size_t omitted, const HWAEventAudio *source,
-                    const HWAEventScoreOptions *options, const HWANumericLocale *locale)
+                    const HWAEventScoreOptions *options, const HWANumericLocale *locale,
+                    uint64_t end_tick)
 {
     size_t first = 0U;
     if (fprintf(stream, "\\version \"2.24.0\"\n\\language \"nederlands\"\n"
@@ -373,7 +374,8 @@ static int lilypond(FILE *stream, const ScoreNote *notes, size_t count, size_t t
                 if (duration(stream, pitch, notes[i].end_tick-notes[i].start_tick) != 0) return -1;
                 cursor = notes[i].end_tick;
             }
-            if (fputs("\n} }\n", stream) == EOF) return -1;
+            if (duration(stream, "r", end_tick-cursor) != 0 ||
+                fputs("\n} }\n", stream) == EOF) return -1;
         }
         if (fputs(">>\n", stream) == EOF) return -1;
         first = last;
@@ -415,16 +417,12 @@ static int xml_rest(FILE *stream, uint64_t ticks, size_t lane)
 
 static int musicxml(FILE *stream, const ScoreNote *notes, size_t count, size_t tracks,
                      size_t omitted, const HWAEventAudio *source,
-                     const HWAEventScoreOptions *options, const HWANumericLocale *locale)
+                     const HWAEventScoreOptions *options, const HWANumericLocale *locale,
+                     uint64_t end_tick)
 {
     static const char steps[] = "CCDDEFFGGAAB";
     static const int alters[] = {0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0};
-    uint64_t end_tick;
     size_t first, i;
-    if (tick_at(source->format.frames, source->format.sample_rate_hz,
-                options->tempo_bpm, &end_tick) != 0) return -1;
-    for (i = 0U; i < count; ++i)
-        if (notes[i].end_tick > end_tick) end_tick = notes[i].end_tick;
     if (fprintf(stream, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!-- HWA_MUSICXML_SCORE 1 source_id=%" PRIu64 " sample_rate_hz=%u notes=%zu tracks=%zu omitted_unpitched_notes=%zu\n"
         "pitch=nearest-semitone-A440 rhythm=nearest-128th ties=up minimum_note=1-tick tempo_source=caller\n"
@@ -488,7 +486,7 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     MidiEdge *midi_edges = NULL;
     uint64_t *lane_ends = NULL;
     size_t count = 0U, omitted = 0U, tracks = 0U, i;
-    uint64_t bytes;
+    uint64_t bytes, end_tick = 0U;
     HWANumericLocale locale;
     int result = -1;
     int notation;
@@ -514,6 +512,11 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     if (source == NULL || source->format.sample_rate_hz == 0U || source->format.frames == 0U ||
         (copied.kind == HWA_EVENT_SCORE_CSOUND && source->format.frames > HWA_SCORE_SAFE_INTEGER)) {
         hwa_set_error(error, error_size, "event score needs a valid source recording clock");
+        return -1;
+    }
+    if (notation && tick_at(source->format.frames, source->format.sample_rate_hz,
+                            copied.tempo_bpm, &end_tick) != 0) {
+        hwa_set_error(error, error_size, "source duration is outside the score export time range");
         return -1;
     }
     for (i = 0U; i < bundle->event_count; ++i) {
@@ -583,6 +586,7 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
             }
             notes[count].midi = (int)midi;
             if (notes[count].end_tick <= notes[count].start_tick) notes[count].end_tick = notes[count].start_tick+1U;
+            if (notation && notes[count].end_tick > end_tick) end_tick = notes[count].end_tick;
         } else if (event->id > HWA_SCORE_SAFE_INTEGER) {
             hwa_set_error(error, error_size, "Csound event ID exceeds exact numeric range");
             goto cleanup;
@@ -626,8 +630,8 @@ int hwa_event_score_write(FILE *stream, const HWAEventBundle *bundle,
     result = copied.kind == HWA_EVENT_SCORE_CSOUND ?
         csound(stream, notes, count, tracks, omitted, source, &locale) :
         copied.kind == HWA_EVENT_SCORE_MUSICXML ?
-        musicxml(stream, notes, count, tracks, omitted, source, &copied, &locale) :
-        lilypond(stream, notes, count, tracks, omitted, source, &copied, &locale);
+        musicxml(stream, notes, count, tracks, omitted, source, &copied, &locale, end_tick) :
+        lilypond(stream, notes, count, tracks, omitted, source, &copied, &locale, end_tick);
     if (hwa_c_numeric_locale_end(&locale) != 0 || ferror(stream)) result = -1;
     if (result != 0) hwa_set_error(error, error_size, "cannot write event score");
 cleanup:

@@ -114,7 +114,7 @@ int main(int argc, char **argv)
     CHECK(render(&bundle, 1U, &options, text) != 0);
     options.tempo_bpm = 120U;
     CHECK(render(&bundle, 1U, &options, text) == 0);
-    CHECK(strstr(text, "a'2 ") != NULL);
+    CHECK(strstr(text, "a'2 r1*1 ") != NULL);
     CHECK(strstr(text, "start_tick=32 end_tick=96 lane=2") != NULL);
     CHECK(strstr(text, "\\tempo 4 = 120") != NULL);
     CHECK(strstr(text, "\\time ") == NULL);

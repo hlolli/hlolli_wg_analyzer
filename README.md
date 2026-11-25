@@ -164,7 +164,8 @@ before writing any bytes.
 
 Csound export keeps pitch in Hz and includes event IDs and sample bounds.
 LilyPond export rounds pitches to semitones and timing to 128th notes at the
-supplied tempo, using separate voices for overlaps.
+supplied tempo, using separate voices for overlaps. Every voice extends to
+the rounded source end, including trailing silence.
 
 MusicXML export writes an uncompressed MusicXML 4.0 partwise file using the
 same timing grid. Each `(part, voice)` pair gets a part with one unmetered
