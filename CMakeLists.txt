@@ -81,6 +81,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/inference.c
   src/inference_clock.c
   src/inference_provenance.c
+  src/instrument_isolation.c
   src/instrument_stem_provider.c
   src/item_file.c
   src/isolated_note.c
@@ -157,6 +158,7 @@ add_executable(hlolli_wg_analyzer
   src/inference_basic_pitch_onnx.c
   src/inference_htdemucs_onnx.c
   src/inference_onnx.c
+  src/instrument_isolation_file.c
   src/item_report.c
   src/isolated_note_report.c
   src/main.c

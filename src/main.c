@@ -23,6 +23,7 @@
 #include "inference_htdemucs_onnx.h"
 #include "inference_onnx.h"
 #include "inference_provider.h"
+#include "instrument_isolation_file.h"
 #include "htdemucs.h"
 #include "internal.h"
 #include "instrument_stem_provider.h"
@@ -45,6 +46,7 @@
 #include "sha256.h"
 #include "stem_note_derivation.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -65,6 +67,7 @@ typedef enum HWAExportKind {
 
 #define HWA_CLI_MAX_BINDINGS 4096U
 #define HWA_CLI_EVENT_PATH_LIMIT 4096U
+#define HWA_CLI_MAX_DISTURBANCES 256U
 
 typedef struct HWACli {
     HWAAnalysisOptions options;
@@ -106,6 +109,9 @@ typedef struct HWACli {
     const char *resume_path;
     const char *model_path;
     const char *expected_model_sha256;
+    const char *isolation_instrument;
+    HwaIsolationRange disturbances[HWA_CLI_MAX_DISTURBANCES];
+    size_t disturbance_count;
     const char *physical_bindings[HWA_CLI_MAX_BINDINGS];
     size_t physical_binding_count;
     HWABasicPitchDecoderOptions basic_pitch_options;
@@ -198,6 +204,9 @@ static void hwa_print_usage(FILE *stream)
         "--output NEW.hwa-events\n"
         "  hlolli-wg-analyzer separate-instruments INPUT.wav "
         "--model MODEL.onnx --output NEW.hwa-events\n"
+        "  hlolli-wg-analyzer isolate-instrument INPUT.wav "
+        "--instrument violin|viola --output NEW.hwa-events "
+        "[--disturbance-samples START:END ...]\n"
         "  hlolli-wg-analyzer infer-stem-note-events STEMS.hwa-events "
         "--model MODEL.onnx --output NEW.hwa-events\n"
         "  hlolli-wg-analyzer [--json] inference-capabilities\n");
@@ -242,6 +251,9 @@ static void hwa_print_usage(FILE *stream)
         "  --resume-from DIRECTORY     Reuse matching checked experiment jobs.\n"
         "  --model PATH                ONNX model for the inference command.\n"
         "  --expect-model-sha256 HEX   Require these exact model bytes.\n"
+        "  --instrument violin|viola   Select the instrument for isolation.\n"
+        "  --disturbance-samples START:END  Limit cleanup to a source span "
+        "(0-based, end excluded; repeatable).\n"
         "  --allow-run                 Permit the named renderer to run.\n"
         "\n"
         "Channels and frames:\n"
@@ -448,7 +460,9 @@ static int hwa_parse_u64(const char *text, uint64_t *value)
     char *end = NULL;
     unsigned long long parsed;
 
-    if (text == NULL || text[0] == '\0' || text[0] == '-') {
+    if (text == NULL) return -1;
+    while (isspace((unsigned char)*text)) ++text;
+    if (*text == '\0' || *text == '-') {
         return -1;
     }
     errno = 0;
@@ -468,6 +482,22 @@ static int hwa_parse_size(const char *text, size_t *value)
         return -1;
     }
     *value = (size_t)parsed;
+    return 0;
+}
+
+static int hwa_parse_disturbance(const char *text, HwaIsolationRange *range)
+{
+    char *end;
+    unsigned long long start;
+
+    if (text[0] < '0' || text[0] > '9') return -1;
+    errno = 0;
+    start = strtoull(text, &end, 10);
+    if (errno == ERANGE || start > UINT64_MAX || *end != ':' ||
+        end[1] < '0' || end[1] > '9' ||
+        hwa_parse_u64(end + 1, &range->end_sample) != 0 ||
+        start >= range->end_sample) return -1;
+    range->start_sample = (uint64_t)start;
     return 0;
 }
 
@@ -529,7 +559,16 @@ static int hwa_parse_option_with_value(HWACli *cli,
     size_t size_value;
     uint64_t u64_value;
 
-    if (strcmp(option, "--note-start-sample") == 0) {
+    if (strcmp(option, "--instrument") == 0) {
+        if (cli->isolation_instrument != NULL || value[0] == '\0') return -1;
+        cli->isolation_instrument = value;
+    } else if (strcmp(option, "--disturbance-samples") == 0) {
+        if (cli->disturbance_count == HWA_CLI_MAX_DISTURBANCES ||
+            hwa_parse_disturbance(value,
+                                  &cli->disturbances[cli->disturbance_count]) != 0)
+            return -1;
+        ++cli->disturbance_count;
+    } else if (strcmp(option, "--note-start-sample") == 0) {
         if (hwa_parse_u64(value, &cli->note_start_sample) != 0 ||
             (cli->note_span_options & 1U) != 0U) return -1;
         cli->note_span_options |= 1U;
@@ -3628,6 +3667,74 @@ cleanup:
     return result;
 }
 
+static int hwa_compare_disturbance_start(const void *left, const void *right)
+{
+    const HwaIsolationRange *first = left;
+    const HwaIsolationRange *second = right;
+    return (first->start_sample > second->start_sample) -
+           (first->start_sample < second->start_sample);
+}
+
+static int hwa_run_isolate_instrument(HWACli *cli)
+{
+    HwaIsolationInstrument instrument;
+    HWAEventBundleLimits bundle_limits;
+    char error[HWA_ERROR_SIZE] = {0};
+    size_t range_count = 0U;
+    size_t index;
+
+    if (cli->positional_count != 2U || cli->isolation_instrument == NULL ||
+        cli->output_path == NULL || cli->output_path[0] == '\0' ||
+        strcmp(cli->positionals[1], "-") == 0 ||
+        strcmp(cli->output_path, "-") == 0 || cli->json || cli->replace ||
+        cli->export_kind != 0 || cli->score_path != NULL ||
+        cli->alignment_path != NULL || cli->labels_path != NULL ||
+        cli->amend_path != NULL || cli->items_path != NULL ||
+        cli->room_ir_path != NULL || cli->physical_binding_count != 0U ||
+        cli->analysis_clock_option_set || cli->analysis_only_option_set ||
+        cli->analysis_spectral_resource_option_set || cli->frame_size_option_set ||
+        cli->hop_size_option_set || cli->silence_option_set ||
+        cli->decode_block_option_set || cli->alignment_option_set ||
+        cli->segmentation_option_set || cli->measurement_option_set ||
+        cli->comparison_option_set || cli->physical_option_set ||
+        cli->production_option_set || cli->run_option_set ||
+        cli->harmonic_decay_expected_set || cli->model_path != NULL)
+        return -1;
+    if (strcmp(cli->isolation_instrument, "violin") == 0) {
+        instrument = HWA_ISOLATION_VIOLIN;
+    } else if (strcmp(cli->isolation_instrument, "viola") == 0) {
+        instrument = HWA_ISOLATION_VIOLA;
+    } else {
+        (void)fputs("hlolli-wg-analyzer: --instrument must be violin or viola\n", stderr);
+        return 2;
+    }
+    qsort(cli->disturbances, cli->disturbance_count, sizeof(cli->disturbances[0]),
+          hwa_compare_disturbance_start);
+    for (index = 0U; index < cli->disturbance_count; ++index) {
+        HwaIsolationRange range = cli->disturbances[index];
+        if (range_count != 0U &&
+            range.start_sample <= cli->disturbances[range_count - 1U].end_sample) {
+            if (range.start_sample < cli->disturbances[range_count - 1U].end_sample) {
+                (void)fputs("hlolli-wg-analyzer: disturbance ranges overlap\n", stderr);
+                return 2;
+            }
+            cli->disturbances[range_count - 1U].end_sample = range.end_sample;
+        } else {
+            cli->disturbances[range_count++] = range;
+        }
+    }
+    hwa_event_bundle_limits_default(&bundle_limits);
+    if (hwa_isolate_instrument_wav(cli->positionals[1], cli->output_path, instrument,
+                                   cli->disturbances, range_count,
+                                   &cli->options, &bundle_limits,
+                                   error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
+                      error[0] != '\0' ? error : "cannot isolate instrument");
+        return 1;
+    }
+    return 0;
+}
+
 static int hwa_run_separate_instruments(const HWACli *cli)
 {
     HWAWavReader reader;
@@ -4361,7 +4468,10 @@ int main(int argc, char **argv)
         hwa_print_usage(stderr);
         return 2;
     }
-    if (strcmp(cli.positionals[0], "import-score") != 0 && cli.musicxml_option_set) {
+    if (strcmp(cli.positionals[0], "isolate-instrument") != 0 &&
+        (cli.isolation_instrument != NULL || cli.disturbance_count != 0U)) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "import-score") != 0 && cli.musicxml_option_set) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "export-event-score") != 0 && cli.event_score_option_set != 0U) {
         result = -1;
@@ -4442,6 +4552,8 @@ int main(int argc, char **argv)
         result = hwa_run_infer_note_events(&cli);
     } else if (strcmp(cli.positionals[0], "separate-instruments") == 0) {
         result = hwa_run_separate_instruments(&cli);
+    } else if (strcmp(cli.positionals[0], "isolate-instrument") == 0) {
+        result = hwa_run_isolate_instrument(&cli);
     } else if (strcmp(cli.positionals[0], "infer-stem-note-events") == 0) {
         result = hwa_run_infer_stem_note_events(&cli);
     } else if (strcmp(cli.positionals[0], "inference-capabilities") == 0) {

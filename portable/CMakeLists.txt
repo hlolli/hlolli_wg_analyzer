@@ -21,6 +21,7 @@ add_library(hlolli_wg_analyzer_portable STATIC
   ../src/analysis.c
   ../src/dsp.c
   ../src/features.c
+  ../src/instrument_isolation.c
   ../src/musicxml.c
   ../src/musicxml_zip.c
   ../src/musicxml_performance.c

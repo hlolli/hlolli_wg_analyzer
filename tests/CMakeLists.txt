@@ -1448,6 +1448,14 @@ if(HWA_PYTHON3_EXECUTABLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/test_separation_eval_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
   set_tests_properties(cli.separation-eval PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.violin-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ViolinIsolation)
+  set_tests_properties(cli.violin-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.viola-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ViolaIsolation)
+  set_tests_properties(cli.viola-isolation PROPERTIES TIMEOUT 60)
   add_test(
     NAME cli.isolated-note
     COMMAND

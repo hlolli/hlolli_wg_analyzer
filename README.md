@@ -130,6 +130,41 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
+### Isolate solo violin or viola
+
+```sh
+build/hlolli-wg-analyzer isolate-instrument recital.wav \
+  --instrument viola --output viola.hwa-events
+```
+
+Use `--instrument violin` or `--instrument viola` for a mostly solo
+recording with interference such as coughs and footsteps. The viola
+profile accounts for notes as low as its open C string. The command runs
+offline in C and accepts mono or stereo WAVE at 8–192 kHz with finite samples
+within float32 range.
+The bundle contains `audio/violin.wav` or `audio/viola.wav` alongside
+`audio/removed.wav` on the source sample clock. You can pass the instrument
+stem to `analyze-events`.
+
+Automatic cleanup looks for brief disturbances between quiet windows and
+compares non-harmonic energy across nearby frames during stable notes.
+Noise that shares the instrument's harmonics can still bleed into the stem.
+Listen to the removed audio for bow attacks or note tails you want to keep.
+
+To limit cleanup to known disturbances, repeat `--disturbance-samples` with
+zero-based, end-exclusive start and end samples. Samples outside those spans
+pass through at the output WAVE's precision. The command joins touching spans
+and rejects overlaps.
+
+```sh
+build/hlolli-wg-analyzer isolate-instrument performance.wav \
+  --instrument violin --disturbance-samples 48000:62400 \
+  --disturbance-samples 134400:144000 --output marked.hwa-events
+```
+
+The command buffers the recording and its estimate. For longer recordings,
+`--max-work-bytes` can raise the default 256 MiB work limit.
+
 ### Evaluate source separation
 
 ```sh
@@ -596,11 +631,11 @@ File outputs use exclusive creation by default and reject an existing path.
 closes a same-directory temporary file.
 
 Experiment, excerpt, report, `analyze-events`, `infer-note-events`,
-`separate-instruments`, and `infer-stem-note-events` outputs must be new
-directories. They do not support `--replace`. Event-bundle writers create
-the final directory and remove the paths they made after a handled write or
-check failure. A stopped process or storage failure can leave a partial new
-directory.
+`separate-instruments`, `isolate-instrument`, and `infer-stem-note-events`
+outputs must be new directories. They do not support `--replace`. Event-bundle
+writers create the final directory and remove the paths they made after a
+handled write or check failure. A stopped process or storage failure can leave
+a partial new directory.
 
 The CLI rejects outputs that alias protected inputs, including hard links.
 POSIX builds also reject output symlinks. Commands that build saved artifacts
