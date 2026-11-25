@@ -287,8 +287,8 @@ it and leaves the score in beats without inventing a tempo. The memory reader
 offers the same setting. `musicxml_written_timeline` reports that alignment uses timed notes
 and rests, without turning grace notes, ornaments, dynamics, or pedal into
 performed timing or controls. Parts keep distinct voice identities, and saved
-matches identify their source measure, staff, and XML byte position. Existing
-CSV behavior stays unchanged.
+matches identify their source measure, staff, and XML byte position. Score CSV
+accepts an optional UTF-8 BOM and uses a period as its decimal separator.
 
 For browser/WASM callers, `hwa_musicxml_read()` accepts plain or compressed
 bytes in memory and returns owned `HWAMusicXMLScore` data, including the

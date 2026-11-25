@@ -7,6 +7,7 @@
 #include "score_manifest.h"
 
 #include "internal.h"
+#include "numeric_locale.h"
 #include "sha256.h"
 
 #include <ctype.h>
@@ -72,6 +73,7 @@ static int hwa_score_read_file(const char *path,
     unsigned char *buffer;
     unsigned char digest[32];
     HWASha256 hash;
+    int read_failed;
 #if defined(_WIN32)
     HWAWindowsFileIdentity expected_identity;
 #else
@@ -175,7 +177,8 @@ static int hwa_score_read_file(const char *path,
         (void)fclose(stream);
         return -1;
     }
-    if (ferror(stream) || fclose(stream) != 0) {
+    read_failed = ferror(stream);
+    if (fclose(stream) != 0 || read_failed) {
         hwa_set_error(error, error_size,
                       "cannot finish reading score manifest '%s'", path);
         free(buffer);
@@ -612,9 +615,11 @@ static int hwa_score_data_row(char **fields,
     state->previous_start = event.start_beats;
     state->have_previous_start = 1;
     event.end_beats = event.start_beats + event.duration_beats;
-    if (!isfinite(event.end_beats)) {
+    if (!isfinite(event.end_beats) ||
+        (event.kind != HWA_SCORE_TEMPO && event.end_beats <= event.start_beats)) {
         hwa_set_error(error, error_size,
-                      "score row %zu ends outside the numeric range", row);
+                      "score row %zu duration_beats cannot be represented at its start beat",
+                      row);
         return -1;
     }
     event.event_id = hwa_score_copy_text(fields[0]);
@@ -891,7 +896,9 @@ static int hwa_score_finish_manifest(HWAScoreManifest *manifest,
         if (hwa_score_manifest_beat_to_seconds(
                 manifest, event->start_beats, &event->start_seconds) != 0 ||
             hwa_score_manifest_beat_to_seconds(
-                manifest, event->end_beats, &event->end_seconds) != 0) {
+                manifest, event->end_beats, &event->end_seconds) != 0 ||
+            (event->kind != HWA_SCORE_TEMPO &&
+             event->end_seconds <= event->start_seconds)) {
             hwa_set_error(error, error_size,
                           "cannot map score row %zu through the tempo map",
                           event->source_row);
@@ -1015,7 +1022,8 @@ int hwa_score_manifest_load(const char *path,
     size_t data_size = 0U;
     HWAScoreParseState state;
     HWAScoreManifest temporary;
-    size_t first = 0U;
+    size_t bom_size = 0U;
+    size_t first;
     int parsed;
 
     if (error != NULL && error_size != 0U) {
@@ -1041,14 +1049,27 @@ int hwa_score_manifest_load(const char *path,
     memset(&state, 0, sizeof(state));
     state.manifest = &temporary;
     state.max_events = max_events;
-    if (data_size >= 3U && memcmp(data, "\xef\xbb\xbf", 3U) == 0) first = 3U;
+    if (data_size >= 3U && memcmp(data, "\xef\xbb\xbf", 3U) == 0) bom_size = 3U;
+    first = bom_size;
     while (first < data_size && isspace(data[first])) first++;
     if ((first < data_size && data[first] == '<') ||
         (data_size >= 2U && data[0] == 'P' && data[1] == 'K')) {
         parsed = hwa_score_from_musicxml(data, data_size, &state, error, error_size);
     } else {
-        parsed = hwa_score_csv_rows(data, data_size, hwa_score_parse_row, &state, error, error_size);
-        if (parsed == 0) parsed = hwa_score_finish_manifest(&temporary, error, error_size);
+        HWANumericLocale locale;
+        parsed = -1;
+        if (hwa_c_numeric_locale_begin(&locale) == 0) {
+            parsed = hwa_score_csv_rows(data + bom_size, data_size - bom_size,
+                                        hwa_score_parse_row, &state, error, error_size);
+            if (hwa_c_numeric_locale_end(&locale) != 0) {
+                hwa_set_error(error, error_size,
+                              "cannot restore numeric locale after parsing score CSV");
+                parsed = -1;
+            }
+            if (parsed == 0) parsed = hwa_score_finish_manifest(&temporary, error, error_size);
+        } else {
+            hwa_set_error(error, error_size, "cannot enter C numeric locale for score CSV");
+        }
     }
     if (parsed != 0) {
         free(data);
@@ -1311,7 +1332,8 @@ int hwa_score_manifest_build_track(const HWAScoreManifest *manifest,
             double energy_db = 20.0 * log10(effort);
             uint32_t flags = hwa_score_frame_flag(event);
 
-            if (frame->event_index == SIZE_MAX) {
+            if (frame->event_index == SIZE_MAX ||
+                (event->kind != HWA_SCORE_REST && frame->activity == 0.0)) {
                 frame->event_index = event_output;
             }
             frame->score_flags |= flags;
@@ -1334,7 +1356,8 @@ int hwa_score_manifest_build_track(const HWAScoreManifest *manifest,
                 }
             }
         }
-        if (event->tie != HWA_SCORE_TIE_CONTINUE &&
+        if (event->kind != HWA_SCORE_REST &&
+            event->tie != HWA_SCORE_TIE_CONTINUE &&
             event->tie != HWA_SCORE_TIE_STOP) {
             HWAAlignFrame *onset = &frames[first_frame];
             onset->spectral_onset = 1.0;

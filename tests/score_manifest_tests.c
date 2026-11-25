@@ -6,6 +6,7 @@
 
 #include "score_manifest.h"
 
+#include <locale.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -276,6 +277,8 @@ static void test_valid_manifest(const char *path)
         CHECK((frames[rest_frame].score_flags & HWA_ALIGN_FRAME_REST) != 0U &&
                   frames[rest_frame].activity == 0.0,
               "rest did not survive score-track building");
+        CHECK(frames[20U].combined_onset == 0.0,
+              "a rest created a note onset");
         CHECK((frames[ornament_frame].score_flags &
                HWA_ALIGN_FRAME_ORNAMENT) != 0U,
               "ornament flag did not survive score-track building");
@@ -390,6 +393,17 @@ static void test_bad_manifests(const char *path)
     expect_bad(path, text, "duration_beats");
     (void)snprintf(text, sizeof(text),
                    "%st,tempo,0,0,,,,,,,m1,120\n"
+                   "n,note,1,1e-20,60,90,v,none,mf,,m1,\n",
+                   header);
+    expect_bad(path, text, "duration_beats");
+    (void)snprintf(text, sizeof(text),
+                   "%st,tempo,0,0,,,,,,,m1,60\n"
+                   "u,tempo,1,0,,,,,,,m1,1e20\n"
+                   "n,note,1,1,60,90,v,none,mf,,m1,\n",
+                   header);
+    expect_bad(path, text, "score row 4");
+    (void)snprintf(text, sizeof(text),
+                   "%st,tempo,0,0,,,,,,,m1,120\n"
                    "n,note,1,1,128,90,v,none,mf,,m1,\n",
                    header);
     expect_bad(path, text, "midi_note");
@@ -449,6 +463,7 @@ static void test_bad_manifests(const char *path)
 static void test_csv_line_forms(const char *path)
 {
     static const char crlf_manifest[] =
+        "\xef\xbb\xbf"
         "event_id,kind,start_beats,duration_beats,midi_note,velocity,voice,tie,dynamic,mark,score_position,tempo_bpm\r\n"
         "t,tempo,0,0,,,,,,,m1,120\r\n"
         "n,note,0,1,60,90,v,none,mf,\"first\r\nsecond\",m1,";
@@ -460,11 +475,40 @@ static void test_csv_line_forms(const char *path)
           "could not write CRLF score fixture");
     CHECK(hwa_score_manifest_load(path, 100000U, 100U, &manifest,
                                   error, sizeof(error)) == 0,
-          "valid CRLF/quoted-newline score failed: %s", error);
-    CHECK(manifest.event_count == 2U &&
+          "valid UTF-8 BOM/CRLF score failed: %s", error);
+    CHECK(manifest.event_count == 2U && manifest.events != NULL &&
               strcmp(manifest.events[1].mark, "first\r\nsecond") == 0,
           "quoted CRLF field was not preserved");
     hwa_score_manifest_free(&manifest);
+}
+
+static void test_csv_numeric_locale(const char *path)
+{
+    static const char *const names[] = {
+        "de_DE.UTF-8", "fr_FR.UTF-8", "de-DE", "German_Germany.1252"
+    };
+    HWAScoreManifest manifest = {0};
+    char error[HWA_ERROR_SIZE];
+    size_t index;
+    int loaded;
+
+    for (index = 0U; index < sizeof(names)/sizeof(*names); ++index) {
+        if (setlocale(LC_NUMERIC, names[index]) != NULL &&
+            strcmp(localeconv()->decimal_point, ",") == 0) break;
+    }
+    if (index == sizeof(names)/sizeof(*names)) {
+        (void)setlocale(LC_NUMERIC, "C");
+        return;
+    }
+    CHECK(write_text(path, valid_manifest), "could not write locale fixture");
+    loaded = hwa_score_manifest_load(path, 100000U, 100U, &manifest,
+                                    error, sizeof(error));
+    CHECK(loaded == 0 && near(manifest.duration_seconds, 3.5, 1e-12),
+          "CSV decimals depend on the caller's locale: %s", error);
+    CHECK(strcmp(localeconv()->decimal_point, ",") == 0,
+          "CSV parser changed the caller's locale");
+    hwa_score_manifest_free(&manifest);
+    (void)setlocale(LC_NUMERIC, "C");
 }
 
 static void expect_good_ties(const char *path,
@@ -540,8 +584,9 @@ static void test_overlapping_rest_voice(const char *path)
     static const char manifest_text[] =
         "event_id,kind,start_beats,duration_beats,midi_note,velocity,voice,tie,dynamic,mark,score_position,tempo_bpm\n"
         "t,tempo,0,0,,,,,,,m1,60\n"
+        "r0,rest,0,2,,,two,none,,,m1,\n"
         "n,note,0,2,69,100,one,none,mf,,m1,\n"
-        "r,rest,1,1,,,two,none,,,m2,\n";
+        "r1,rest,1,1,,,three,none,,,m2,\n";
     HWAScoreManifest manifest;
     HWAAlignFrame *frames = NULL;
     HWAAlignEvent *events = NULL;
@@ -568,6 +613,9 @@ static void test_overlapping_rest_voice(const char *path)
                   (frames[overlap_frame].evidence_flags &
                    HWA_ALIGNMENT_EVIDENCE_CHROMA) != 0U,
               "a rest in another voice hid a sounding note");
+        CHECK(frames[overlap_frame].combined_onset == 0.0 &&
+                  frames[overlap_frame].event_index == 1U,
+              "a rest supplied onset or event evidence for a sounding note");
     }
     hwa_score_manifest_release_track(frames, events, &track);
     hwa_score_manifest_free(&manifest);
@@ -627,6 +675,7 @@ int main(void)
         test_limits(path);
         test_bad_manifests(path);
         test_csv_line_forms(path);
+        test_csv_numeric_locale(path);
         test_tie_chains(path);
         test_overlapping_rest_voice(path);
         test_tempo_lookup_is_linear(path);
