@@ -8,7 +8,8 @@ typedef enum HwaIsolationInstrument {
     HWA_ISOLATION_VIOLIN,
     HWA_ISOLATION_VIOLA,
     HWA_ISOLATION_CELLO,
-    HWA_ISOLATION_DOUBLE_BASS
+    HWA_ISOLATION_DOUBLE_BASS,
+    HWA_ISOLATION_PIANO
 } HwaIsolationInstrument;
 
 typedef struct HwaIsolationRange {

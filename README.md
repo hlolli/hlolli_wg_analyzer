@@ -130,28 +130,30 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
-### Isolate solo violin, viola, cello, or double bass
+### Isolate a solo instrument
 
 ```sh
 build/hlolli-wg-analyzer isolate-instrument recital.wav \
-  --instrument double-bass --output bass.hwa-events
+  --instrument piano --output piano.hwa-events
 ```
 
-Use `--instrument violin`, `--instrument viola`, `--instrument cello`, or
-`--instrument double-bass` for a mostly solo recording with interference such
-as coughs and footsteps.
+Choose `violin`, `viola`, `cello`, `double-bass`, or `piano` with
+`--instrument` for a mostly solo recording with interference such as coughs
+and footsteps.
 Each profile accounts for the instrument's low notes, including the viola's
 C3 and the cello's C2. The double bass profile covers E1, C1 extensions, and
 the low B0 of a five-string bass. The command runs offline in C and accepts
 mono or stereo WAVE at 8–192 kHz with finite samples within float32 range.
-The bundle contains `audio/violin.wav`, `audio/viola.wav`, `audio/cello.wav`,
-or `audio/double-bass.wav` alongside `audio/removed.wav` on the source sample
-clock. You can pass the instrument stem to `analyze-events`.
+The bundle contains the named instrument stem, such as `audio/piano.wav`,
+alongside `audio/removed.wav` on the source sample clock. You can pass the
+instrument stem to `analyze-events`.
 
 Automatic cleanup looks for brief disturbances between quiet windows and
-compares non-harmonic energy across nearby frames during stable notes.
+compares spectral energy across nearby frames during stable notes. The piano
+profile protects spectral peaks from several sounding notes at once.
 Noise that shares the instrument's harmonics can still bleed into the stem.
-Listen to the removed audio for bow attacks or note tails you want to keep.
+Listen to the removed audio for bow or hammer attacks and note tails you want
+to keep.
 
 To limit cleanup to known disturbances, repeat `--disturbance-samples` with
 zero-based, end-exclusive start and end samples. Samples outside those spans

@@ -217,7 +217,7 @@ static void hwa_print_usage(FILE *stream)
         "  hlolli-wg-analyzer separate-instruments INPUT.wav "
         "--model MODEL.onnx --output NEW.hwa-events\n"
         "  hlolli-wg-analyzer isolate-instrument INPUT.wav "
-        "--instrument violin|viola|cello|double-bass --output NEW.hwa-events "
+        "--instrument violin|viola|cello|double-bass|piano --output NEW.hwa-events "
         "[--disturbance-samples START:END ...]\n"
         "  hlolli-wg-analyzer infer-stem-note-events STEMS.hwa-events "
         "--model MODEL.onnx --output NEW.hwa-events\n"
@@ -263,7 +263,7 @@ static void hwa_print_usage(FILE *stream)
         "  --resume-from DIRECTORY     Reuse matching checked experiment jobs.\n"
         "  --model PATH                ONNX model for the inference command.\n"
         "  --expect-model-sha256 HEX   Require these exact model bytes.\n"
-        "  --instrument NAME          Isolate violin, viola, cello, or double-bass.\n"
+        "  --instrument NAME          Isolate violin, viola, cello, double-bass, or piano.\n"
         "  --disturbance-samples START:END  Limit cleanup to a source span "
         "(0-based, end excluded; repeatable).\n"
         "  --allow-run                 Permit the named renderer to run.\n"
@@ -3795,7 +3795,7 @@ static int hwa_run_isolate_instrument(HWACli *cli)
         cli->harmonic_decay_expected_set || cli->model_path != NULL)
         return -1;
     if (hwa_isolation_instrument_from_name(cli->isolation_instrument, &instrument) != 0) {
-        (void)fputs("hlolli-wg-analyzer: --instrument must be violin, viola, cello, or double-bass\n",
+        (void)fputs("hlolli-wg-analyzer: --instrument must be violin, viola, cello, double-bass, or piano\n",
                     stderr);
         return 2;
     }

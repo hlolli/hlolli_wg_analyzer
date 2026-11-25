@@ -43,6 +43,9 @@ static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
     [HWA_ISOLATION_DOUBLE_BASS] = {
         "double-bass", "audio/double-bass.wav", "hwa.double-bass-isolation",
         "double-bass-isolation-1"
+    },
+    [HWA_ISOLATION_PIANO] = {
+        "piano", "audio/piano.wav", "hwa.piano-isolation", "piano-isolation-1"
     }
 };
 

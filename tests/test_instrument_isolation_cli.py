@@ -923,5 +923,263 @@ class DoubleBassIsolation(InstrumentIsolationTest):
                     self.assertLess(stem_error, 0.99 * mixture_error, kind)
 
 
+class PianoIsolation(InstrumentIsolationTest):
+    instrument = "piano"
+
+    @staticmethod
+    def strike(rate, frames, pitch, amplitude, decay, seed):
+        rng = random.Random(seed)
+        partials = []
+        weights = (1.0, 0.75, 0.44, 0.32, 0.19, 0.13, 0.09)
+        for harmonic, weight in enumerate(weights, 1):
+            frequency = pitch * harmonic * math.sqrt(1.0 + 0.0004 * (harmonic ** 2 - 1))
+            if frequency >= rate / 2:
+                break
+            partials.append((math.tau * frequency, weight, rng.uniform(-math.pi, math.pi)))
+        samples = []
+        for frame in range(frames):
+            t = frame / rate
+            envelope = min(1.0, t / 0.002, (frames - frame) / (rate * 0.012))
+            tone = sum(weight * math.sin(angular * t + phase)
+                       * math.exp(-t * (1.0 + 0.18 * index) / decay)
+                       for index, (angular, weight, phase) in enumerate(partials))
+            hammer = 0.28 * rng.uniform(-1.0, 1.0) * math.exp(-t / 0.006)
+            samples.append(round(amplitude * envelope * (tone + hammer)))
+        return samples
+
+    def phrase(self, rate, duration, notes):
+        samples = [0] * round(rate * duration)
+        for seed, (onset, length, pitch, amplitude, decay) in enumerate(notes, 1):
+            start = round(onset * rate)
+            note = self.strike(rate, round(length * rate), pitch, amplitude, decay, seed)
+            for i, value in enumerate(note, start):
+                samples[i] += value
+        return samples
+
+    def test_stereo_marked_bundle_keeps_the_clock_and_adds_back_to_source(self):
+        rate, frames = 22050, 46237
+        left = self.strike(rate, frames, 130.81, 5500, 1.8, 1)
+        right = self.strike(rate, frames, 196.0, 4500, 1.8, 2)
+        cough = read_fixture("cough")
+        onset = rate * 2 // 3
+        for i, sample in enumerate(cough, onset):
+            left[i] += sample
+        span = (onset - 441, onset + len(cough) + 441)
+        source = [value for pair in zip(left, right) for value in pair]
+        write_pcm(self.source, source, rate, 2, mask=3)
+
+        result = self.isolate("--disturbance-samples", f"{span[0]}:{span[1]}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validated = self.cli("validate-event-bundle", self.output)
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        provider, = manifest["providers"]
+        self.assertEqual((provider["name"], provider["version"]),
+                         ("hwa.piano-isolation", "piano-isolation-1"))
+        self.assertEqual(provider["settings"],
+                         {"instrument": "piano", "disturbance_samples": [list(span)]})
+        audio = {row["kind"]: row for row in manifest["audio"]}
+        for row in audio.values():
+            fmt = row["format"]
+            self.assertEqual((fmt["sample_rate_hz"], fmt["channels"], fmt["channel_mask"],
+                              fmt["frames"]), (rate, 2, 3, frames))
+        piano = audio["instrument-stem"]
+        self.assertEqual((piano["name"], piano["relative_path"]), ("piano", "audio/piano.wav"))
+        self.assertEqual(piano["source_recording_id"], audio["source-recording"]["id"])
+        events = (self.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        event, = map(json.loads, events)
+        self.assertEqual((event["kind"], event["part"], event["start_sample"], event["end_sample"],
+                          event["evidence_audio_id"]),
+                         ("instrument-region", "piano", 0, frames, piano["id"]))
+
+        stem = read_float_pcm(self.output / piano["relative_path"])
+        removed = read_float_pcm(self.output / audio["derived-audio"]["relative_path"])
+        self.assertEqual((len(stem), len(removed)), (len(source), len(source)))
+        self.assertLess(max(abs(keep + drop - sample / 32768)
+                            for keep, drop, sample in zip(stem, removed, source)), 1e-7)
+        self.assertTrue(any(removed[2 * span[0]:2 * span[1]]))
+        self.assertFalse(any(removed[:2 * span[0]]))
+        self.assertFalse(any(removed[2 * span[1]:]))
+
+    def test_removes_a_step_without_cutting_a_note_in_the_other_channel(self):
+        rate = 22050
+        onset = int(0.65 * rate)
+        step = [4 * sample for sample in read_fixture("step")]
+        note = self.strike(rate, int(0.12 * rate), 523.25, 500, 0.1, 123)
+        left = [0] * (2 * rate)
+        right = left.copy()
+        left[onset:onset + len(step)] = step
+        right[onset:onset + len(note)] = note
+        write_pcm(self.source, [value for pair in zip(left, right) for value in pair], rate, 2)
+
+        mark = f"{onset - 2048}:{onset + len(step) + 2048}"
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.output = self.root / f"stereo-step-{marked}.hwa-events"
+                flags = ("--disturbance-samples", mark) if marked else ()
+                result = self.isolate(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem = read_float_pcm(self.output / "audio" / "piano.wav")
+                left_energy = sum((sample * 32768) ** 2 for sample in stem[::2])
+                right_error = sum((sample * 32768 - clean) ** 2
+                                  for sample, clean in zip(stem[1::2], right))
+                self.assertLess(right_error, 0.01 * sum(sample ** 2 for sample in note))
+                self.assertLess(left_energy, 0.8 * sum(sample ** 2 for sample in step))
+
+    def test_preserves_a0_at_low_sample_rate(self):
+        rate = 8000
+        start = rate // 2
+        for frames in (rate * 60 // 1000, rate // 2):
+            note = self.strike(rate, frames, 27.5, 8000, 0.55, 1)
+            samples = [0] * start + note + [0] * rate
+            for marked in (False, True):
+                with self.subTest(frames=frames, marked=marked):
+                    span = (start - 160, start + frames + 160) if marked else None
+                    self.output = self.root / f"a0-{frames}-{marked}.hwa-events"
+                    stem = self.isolate_mono(samples, rate, span)
+                    signal = sum(value ** 2 for value in note)
+                    error = sum((value - stem[i]) ** 2 for i, value in enumerate(note, start))
+                    self.assertLess(error, 0.01 * signal)
+
+    def test_preserves_high_key_chords_reattacks_and_pedal_tail(self):
+        rate = 22050
+        samples = self.phrase(rate, 2.3, (
+            (0.30, 0.06, 4186.01, 6500, 0.055),
+            (0.60, 1.25, 55.00, 3800, 0.32),
+            (0.60, 1.25, 130.81, 2800, 0.27),
+            (0.60, 1.25, 164.81, 2400, 0.28),
+            (0.60, 1.25, 196.00, 2100, 0.22),
+            (0.72, 1.13, 196.00, 3500, 0.23),
+            (0.79, 0.10, 1046.50, 3900, 0.065),
+        ))
+        regions = ((0.30, 0.36), (0.60, 0.72), (0.72, 0.89), (1.35, 1.85))
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                span = (round(0.27 * rate), round(1.88 * rate)) if marked else None
+                self.output = self.root / f"chord-{marked}.hwa-events"
+                stem = self.isolate_mono(samples, rate, span)
+                for start, end in regions:
+                    indices = range(round(start * rate), round(end * rate))
+                    signal = sum(samples[i] ** 2 for i in indices)
+                    error = sum((samples[i] - stem[i]) ** 2 for i in indices)
+                    self.assertLess(error, 0.015 * signal, (start, end))
+
+    def test_preserves_a_detached_cluster_of_low_notes(self):
+        rate = 22050
+        notes = tuple((0.5, 0.16, pitch, 4200, 0.29)
+                      for pitch in (27.5, 30.87, 36.71, 41.2))
+        samples = self.phrase(rate, 1.8, notes)
+        signal = sum(sample ** 2 for sample in samples)
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.output = self.root / f"low-cluster-{marked}.hwa-events"
+                span = (round(0.48 * rate), round(0.68 * rate)) if marked else None
+                stem = self.isolate_mono(samples, rate, span)
+                error = sum((sample - value) ** 2 for sample, value in zip(samples, stem))
+                self.assertLess(error, 0.01 * signal)
+
+    def test_preserves_short_detached_chromatic_chords(self):
+        rate = 22050
+        for pitches in ((50, 51), (48, 49, 50, 51)):
+            notes = tuple((0.5, 0.16, 440 * 2 ** ((midi - 69) / 12), 3000, 0.5)
+                          for midi in pitches)
+            clean = self.phrase(rate, 1.8, notes)
+            energy = sum(sample ** 2 for sample in clean)
+            for marked in (False, True):
+                with self.subTest(pitches=pitches, marked=marked):
+                    self.output = self.root / f"short-chord-{len(pitches)}-{marked}.hwa-events"
+                    span = (round(0.48 * rate), round(0.68 * rate)) if marked else None
+                    stem = self.isolate_mono(clean, rate, span)
+                    error = sum((sample - value) ** 2 for sample, value in zip(clean, stem))
+                    self.assertLess(error, 0.01 * energy)
+
+    def test_preserves_a_treble_attack_over_a_held_chord(self):
+        rate = 22050
+        chord = ((130.81, 5600), (196, 4000), (261.63, 3300), (329.63, 2650))
+        clean = self.phrase(rate, 1.85, [(0.15, 1.55, pitch, amp, 1.7)
+                                        for pitch, amp in chord])
+        onset = round(0.75 * rate)
+        amplitude = 1700
+        note = self.strike(rate, round(0.25 * rate), 783.99, amplitude, 0.12, 234)
+        rng = random.Random(2344)
+        for i in range(round(0.03 * rate)):
+            t = i / rate
+            hammer = 1.5 * amplitude * math.exp(-t / 0.009) * min(1.0, t / 0.002)
+            note[i] += round(hammer * rng.uniform(-1.0, 1.0))
+        for i, sample in enumerate(note, onset):
+            clean[i] += sample
+
+        # First differences emphasize the high frequencies in the hammer attack.
+        attack = range(1, round(0.028 * rate))
+        energy = sum((note[i] - note[i - 1]) ** 2 for i in attack)
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.output = self.root / f"treble-attack-{marked}.hwa-events"
+                span = (round(0.71 * rate), round(0.86 * rate)) if marked else None
+                stem = self.isolate_mono(clean, rate, span)
+                error = sum(((stem[onset + i] - stem[onset + i - 1])
+                             - (clean[onset + i] - clean[onset + i - 1])) ** 2
+                            for i in attack)
+                self.assertLess(error, 0.01 * energy)
+
+    def test_reduces_a_marked_cough_near_the_end_of_a_recording(self):
+        rate = 22050
+        chord = ((130.81, 4800), (164.81, 3400), (196, 2800), (261.63, 2400))
+        clean = self.phrase(rate, 2.8, [(0.25, 2.4, pitch, amp, 1.85) for pitch, amp in chord])
+        onset = round(1.22 * rate)
+        cough = read_fixture("cough")
+        start, end = onset - 441, onset + len(cough) + 441
+        mixed = clean.copy()
+        for i, sample in enumerate(cough, onset):
+            mixed[i] += sample
+
+        noise_energy = sum(sample ** 2 for sample in cough)
+        for trailing_ms in (0, 50):
+            with self.subTest(trailing_ms=trailing_ms):
+                self.output = self.root / f"cough-near-end-{trailing_ms}.hwa-events"
+                mix = mixed[:end + round(rate * trailing_ms / 1000)]
+                stem = self.isolate_mono(mix, rate, (start, end))
+                error = sum((stem[i] - clean[i]) ** 2 for i in range(start, end))
+                self.assertLess(error, 0.8 * noise_energy)
+                self.assertEqual(stem[:start], mix[:start])
+                self.assertEqual(stem[end:], mix[end:])
+
+    def test_reduces_recorded_cough_over_chord_and_step_in_rest(self):
+        rate = 22050
+        clean = self.phrase(rate, 4.3, (
+            (0.25, 2.40, 130.81, 4800, 1.85),
+            (0.25, 2.40, 164.81, 3400, 1.70),
+            (0.25, 2.40, 196.00, 2800, 1.55),
+            (0.25, 2.40, 261.63, 2400, 1.40),
+        ))
+        mix = clean.copy()
+        spans = []
+        for kind, onset, gain in (("cough", 1.22, 1), ("step", 3.10, 24)):
+            start = round(onset * rate)
+            noise = read_fixture(kind)
+            for i, value in enumerate(noise, start):
+                mix[i] += gain * value
+            spans.append((kind, start, start + len(noise)))
+        reference = self.root / "piano-reference.wav"
+        write_pcm(reference, clean, rate, 1)
+        write_pcm(self.source, mix, rate, 1)
+        marks = tuple(arg for _, start, end in spans
+                      for arg in ("--disturbance-samples", f"{start - 441}:{end + 441}"))
+        for mode, flags in (("automatic", ()), ("marked", marks)):
+            with self.subTest(mode=mode):
+                self.output = self.root / f"piano-{mode}.hwa-events"
+                result = self.isolate(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem_path = self.output / "audio" / "piano.wav"
+                report = self.evaluate(reference, stem_path)
+                self.assertGreater(report["si_sdr_improvement_db"], 1.0, report)
+                stem = read_float_pcm(stem_path)
+                for kind, start, end in spans:
+                    frames = range(start, end)
+                    mix_error = sum((mix[i] - clean[i]) ** 2 for i in frames)
+                    stem_error = sum((stem[i] * 32768 - clean[i]) ** 2 for i in frames)
+                    self.assertLess(stem_error, 0.8 * mix_error, kind)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[__file__, *REST])

@@ -9,6 +9,8 @@
 
 #define MAX_ISOLATION_PITCH_HZ 2600.0
 #define PITCH_CONTEXT_FRAMES 7U
+#define PIANO_CONTEXT_PEAKS 4U
+#define PIANO_MEASURED_PEAKS 12U
 
 typedef struct IsolationProfile {
     double min_pitch_hz;
@@ -53,6 +55,12 @@ static const IsolationProfile isolation_profiles[] = {
         .rest_context_seconds = 0.8, .window_overlap = 8U,
         .protect_marked_spectrum = 1, .protect_low_notes = 1,
         .detect_marked_rests = 1
+    },
+    [HWA_ISOLATION_PIANO] = {
+        .low_mask_width_hz = 1.0,
+        .min_window_seconds = 0.125, .rest_context_seconds = 0.75,
+        .window_overlap = 4U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1
     }
 };
 
@@ -63,6 +71,15 @@ typedef struct IsolationFrame {
     double confidence;
     double off_harmonic_power;
 } IsolationFrame;
+
+typedef struct PianoFrame {
+    double tonal_power;
+    double broad_power;
+    double low_note_power;
+    size_t peaks[PIANO_MEASURED_PEAKS];
+    double peak_fractions[PIANO_MEASURED_PEAKS];
+    int separated_partials;
+} PianoFrame;
 
 typedef struct IsolationWorkspace {
     const IsolationProfile *profile;
@@ -77,12 +94,14 @@ typedef struct IsolationWorkspace {
     double bin_hz;
     double *window;
     double *power;
+    double *piano_channel_power;
     double *normalizer;
     double *low_peaks;
     double *marked_background;
     HwaDspComplex *spectrum;
     HwaDspComplex *autocorrelation;
     IsolationFrame *frames;
+    PianoFrame *piano_frames;
 } IsolationWorkspace;
 
 static double smooth_step(double value)
@@ -108,6 +127,8 @@ static int spectral_frame(IsolationWorkspace *work, size_t start)
     memset(work->power, 0, bins * sizeof(*work->power));
     for (channel = 0U; channel < work->channels; ++channel) {
         HwaDspComplex *spectrum = work->spectrum + work->length * channel;
+        double *channel_power = work->piano_channel_power != NULL ?
+            work->piano_channel_power + bins * channel : NULL;
         size_t index;
         for (index = 0U; index < work->length; ++index) {
             size_t padded_sample = start + index;
@@ -122,8 +143,10 @@ static int spectral_frame(IsolationWorkspace *work, size_t start)
         }
         if (hwa_dsp_fft(spectrum, work->length, 0) != HWA_DSP_OK) return -1;
         for (index = 0U; index < bins; ++index) {
-            work->power[index] += spectrum[index].real * spectrum[index].real +
-                                  spectrum[index].imag * spectrum[index].imag;
+            double power = spectrum[index].real * spectrum[index].real +
+                           spectrum[index].imag * spectrum[index].imag;
+            work->power[index] += power;
+            if (channel_power != NULL) channel_power[index] = power;
         }
     }
     return 0;
@@ -188,6 +211,105 @@ static double off_harmonic_power(const IsolationWorkspace *work, double pitch_hz
     return power;
 }
 
+static double piano_broadband_weight(const double *power, size_t half, size_t bin)
+{
+    double left, right, floor;
+    if (bin < 4U || bin + 4U > half || power[bin] == 0.0) return 0.0;
+    left = fmin(power[bin - 3U], power[bin - 4U]);
+    right = fmin(power[bin + 3U], power[bin + 4U]);
+    floor = fmin(left, right);
+    return smooth_step((floor / power[bin] - 0.04) / 0.25);
+}
+
+static double piano_broadband_power(const double *power, size_t half)
+{
+    double broadband = 0.0;
+    size_t bin;
+    for (bin = 4U; bin + 4U <= half; ++bin)
+        broadband += power[bin] * piano_broadband_weight(power, half, bin);
+    return broadband;
+}
+
+static int has_piano_partial_gap(const double *power, size_t half, double total)
+{
+    double below = power[0] + power[1];
+    double min_side = 0.23 * total;
+    double max_gap = 0.004 * total;
+    size_t bin;
+    /* Even overlapping partials can leave a gap between two bands of energy. */
+    for (bin = 2U; bin + 2U <= half; ++bin) {
+        below += power[bin];
+        if (below < min_side) continue;
+        if (total - below < min_side) break;
+        if (power[bin - 2U] + power[bin - 1U] + power[bin] +
+            power[bin + 1U] + power[bin + 2U] < max_gap)
+            return 1;
+    }
+    return 0;
+}
+
+static int has_piano_partials_in_channels(const IsolationWorkspace *work, double total)
+{
+    size_t half = work->length / 2U;
+    unsigned channel;
+    if (!has_piano_partial_gap(work->power, half, total)) return 0;
+    if (work->piano_channel_power == NULL) return 1;
+    /* A gap between a step in one channel and a note in the other is not a chord. */
+    for (channel = 0U; channel < work->channels; ++channel) {
+        const double *power = work->piano_channel_power + (half + 1U) * channel;
+        double channel_total = 0.0;
+        size_t bin;
+        for (bin = 0U; bin <= half; ++bin) channel_total += power[bin];
+        if (channel_total > 0.10 * total && !has_piano_partial_gap(power, half, channel_total))
+            return 0;
+    }
+    return 1;
+}
+
+static void measure_piano_spectrum(const IsolationWorkspace *work, size_t index)
+{
+    PianoFrame *piano = &work->piano_frames[index];
+    double minimum_peak = 0.012 * work->frames[index].power;
+    size_t half = work->length / 2U;
+    size_t covered = 0U;
+    size_t bin;
+
+    /* Close bass notes can merge in the FFT, even without interference. */
+    for (bin = (size_t)ceil(20.0 / work->bin_hz);
+         (double)bin * work->bin_hz <= 100.0; ++bin)
+        piano->low_note_power += work->power[bin];
+    for (bin = 3U; bin + 3U <= half; ++bin) {
+        double power = work->power[bin];
+        double frequency = (double)bin * work->bin_hz;
+        size_t shoulder = frequency < 100.0 ? 2U : 3U;
+        double shoulder_fraction = shoulder == 2U ? 0.30 : 0.13;
+        size_t peak, near;
+        /* Held-chord matching still needs individually resolved partials. */
+        if (power < minimum_peak || frequency < 20.0 ||
+            power <= work->power[bin - 1U] || power < work->power[bin + 1U] ||
+            fmax(work->power[bin - shoulder], work->power[bin + shoulder]) >
+                shoulder_fraction * power)
+            continue;
+        for (near = bin - 2U > covered ? bin - 2U : covered; near <= bin + 2U; ++near)
+            piano->tonal_power += work->power[near];
+        covered = near;
+        for (peak = 0U; peak < PIANO_MEASURED_PEAKS; ++peak) {
+            size_t prior = piano->peaks[peak];
+            if (prior == 0U || power > work->power[prior]) {
+                memmove(&piano->peaks[peak + 1U], &piano->peaks[peak],
+                        (PIANO_MEASURED_PEAKS - peak - 1U) * sizeof(*piano->peaks));
+                memmove(&piano->peak_fractions[peak + 1U], &piano->peak_fractions[peak],
+                        (PIANO_MEASURED_PEAKS - peak - 1U) * sizeof(*piano->peak_fractions));
+                piano->peaks[peak] = bin;
+                piano->peak_fractions[peak] = power / work->frames[index].power;
+                break;
+            }
+        }
+    }
+    piano->broad_power = piano_broadband_power(work->power, half);
+    piano->separated_partials = has_piano_partials_in_channels(work, work->frames[index].power);
+}
+
 static int frame_intersects_ranges(const IsolationWorkspace *work,
                                    size_t start, size_t margin,
                                    const HwaIsolationRange *ranges,
@@ -227,6 +349,10 @@ static int measure_frames(IsolationWorkspace *work,
             }
         }
         if (frame->power == 0.0) continue;
+        if (work->piano_frames != NULL) {
+            measure_piano_spectrum(work, index);
+            continue;
+        }
         if (work->low_peaks != NULL) {
             size_t first_low_bin = (size_t)ceil(work->profile->min_pitch_hz / work->bin_hz);
             size_t last_low_bin = (size_t)(250.0 / work->bin_hz);
@@ -259,6 +385,158 @@ static int pitches_agree(double first, double second)
 {
     return first > 0.0 && second > 0.0 &&
            fmax(first, second) <= 1.06 * fmin(first, second);
+}
+
+static int piano_frame_is_tonal(const IsolationWorkspace *work, size_t index)
+{
+    return work->piano_frames[index].tonal_power > 0.30 * work->frames[index].power;
+}
+
+static int piano_peaks_match(size_t first, size_t second)
+{
+    return first > second ? first - second <= 1U : second - first <= 1U;
+}
+
+static double piano_peak_fraction(const PianoFrame *frame, size_t bin)
+{
+    size_t index;
+    for (index = 0U; index < PIANO_MEASURED_PEAKS && frame->peaks[index] != 0U; ++index) {
+        if (piano_peaks_match(frame->peaks[index], bin)) return frame->peak_fractions[index];
+    }
+    return 0.0;
+}
+
+static size_t piano_order_peaks(const PianoFrame *frame, size_t *ordered)
+{
+    size_t count;
+    for (count = 0U; count < PIANO_CONTEXT_PEAKS && frame->peaks[count] != 0U; ++count) {
+        size_t bin = frame->peaks[count];
+        size_t index = count;
+        while (index > 0U && ordered[index - 1U] > bin) {
+            ordered[index] = ordered[index - 1U];
+            --index;
+        }
+        ordered[index] = bin;
+    }
+    return count;
+}
+
+static int piano_chords_agree(const PianoFrame *first, const PianoFrame *second)
+{
+    size_t first_bins[PIANO_CONTEXT_PEAKS], second_bins[PIANO_CONTEXT_PEAKS];
+    size_t first_count = piano_order_peaks(first, first_bins);
+    size_t second_count = piano_order_peaks(second, second_bins);
+    size_t left = 0U, right = 0U, matches = 0U;
+    /* Match in frequency order so one peak cannot account for two notes. */
+    while (left < first_count && right < second_count) {
+        if (piano_peaks_match(first_bins[left], second_bins[right])) {
+            ++left;
+            ++right;
+            if (++matches == 2U) return 1;
+        } else if (first_bins[left] < second_bins[right]) {
+            ++left;
+        } else {
+            ++right;
+        }
+    }
+    return matches == 1U && first_count == 1U && second_count == 1U;
+}
+
+static int piano_frame_has_note(const IsolationWorkspace *work, size_t index)
+{
+    const PianoFrame *current = &work->piano_frames[index];
+    double power = work->frames[index].power;
+    if (current->separated_partials || current->low_note_power > 0.45 * power) return 1;
+    if (!piano_frame_is_tonal(work, index)) return 0;
+    if (current->tonal_power > 0.86 * power) return 1;
+    /* A footstep may ring briefly; check that the partials persist. */
+    return (index > 0U && piano_frame_is_tonal(work, index - 1U) &&
+            piano_chords_agree(current, current - 1U)) ||
+           (index + 1U < work->grid_count && piano_frame_is_tonal(work, index + 1U) &&
+            piano_chords_agree(current, current + 1U));
+}
+
+static const PianoFrame *piano_chord_context(const IsolationWorkspace *work,
+                                             size_t index, int forward, int marked)
+{
+    const PianoFrame *current = &work->piano_frames[index];
+    size_t available = forward ? work->grid_count - index - 1U : index;
+    size_t limit = (size_t)work->sample_rate / (2U * work->hop);
+    size_t step;
+    if (limit > available) limit = available;
+    /* Skip overlapping windows so the interference cannot set its own floor. */
+    for (step = work->profile->window_overlap; step <= limit; ++step) {
+        size_t other = forward ? index + step : index - step;
+        const PianoFrame *neighbor = &work->piano_frames[other];
+        size_t start = other * work->hop;
+        if (marked && (start < work->padding ||
+                       start + work->length > work->padding + work->frame_count))
+            break;
+        if (work->frames[other].power < 0.03 * work->frames[index].power)
+            break;
+        if (piano_frame_is_tonal(work, other) && piano_chords_agree(current, neighbor))
+            return neighbor;
+    }
+    return NULL;
+}
+
+static int piano_has_new_peak(const PianoFrame *current, const PianoFrame *before,
+                              const PianoFrame *after)
+{
+    size_t peak;
+    for (peak = 0U; peak < PIANO_MEASURED_PEAKS && current->peaks[peak] != 0U; ++peak) {
+        size_t bin = current->peaks[peak];
+        double fraction = current->peak_fractions[peak];
+        double prior;
+        if (fraction <= 0.035) break;
+        prior = piano_peak_fraction(before, bin);
+        if (fraction > 2.5 * prior &&
+            (after == NULL || piano_peak_fraction(after, bin) > fmax(0.018, 1.5 * prior)))
+            return 1;
+    }
+    return 0;
+}
+
+static double piano_chord_gain(const IsolationWorkspace *work, size_t index, int marked)
+{
+    const PianoFrame *current = &work->piano_frames[index];
+    const PianoFrame *left, *right;
+    double power = work->frames[index].power;
+    double baseline, excess;
+    size_t step;
+    if (current->broad_power <= 0.0003 * power || current->peaks[0] == 0U)
+        return 0.0;
+    left = piano_chord_context(work, index, 0, marked);
+    right = piano_chord_context(work, index, 1, marked);
+    if (left == NULL || right == NULL) {
+        size_t start = index * work->hop;
+        if (!marked) return 0.0;
+        /* At a recording edge a marked disturbance may only have one full reference. */
+        if (left == NULL && right != NULL && start < work->padding + work->length)
+            left = right;
+        else if (right == NULL && left != NULL &&
+                 start + 2U * work->length > work->padding + work->frame_count)
+            right = left;
+        else
+            return 0.0;
+    } else if (!piano_chords_agree(left, right)) {
+        return 0.0;
+    }
+    /* A reattack can retain the same pitches and still add musical broadband sound. */
+    if (current->tonal_power > 1.40 * fmax(left->tonal_power, right->tonal_power))
+        return 0.0;
+    /* The hammer can reach a window before its new pitch is clear. */
+    if (piano_has_new_peak(current, left, NULL)) return 0.0;
+    for (step = 1U; step <= 2U && index + step < work->grid_count; ++step) {
+        if (piano_frame_is_tonal(work, index + step) &&
+            piano_has_new_peak(current + step, left, right))
+            return 0.0;
+    }
+    baseline = fmax(left->broad_power, right->broad_power);
+    excess = fmax(0.0, current->broad_power - (marked ? 1.35 : 2.0) * baseline);
+    return (marked ? 0.82 : 0.66) *
+        smooth_step((excess / power - 0.0002) / (marked ? 0.009 : 0.016)) *
+        smooth_step((excess / current->broad_power - 0.20) / 0.60);
 }
 
 static const IsolationFrame *nearby_pitch(const IsolationWorkspace *work,
@@ -440,10 +718,14 @@ static size_t find_quiet_shoulder(const IsolationWorkspace *work, size_t index,
 
     if (limit > available) limit = available;
     for (step = 1U; step <= limit; ++step) {
-        const IsolationFrame *frame = &work->frames[forward ? index + step : index - step];
+        size_t other = forward ? index + step : index - step;
+        const IsolationFrame *frame = &work->frames[other];
         double pitch = frame->power >= 0.12 * peak && likely_instrument_pitch(frame)
             ? frame->pitch_hz : 0.0;
-        if (pitches_agree(previous_pitch, pitch)) break;
+        if (pitches_agree(previous_pitch, pitch) ||
+            (work->piano_frames != NULL && frame->power >= 0.12 * peak &&
+             piano_frame_has_note(work, other)))
+            break;
         if (frame->power <= 0.06 * peak && previous_power <= 0.06 * peak) {
             *floor = fmax(frame->power, previous_power);
             return step;
@@ -470,6 +752,9 @@ static int overlaps_short_note(const IsolationWorkspace *work, size_t index)
         double pitch = frame->power >= minimum_power && frame->confidence >= 0.65 &&
             frame->off_harmonic_power <= 0.48 * frame->power ? frame->pitch_hz : 0.0;
         if (pitches_agree(previous_pitch, pitch)) return 1;
+        if (work->piano_frames != NULL && frame->power >= minimum_power &&
+            piano_frame_has_note(work, i))
+            return 1;
         if (work->low_peaks != NULL) {
             double low_peak = frame->power >= minimum_power ? work->low_peaks[i] : 0.0;
             if (previous_low_peak > 0.0 && low_peak > 0.0 &&
@@ -495,7 +780,9 @@ static double rest_disturbance_strength(const IsolationWorkspace *work, size_t i
     double impulse_power_ratio;
     size_t left, right, i;
 
-    if (frame->power == 0.0 || likely_instrument_pitch(frame)) return 0.0;
+    if (frame->power == 0.0 || likely_instrument_pitch(frame) ||
+        (work->piano_frames != NULL && piano_frame_has_note(work, index)))
+        return 0.0;
     left = find_quiet_shoulder(work, index, limit, 0, &left_floor);
     if (left == 0U) return 0.0;
     right = find_quiet_shoulder(work, index, limit - left, 1, &right_floor);
@@ -667,19 +954,43 @@ static int add_correction(IsolationWorkspace *work, size_t start,
     size_t first = padded_begin > start ? padded_begin - start : 0U;
     size_t end = padded_end - start;
     size_t half = work->length / 2U;
+    const double *rest_power[2] = {NULL, NULL};
+    double rest_broadband_mix[2] = {0.0, 0.0};
     size_t bin;
     unsigned channel;
     if (end > work->length) end = work->length;
+    if (confirmed_rest && work->piano_frames != NULL) {
+        size_t frame = start / work->hop;
+        for (channel = 0U; channel < work->channels; ++channel) {
+            double total = work->frames[frame].power;
+            double broadband = work->piano_frames[frame].broad_power;
+            rest_power[channel] = work->power;
+            if (work->piano_channel_power != NULL) {
+                rest_power[channel] = work->piano_channel_power + (half + 1U) * channel;
+                total = 0.0;
+                for (bin = 0U; bin <= half; ++bin) total += rest_power[channel][bin];
+                broadband = piano_broadband_power(rest_power[channel], half);
+            }
+            /* The other channel may have supplied all the noise evidence. */
+            if (total > 0.0)
+                rest_broadband_mix[channel] = smooth_step((broadband / total - 0.16) / 0.15);
+        }
+    }
     for (bin = 0U; bin <= half; ++bin) {
         double harmonic = period_bins > 0.0 ? harmonic_weight(bin, period_bins, 1.0) : 0.0;
-        double weight = work->marked_background != NULL && !confirmed_rest ?
-            marked_broadband_weight(work, bin, pitch_hz > 0.0) : 1.0;
+        double weight = 1.0;
         double low = 1.0 - smooth_step(((double)bin * work->bin_hz -
                                         work->profile->low_mask_start_hz) /
                                        work->profile->low_mask_width_hz);
         if (alternate_period > 0.0) {
             /* Short notes occupy wider bins than a sustained pitch. */
             harmonic = fmax(harmonic, harmonic_weight(bin, alternate_period, 1.8));
+        }
+        if (!confirmed_rest) {
+            if (work->piano_frames != NULL)
+                weight = piano_broadband_weight(work->power, half, bin);
+            else if (work->marked_background != NULL)
+                weight = marked_broadband_weight(work, bin, pitch_hz > 0.0);
         }
         double correction = -fmax(strength * (1.0 - harmonic) * weight, low_strength * low);
         if (work->marked_background != NULL && work->power[bin] > 0.0) {
@@ -688,8 +999,14 @@ static int add_correction(IsolationWorkspace *work, size_t start,
         }
         for (channel = 0U; channel < work->channels; ++channel) {
             HwaDspComplex *spectrum = work->spectrum + work->length * channel;
-            spectrum[bin].real *= correction;
-            spectrum[bin].imag *= correction;
+            double channel_correction = correction;
+            if (rest_power[channel] != NULL) {
+                double spectral_weight = piano_broadband_weight(rest_power[channel], half, bin);
+                double mix = rest_broadband_mix[channel];
+                channel_correction *= mix * (mix + (1.0 - mix) * spectral_weight);
+            }
+            spectrum[bin].real *= channel_correction;
+            spectrum[bin].imag *= channel_correction;
             if (bin > 0U && bin < half) {
                 spectrum[work->length - bin].real = spectrum[bin].real;
                 spectrum[work->length - bin].imag = -spectrum[bin].imag;
@@ -720,14 +1037,20 @@ static int accumulate_frame_correction(IsolationWorkspace *work, size_t index,
     int confirmed_rest = 0;
     IsolationFrame alternate = {0};
     if (spectral_frame(work, start) != 0) return -1;
-    isolation_gain(work, index, marked, &pitch_hz, &strength, &low_strength);
+    if (work->piano_frames != NULL) {
+        pitch_hz = 0.0;
+        low_strength = 0.0;
+        strength = piano_chord_gain(work, index, marked);
+    } else {
+        isolation_gain(work, index, marked, &pitch_hz, &strength, &low_strength);
+    }
     if (!marked || work->profile->detect_marked_rests) {
         double rest_strength = rest_disturbance_strength(work, index, &low_strength);
         if (rest_strength > 0.0) {
             confirmed_rest = 1;
             strength = rest_strength;
             pitch_hz = 0.0;
-        } else if (!marked && strength > 0.0) {
+        } else if (!marked && strength > 0.0 && work->piano_frames == NULL) {
             /* A short played note can appear in the spectrum of its neighbors. */
             if (measure_pitch(work, &alternate, pitch_hz) != 0) return -1;
             if (alternate.confidence >= 0.80) strength = 0.0;
@@ -775,7 +1098,8 @@ static int accumulate_correction(IsolationWorkspace *work,
     size_t measured_range = SIZE_MAX;
     size_t index;
     if (work->marked_background != NULL &&
-        work->profile == &isolation_profiles[HWA_ISOLATION_DOUBLE_BASS])
+        (work->profile == &isolation_profiles[HWA_ISOLATION_DOUBLE_BASS] ||
+         work->piano_frames != NULL))
         return accumulate_marked_ranges(work, ranges, range_count, output);
     for (index = 0U; index < work->grid_count; ++index) {
         size_t start = index * work->hop;
@@ -839,6 +1163,8 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     size_t index;
     int use_marked_background;
     int measure_low_peaks;
+    int piano = instrument == HWA_ISOLATION_PIANO;
+    int piano_stereo = piano && channels == 2U;
     int result = -1;
     if (input == NULL || output == NULL || input == output || frame_count == 0U ||
         (channels != 1U && channels != 2U) ||
@@ -885,11 +1211,14 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     work.bin_hz = (double)sample_rate_hz / (double)work.length;
     work.grid_count = (frame_count + work.padding - 1U) / work.hop + 1U;
     fixed_work = (work.length + work.length / 2U + 1U + work.hop) * sizeof(double) +
-                 work.length * (channels + 1U) * sizeof(HwaDspComplex);
+                 work.length * (channels + (piano ? 0U : 1U)) * sizeof(HwaDspComplex);
     if (use_marked_background)
         fixed_work += (work.length / 2U + 1U) * sizeof(*work.marked_background);
+    if (piano_stereo)
+        fixed_work += (work.length / 2U + 1U) * channels * sizeof(*work.piano_channel_power);
     per_frame_work = sizeof(*work.frames);
     if (measure_low_peaks) per_frame_work += sizeof(*work.low_peaks);
+    if (piano) per_frame_work += sizeof(*work.piano_frames);
     if (fixed_work > max_work_bytes ||
         work.grid_count > SIZE_MAX / per_frame_work ||
         work.grid_count > (max_work_bytes - fixed_work) / per_frame_work) {
@@ -898,18 +1227,25 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     }
     work.window = malloc(work.length * sizeof(*work.window));
     work.power = malloc((work.length / 2U + 1U) * sizeof(*work.power));
+    if (piano_stereo) {
+        work.piano_channel_power = malloc((work.length / 2U + 1U) * channels *
+                                          sizeof(*work.piano_channel_power));
+    }
     work.normalizer = calloc(work.hop, sizeof(*work.normalizer));
     work.spectrum = malloc(work.length * channels * sizeof(*work.spectrum));
-    work.autocorrelation = malloc(work.length * sizeof(*work.autocorrelation));
+    if (!piano) work.autocorrelation = malloc(work.length * sizeof(*work.autocorrelation));
     work.frames = calloc(work.grid_count, sizeof(*work.frames));
+    if (piano) work.piano_frames = calloc(work.grid_count, sizeof(*work.piano_frames));
     if (measure_low_peaks) work.low_peaks = calloc(work.grid_count, sizeof(*work.low_peaks));
     if (use_marked_background) {
         work.marked_background = malloc((work.length / 2U + 1U) *
                                         sizeof(*work.marked_background));
     }
     if ((use_marked_background && work.marked_background == NULL) ||
+        (piano_stereo && work.piano_channel_power == NULL) ||
         work.window == NULL || work.power == NULL || work.normalizer == NULL ||
-        work.spectrum == NULL || work.autocorrelation == NULL || work.frames == NULL ||
+        work.spectrum == NULL || work.frames == NULL ||
+        (piano ? work.piano_frames == NULL : work.autocorrelation == NULL) ||
         (measure_low_peaks && work.low_peaks == NULL)) {
         hwa_set_error(error, error_size, "cannot allocate instrument isolation workspace");
         goto cleanup;
@@ -929,10 +1265,12 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
 transform_error:
     hwa_set_error(error, error_size, "instrument isolation spectral transform failed");
 cleanup:
+    free(work.piano_frames);
     free(work.marked_background);
     free(work.low_peaks);
     free(work.window);
     free(work.power);
+    free(work.piano_channel_power);
     free(work.normalizer);
     free(work.spectrum);
     free(work.autocorrelation);

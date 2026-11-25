@@ -1464,6 +1464,10 @@ if(HWA_PYTHON3_EXECUTABLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> DoubleBassIsolation)
   set_tests_properties(cli.double-bass-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.piano-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> PianoIsolation)
+  set_tests_properties(cli.piano-isolation PROPERTIES TIMEOUT 60)
   add_test(
     NAME cli.isolated-note
     COMMAND
