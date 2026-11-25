@@ -130,21 +130,23 @@ contract. It turns one source WAVE into clock-aligned stem payloads with
 stable IDs, labels, hashes, and provenance. See
 [Instrument stems version 1](docs/instrument-stems-v1.md).
 
-### Isolate solo violin, viola, or cello
+### Isolate solo violin, viola, cello, or double bass
 
 ```sh
 build/hlolli-wg-analyzer isolate-instrument recital.wav \
-  --instrument cello --output cello.hwa-events
+  --instrument double-bass --output bass.hwa-events
 ```
 
-Use `--instrument violin`, `--instrument viola`, or `--instrument cello`
-for a mostly solo recording with interference such as coughs and footsteps.
+Use `--instrument violin`, `--instrument viola`, `--instrument cello`, or
+`--instrument double-bass` for a mostly solo recording with interference such
+as coughs and footsteps.
 Each profile accounts for the instrument's low notes, including the viola's
-C3 and the cello's C2. The command runs offline in C and accepts mono or stereo
-WAVE at 8–192 kHz with finite samples within float32 range.
-The bundle contains `audio/violin.wav`, `audio/viola.wav`, or `audio/cello.wav`
-alongside `audio/removed.wav` on the source sample clock. You can pass the
-instrument stem to `analyze-events`.
+C3 and the cello's C2. The double bass profile covers E1, C1 extensions, and
+the low B0 of a five-string bass. The command runs offline in C and accepts
+mono or stereo WAVE at 8–192 kHz with finite samples within float32 range.
+The bundle contains `audio/violin.wav`, `audio/viola.wav`, `audio/cello.wav`,
+or `audio/double-bass.wav` alongside `audio/removed.wav` on the source sample
+clock. You can pass the instrument stem to `analyze-events`.
 
 Automatic cleanup looks for brief disturbances between quiet windows and
 compares non-harmonic energy across nearby frames during stable notes.

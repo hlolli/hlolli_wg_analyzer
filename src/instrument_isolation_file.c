@@ -39,8 +39,27 @@ static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
     },
     [HWA_ISOLATION_CELLO] = {
         "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-2"
+    },
+    [HWA_ISOLATION_DOUBLE_BASS] = {
+        "double-bass", "audio/double-bass.wav", "hwa.double-bass-isolation",
+        "double-bass-isolation-1"
     }
 };
+
+int hwa_isolation_instrument_from_name(const char *name,
+                                       HwaIsolationInstrument *instrument)
+{
+    size_t index;
+    if (name == NULL || instrument == NULL) return -1;
+    for (index = 0U; index < sizeof(hwa_isolation_artifacts) / sizeof(hwa_isolation_artifacts[0]);
+         ++index) {
+        if (strcmp(name, hwa_isolation_artifacts[index].instrument) == 0) {
+            *instrument = (HwaIsolationInstrument)index;
+            return 0;
+        }
+    }
+    return -1;
+}
 
 static int hwa_isolation_supports_float32(void)
 {
@@ -322,8 +341,7 @@ int hwa_isolate_instrument_wav(const char *source_path,
     int result = -1;
     if (source_path == NULL || source_path[0] == '\0' ||
         output_directory == NULL || output_directory[0] == '\0' ||
-        (instrument != HWA_ISOLATION_VIOLIN && instrument != HWA_ISOLATION_VIOLA &&
-         instrument != HWA_ISOLATION_CELLO) ||
+        (size_t)instrument >= sizeof(hwa_isolation_artifacts) / sizeof(hwa_isolation_artifacts[0]) ||
         (range_count != 0U && ranges == NULL) ||
         input_limits == NULL || bundle_limits == NULL ||
         input_limits->max_input_bytes == 0U ||

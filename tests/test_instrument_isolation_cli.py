@@ -98,6 +98,41 @@ class InstrumentIsolationTest(unittest.TestCase):
         self.assertEqual(report.returncode, 0, report.stderr)
         return json.loads(report.stdout)
 
+    @staticmethod
+    def bowed_note(rate, frames, hz, amplitude, edge_ms=40):
+        envelope_edge = rate * edge_ms // 1000
+        samples = []
+        for i in range(frames):
+            phase = math.tau * hz * i / rate
+            envelope = min(1.0, i / envelope_edge, (frames - i) / envelope_edge)
+            tone = (math.sin(phase) + 0.45 * math.sin(2 * phase)
+                    + 0.2 * math.sin(3 * phase) + 0.1 * math.sin(4 * phase))
+            samples.append(round(amplitude * envelope * tone))
+        return samples
+
+    @staticmethod
+    def textured_bowed_note(rate, frames, hz, attack, release, bow_level, bow_decay_seconds=None):
+        rng = random.Random(123)
+        samples = []
+        for i in range(frames):
+            t = i / rate
+            envelope = min(1.0, t / attack, (frames - i) / (rate * release))
+            phase = math.tau * hz * t
+            tone = sum(gain * math.sin(harmonic * phase)
+                       for harmonic, gain in enumerate((0.7, 1.0, 0.42, 0.32), 1))
+            bow_envelope = 1.0 if bow_decay_seconds is None else math.exp(-t / bow_decay_seconds)
+            bow = bow_level * rng.uniform(-1.0, 1.0) * bow_envelope
+            samples.append(round(4000 * envelope * (tone + bow)))
+        return samples
+
+    def isolate_mono(self, samples, rate, span=None):
+        write_pcm(self.source, samples, rate, 1)
+        flags = () if span is None else ("--disturbance-samples", f"{span[0]}:{span[1]}")
+        result = self.isolate(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stem = self.output / "audio" / f"{self.instrument}.wav"
+        return [value * 32768 for value in read_float_pcm(stem)]
+
 
 class ViolinIsolation(InstrumentIsolationTest):
     def test_bundle_preserves_stereo_clock_and_adds_back_to_source(self):
@@ -330,7 +365,7 @@ class ViolinIsolation(InstrumentIsolationTest):
 
     def test_rejects_unsupported_instrument_and_bad_ranges_without_output(self):
         write_pcm(self.source, [0] * 1024, 22050, 1)
-        unsupported = self.isolate(instrument="double-bass")
+        unsupported = self.isolate(instrument="bassoon")
         self.assertNotEqual(unsupported.returncode, 0)
         self.assertFalse(self.output.exists())
         for spans in (("0:0",), ("20:10",), ("1:",), ("-1:8",), ("20:1025",),
@@ -475,40 +510,6 @@ class ViolaIsolation(InstrumentIsolationTest):
 class CelloIsolation(InstrumentIsolationTest):
     instrument = "cello"
 
-    @staticmethod
-    def bowed_note(rate, frames, hz, amplitude, edge_ms=40):
-        envelope_edge = rate * edge_ms // 1000
-        samples = []
-        for i in range(frames):
-            phase = math.tau * hz * i / rate
-            envelope = min(1.0, i / envelope_edge, (frames - i) / envelope_edge)
-            tone = (math.sin(phase) + 0.45 * math.sin(2 * phase)
-                    + 0.2 * math.sin(3 * phase) + 0.1 * math.sin(4 * phase))
-            samples.append(round(amplitude * envelope * tone))
-        return samples
-
-    @staticmethod
-    def textured_c2(rate, frames, attack, release, bow_level, bow_decay_seconds=None):
-        rng = random.Random(123)
-        samples = []
-        for i in range(frames):
-            t = i / rate
-            envelope = min(1.0, t / attack, (frames - i) / (rate * release))
-            phase = math.tau * 65.41 * t
-            tone = sum(gain * math.sin(harmonic * phase)
-                       for harmonic, gain in enumerate((0.7, 1.0, 0.42, 0.32), 1))
-            bow_envelope = 1.0 if bow_decay_seconds is None else math.exp(-t / bow_decay_seconds)
-            bow = bow_level * rng.uniform(-1.0, 1.0) * bow_envelope
-            samples.append(round(4000 * envelope * (tone + bow)))
-        return samples
-
-    def isolate_mono(self, samples, rate, span=None):
-        write_pcm(self.source, samples, rate, 1)
-        flags = () if span is None else ("--disturbance-samples", f"{span[0]}:{span[1]}")
-        result = self.isolate(*flags)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return [value * 32768 for value in read_float_pcm(self.output / "audio" / "cello.wav")]
-
     def test_stereo_cello_bundle_preserves_source_clock(self):
         rate, frames = 48000, 14603
         left = self.bowed_note(rate, frames, 65.41, 9000)
@@ -581,7 +582,7 @@ class CelloIsolation(InstrumentIsolationTest):
     def test_automatic_cleanup_preserves_a_short_textured_c2_between_rests(self):
         rate = 48000
         start = rate * 52 // 100
-        note = self.textured_c2(rate, rate // 10, 0.012, 0.012, 1.0)
+        note = self.textured_bowed_note(rate, rate // 10, 65.41, 0.012, 0.012, 1.0)
         estimate = self.isolate_mono([0] * start + note + [0] * rate, rate)
         signal = sum(value ** 2 for value in note)
         error = sum((value - estimate[i]) ** 2 for i, value in enumerate(note, start))
@@ -648,7 +649,8 @@ class CelloIsolation(InstrumentIsolationTest):
 
     def test_marked_cleanup_preserves_a_textured_c2_attack(self):
         rate = 22050
-        note = self.textured_c2(rate, rate * 3 // 4, 0.014, 0.04, 2.0, bow_decay_seconds=0.085)
+        note = self.textured_bowed_note(rate, rate * 3 // 4, 65.41, 0.014, 0.04, 2.0,
+                                        bow_decay_seconds=0.085)
         clean = [0] * (rate // 2) + note + [0] * rate
         start = rate // 2 - 100
         cough = read_fixture("cough")
@@ -681,6 +683,244 @@ class CelloIsolation(InstrumentIsolationTest):
                                 0.95 * sum(sample ** 2 for sample in noise))
                 self.assertEqual(estimate[:span[0]], clean[:span[0]])
                 self.assertEqual(estimate[span[1]:], clean[span[1]:])
+
+
+class DoubleBassIsolation(InstrumentIsolationTest):
+    instrument = "double-bass"
+
+    def test_stereo_bundle_preserves_clock_and_audio_sum(self):
+        rate, frames, pitch = 22050, 44099, 41.20
+        left = self.bowed_note(rate, frames, pitch, 7500)
+        right = self.bowed_note(rate, frames, pitch, -4800)
+        cough = read_fixture("cough")
+        onset = rate * 2 // 3
+        for frame, sample in enumerate(cough, onset):
+            left[frame] += sample
+        span = (onset - 441, onset + len(cough) + 441)
+        samples = [value for pair in zip(left, right) for value in pair]
+        write_pcm(self.source, samples, rate, 2, mask=3)
+
+        result = self.isolate("--disturbance-samples", f"{span[0]}:{span[1]}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = self.cli("validate-event-bundle", self.output)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        manifest = json.loads((self.output / "manifest.json").read_text(encoding="utf-8"))
+        provider, = manifest["providers"]
+        self.assertEqual((provider["name"], provider["version"]),
+                         ("hwa.double-bass-isolation", "double-bass-isolation-1"))
+        self.assertEqual(provider["settings"],
+                         {"instrument": "double-bass", "disturbance_samples": [list(span)]})
+        audio = {row["kind"]: row for row in manifest["audio"]}
+        for row in audio.values():
+            fmt = row["format"]
+            self.assertEqual((fmt["sample_rate_hz"], fmt["channels"], fmt["frames"],
+                              fmt["channel_mask"]), (rate, 2, frames, 3))
+        target = audio["instrument-stem"]
+        self.assertEqual((target["name"], target["relative_path"]),
+                         ("double-bass", "audio/double-bass.wav"))
+        self.assertEqual(target["source_recording_id"], audio["source-recording"]["id"])
+        events = (self.output / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        event, = map(json.loads, events)
+        self.assertEqual((event["kind"], event["part"], event["start_sample"], event["end_sample"],
+                          event["evidence_audio_id"]),
+                         ("instrument-region", "double-bass", 0, frames, target["id"]))
+
+        stem = read_float_pcm(self.output / target["relative_path"])
+        removed = read_float_pcm(self.output / "audio" / "removed.wav")
+        self.assertEqual((len(stem), len(removed)), (len(samples), len(samples)))
+        self.assertTrue(any(removed))
+        self.assertLess(max(abs(a + b - sample / 32768)
+                            for a, b, sample in zip(stem, removed, samples)), 1e-7)
+        self.assertFalse(any(removed[:2 * span[0]]))
+        self.assertFalse(any(removed[2 * span[1]:]))
+
+    def test_preserves_open_e_and_lower_notes_in_both_modes(self):
+        for rate in (8000, 48000):
+            for pitch in (41.20, 32.70, 30.87):
+                samples = self.bowed_note(rate, rate, pitch, 10000, edge_ms=60)
+                for span in (None, (rate // 4, 3 * rate // 4)):
+                    with self.subTest(rate=rate, pitch=pitch, marked=span is not None):
+                        self.output = self.root / f"low-{rate}-{pitch}-{span is not None}.hwa-events"
+                        stem = self.isolate_mono(samples, rate, span)
+                        power = sum(value ** 2 for value in samples)
+                        error = sum((est - value) ** 2 for est, value in zip(stem, samples))
+                        self.assertLess(error, 0.001 * power)
+
+    def test_preserves_short_bowed_and_plucked_notes_between_long_notes(self):
+        rate = 48000
+        neighbor = self.bowed_note(rate, rate * 430 // 1000, 55.0, 6500, edge_ms=17)
+        gap = [0] * (rate * 130 // 1000)
+        padding = [0] * (rate * 110 // 1000)
+        prefix = padding + neighbor + gap
+        suffix = gap + neighbor + padding
+        bowed = self.textured_bowed_note(rate, rate // 10, 30.87, 0.012, 0.012, 1.0)
+        plucked = []
+        frames = rate * 3 // 20
+        for frame in range(frames):
+            t = frame / rate
+            phase = math.tau * 41.20 * t
+            envelope = min(1.0, t / 0.002, (frames - frame) / (rate * 0.015))
+            tone = sum(gain * math.exp(-harmonic * t / 0.09) * math.sin(harmonic * phase)
+                       for harmonic, gain in enumerate((1.0, 0.6, 0.35, 0.2, 0.12, 0.07), 1))
+            plucked.append(round(7500 * envelope * tone))
+        for technique, note in (("bowed B0", bowed), ("plucked E1", plucked)):
+            start = len(prefix)
+            margin = rate // 100
+            for span in (None, (start - margin, start + len(note) + margin)):
+                with self.subTest(technique=technique, marked=span is not None):
+                    self.output = self.root / f"{technique}-{span is not None}.hwa-events"
+                    stem = self.isolate_mono(prefix + note + suffix, rate, span)
+                    power = sum(value ** 2 for value in note)
+                    error = sum((value - stem[i]) ** 2 for i, value in enumerate(note, start))
+                    self.assertLess(error, 0.03 * power)
+
+    def test_preserves_a_detached_low_pluck(self):
+        rate = 44100
+        frames = rate * 40 // 1000
+        rng = random.Random(2)
+        partials = [(gain, rng.uniform(0.0, math.tau))
+                    for gain in (1.0, 0.7, 0.6, 0.35, 0.31, 0.2)]
+        note = []
+        for frame in range(frames):
+            time = frame / rate
+            envelope = min(1.0, time / 0.008, (frames - frame) / (rate * 0.008))
+            tone = sum(gain * math.sin(math.tau * 30.87 * harmonic * time + phase)
+                       * math.exp(-harmonic * time / 0.12)
+                       for harmonic, (gain, phase) in enumerate(partials, 1))
+            note.append(round(4500 * envelope * tone))
+        source = [0] * rate + note + [0] * rate
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.output = self.root / f"detached-b0-{marked}.hwa-events"
+                span = (rate - 256, rate + frames + 256) if marked else None
+                stem = self.isolate_mono(source, rate, span)
+                error = sum((sample - stem[i]) ** 2 for i, sample in enumerate(note, rate))
+                self.assertLess(error, 0.03 * sum(sample ** 2 for sample in note))
+
+    def test_automatic_cleanup_preserves_a_gapless_e1_between_a1_notes(self):
+        rate = 22050
+
+        def note(pitch, duration):
+            frames = round(rate * duration)
+            partials = (1.0, 0.65, 0.33, 0.12, 0.05)
+            result = []
+            for frame in range(frames):
+                envelope = min(1.0, frame / (0.006 * rate), (frames - frame) / (0.006 * rate))
+                phase = math.tau * pitch * frame / rate
+                tone = sum(gain * math.sin(harmonic * phase)
+                           for harmonic, gain in enumerate(partials, 1))
+                result.append(round(6000 * envelope * tone))
+            return result
+
+        neighbor = note(55.0, 0.4)
+        e1 = note(41.2, 0.075)
+        prefix = [0] * rate + neighbor
+        stem = self.isolate_mono(prefix + e1 + neighbor + [0] * rate, rate)
+        error = sum((sample - stem[i]) ** 2 for i, sample in enumerate(e1, len(prefix)))
+        self.assertLess(error, 0.01 * sum(sample ** 2 for sample in e1))
+
+    def test_preserves_a_pitch_glide_under_a_recorded_cough(self):
+        rate = 22050
+        duration = 0.25
+        start = rate // 2
+        frames = rate // 4
+        partials = (1.0, 0.65, 0.37, 0.57, 0.22, 0.31, 0.28, 0.22, 0.2,
+                    0.28, 0.22, 0.14, 0.12, 0.09, 0.13, 0.08, 0.04, 0.03, 0.02)
+        note = []
+        for frame in range(frames):
+            time = frame / rate
+            cycles = 293.66 * time + 0.5 * 96.91 * time ** 2 / duration
+            envelope = min(1.0, time / 0.005, (frames - frame) / (rate * 0.025))
+            tone = sum(gain * math.sin(math.tau * harmonic * cycles + harmonic % 5)
+                       for harmonic, gain in enumerate(partials, 1))
+            note.append(round(4100 * envelope * tone))
+        clean = [0] * start + note + [0] * rate
+        mix = clean.copy()
+        cough = read_fixture("cough")
+        first = start - rate // 18
+        end = first + len(cough)
+        gain = math.sqrt(sum(value ** 2 for value in note) / sum(value ** 2 for value in cough)
+                         * 10 ** (-18 / 10))
+        for i, sample in enumerate(cough, first):
+            mix[i] += round(gain * sample)
+        input_error = sum((mix[i] - clean[i]) ** 2 for i in range(first, end))
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.output = self.root / f"glide-{marked}.hwa-events"
+                span = (first, end) if marked else None
+                stem = self.isolate_mono(mix, rate, span)
+                error = sum((stem[i] - clean[i]) ** 2 for i in range(first, end))
+                self.assertLess(error, 1.1 * input_error)
+
+    def test_nearby_marked_spans_use_their_own_background(self):
+        rate = 48000
+        early = (rate * 3 // 2, rate * 155 // 100)
+        late = (rate * 160 // 100, rate * 177 // 100)
+
+        def thump(time, start, end, amplitude):
+            if not start <= time < end:
+                return 0
+            envelope = math.sin(math.pi * (time - start) / (end - start)) ** 2
+            return round(amplitude * envelope * math.sin(math.tau * 19 * time))
+
+        clean = []
+        source = []
+        for i in range(3 * rate):
+            time = i / rate
+            tone = round(4000 * sum(gain * math.sin(math.tau * 41.203 * harmonic * time)
+                                    for harmonic, gain in enumerate((1.0, 0.7, 0.6), 1)))
+            clean.append(tone)
+            source.append(tone + thump(time, 1.16, 1.29, 13000)
+                          + thump(time, late[0] / rate, late[1] / rate, 3400))
+        for i in range(*early):
+            envelope = math.sin(math.pi * (i - early[0]) / (early[1] - early[0])) ** 2
+            source[i] += round(3500 * envelope * math.sin(math.tau * 780 * i / rate))
+        write_pcm(self.source, source, rate, 1)
+        errors = []
+        for spans in ((late,), (early, late)):
+            self.output = self.root / f"noise-floors-{len(spans)}.hwa-events"
+            flags = [arg for start, end in spans
+                     for arg in ("--disturbance-samples", f"{start}:{end}")]
+            result = self.isolate(*flags)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stem = [value * 32768 for value in
+                    read_float_pcm(self.output / "audio" / "double-bass.wav")]
+            errors.append(sum((stem[i] - clean[i]) ** 2 for i in range(*late)))
+            self.assertEqual(stem[early[1]:late[0]], source[early[1]:late[0]])
+        unfiltered_error = sum((source[i] - clean[i]) ** 2 for i in range(*late))
+        self.assertLess(errors[0], 0.3 * unfiltered_error)
+        self.assertLess(errors[1], 1.1 * errors[0])
+
+    def test_cleanup_improves_bass_with_recorded_cough_and_step(self):
+        rate = 22050
+        clean = (self.bowed_note(rate, rate * 5 // 4, 41.20, 7000)
+                 + [0] * rate + self.bowed_note(rate, rate, 55.0, 6000))
+        mixed = clean.copy()
+        spans = []
+        for kind, onset, gain in (("cough", 9000, 2), ("step", 34500, 24)):
+            noise = read_fixture(kind)
+            for i, sample in enumerate(noise, onset):
+                mixed[i] += gain * sample
+            spans.append((kind, onset, onset + len(noise)))
+        reference = self.root / "reference.wav"
+        write_pcm(reference, clean, rate, 1)
+        write_pcm(self.source, mixed, rate, 1)
+        marked = tuple(value for _, start, end in spans
+                       for value in ("--disturbance-samples", f"{start - 256}:{end + 256}"))
+        for mode, flags in (("automatic", ()), ("marked", marked)):
+            with self.subTest(mode=mode):
+                self.output = self.root / f"{mode}.hwa-events"
+                result = self.isolate(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                stem = self.output / "audio" / "double-bass.wav"
+                report = self.evaluate(reference, stem)
+                self.assertGreater(report["si_sdr_improvement_db"], 0.25, report)
+                estimate = read_float_pcm(stem)
+                for kind, start, end in spans:
+                    mixture_error = sum((mixed[i] - clean[i]) ** 2 for i in range(start, end))
+                    stem_error = sum((estimate[i] * 32768 - clean[i]) ** 2
+                                     for i in range(start, end))
+                    self.assertLess(stem_error, 0.99 * mixture_error, kind)
 
 
 if __name__ == "__main__":

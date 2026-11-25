@@ -4,6 +4,9 @@
 #include "hlolli_wg_analyzer.h"
 #include "instrument_isolation.h"
 
+int hwa_isolation_instrument_from_name(const char *name,
+                                       HwaIsolationInstrument *instrument);
+
 /* Write the instrument estimate and removed audio into a new event bundle. */
 int hwa_isolate_instrument_wav(const char *source_path,
                                const char *output_directory,
