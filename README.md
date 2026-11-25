@@ -201,8 +201,9 @@ omit.
 For one known note span, `note-phases` estimates attack, sustain, release, and
 tail bounds without a score. It reports levels, spectral centroid, their rates
 of change, and duration. An interrupted or unfinished tail has no usable
-measurements. See [Note phases](docs/note-phases.md) for the JSON contract,
-limits, and optional fitting objective.
+measurements. Add `--phase-envelope`, `--phase-frames`, `--phase-spectra`, or
+`--phase-partials` for more detail. See [Note phases](docs/note-phases.md) for
+the JSON fields, limits, and optional fitting objective.
 
 ```sh
 build/hlolli-wg-analyzer note-phases solo.wav \

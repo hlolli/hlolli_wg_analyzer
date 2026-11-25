@@ -48,6 +48,39 @@ quality flags. Rejected values are `null`. A usable window can still lack a
 particular measure. Check both statuses before using a value. Numeric output
 uses 17 significant digits; integer bounds retain the source sample clock.
 
+## Optional measurements
+
+`--phase-envelope` adds `crest_db`, `level_modulation_spread_db`, and
+`centroid_modulation_spread_hz` to each phase. The spreads are frame standard
+deviations and include trends. The attack also gains `rise_10_seconds`,
+`rise_50_seconds`, `rise_90_seconds`, `attack_slope_db_per_second`, and
+`attack_overshoot_db`. Rise times use 16 RMS bins and start at the estimated
+attack onset.
+
+`--phase-frames` adds `frame_series`. Each row gives level, centroid, and
+flatness, with sample bounds and flags for crossing a phase boundary or
+padding at the end of the file. The center sample assigns each row to a valid
+phase. The measurement grid starts at source sample zero and uses a symmetric
+Hann window on the arithmetic mean of the channels. Set the window and hop
+with `--measure-fft-size` and `--measure-hop-size`.
+
+`--phase-spectra` includes those rows and adds `bin_powers`, from DC through
+Nyquist, in full-scale squared. The report records the bin spacing and
+normalization. Raw powers include bins below the spectral floor.
+
+`--phase-partials` includes the frame rows and adds linked spectral peaks.
+Each point gives the track ID, bin index, interpolated frequency in Hz, bin
+power, and whether it continues a track from the previous frame. The tracker
+links stronger peaks first and starts a new track after a gap. Crossings or
+merged peaks can change which track follows a partial.
+
+`--max-partials` sets the peak cap per frame (default 12, maximum 32).
+`--spectral-floor-dbfs` sets the absolute peak floor (default −100 dBFS).
+`--partial-relative-floor-db` sets the floor below the frame's strongest bin
+(default −30 dB), and `--partial-link-cents` sets the maximum frequency step
+(default 100 cents). Partial tracking uses the raw spectra internally. Add
+`--phase-spectra` if you also need the bin arrays in the report.
+
 ## What the labels mean
 
 Phase status is `valid`, `no-signal`, `too-short`, `interrupted`, or `truncated`.
@@ -90,7 +123,9 @@ that changes during the run.
 The public C API is `hwa_analyze_note_phases_wav`, with
 `hwa_note_phase_options_default` and `hwa_note_phase_result_free`. Initialize
 options, set both sample hints, call the analyzer, and free a successful result.
-The result owns its path. Failed calls clear the result.
+The result owns its path. Failed calls clear the result. The envelope, frame,
+and spectra variants have their own result and free functions. Use
+`hwa_track_note_phase_partials` to link peaks from a spectra result.
 
 ## Optional fit objective
 
@@ -117,6 +152,7 @@ Spans use each file's own sample rate and must fit every candidate. The loss
 is the absolute metric difference divided by `scale`, in the metric's units.
 The shared evidence checker binds the analyzer and both sources by hash and
 checks bounds, grids, units, status, confidence, and finite values. It uses
-the default grids and tail limit. An unusable phase or measure stops selection
-with an error; it never becomes a zero loss. No adapter enables this objective
-by default. Fit-manifest v2 does not yet accept it.
+the default grids and tail limit unless the objective supplies `phase_options`.
+For example, `"phase_options": {"tail_limit_seconds": 4}` allows a longer
+tail search. Selecting an envelope metric requests the envelope report.
+An unusable phase or measure stops selection with an error.
