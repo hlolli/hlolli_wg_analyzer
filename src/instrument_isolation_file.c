@@ -30,22 +30,72 @@ typedef struct HwaIsolationArtifact {
     char *method_version;
 } HwaIsolationArtifact;
 
+/* Versions cover both the estimate and the rendered residual. */
 static const HwaIsolationArtifact hwa_isolation_artifacts[] = {
     [HWA_ISOLATION_VIOLIN] = {
-        "violin", "audio/violin.wav", "hwa.violin-isolation", "violin-isolation-3"
+        "violin", "audio/violin.wav", "hwa.violin-isolation", "violin-isolation-4"
     },
     [HWA_ISOLATION_VIOLA] = {
-        "viola", "audio/viola.wav", "hwa.viola-isolation", "viola-isolation-2"
+        "viola", "audio/viola.wav", "hwa.viola-isolation", "viola-isolation-3"
     },
     [HWA_ISOLATION_CELLO] = {
-        "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-2"
+        "cello", "audio/cello.wav", "hwa.cello-isolation", "cello-isolation-3"
     },
     [HWA_ISOLATION_DOUBLE_BASS] = {
         "double-bass", "audio/double-bass.wav", "hwa.double-bass-isolation",
-        "double-bass-isolation-1"
+        "double-bass-isolation-2"
     },
     [HWA_ISOLATION_PIANO] = {
-        "piano", "audio/piano.wav", "hwa.piano-isolation", "piano-isolation-1"
+        "piano", "audio/piano.wav", "hwa.piano-isolation", "piano-isolation-2"
+    },
+    [HWA_ISOLATION_FLUTE] = {
+        "flute", "audio/flute.wav", "hwa.flute-isolation", "flute-isolation-2"
+    },
+    [HWA_ISOLATION_OBOE] = {
+        "oboe", "audio/oboe.wav", "hwa.oboe-isolation", "oboe-isolation-2"
+    },
+    [HWA_ISOLATION_ENGLISH_HORN] = {
+        "english-horn", "audio/english-horn.wav", "hwa.english-horn-isolation",
+        "english-horn-isolation-2"
+    },
+    [HWA_ISOLATION_CLARINET] = {
+        "clarinet", "audio/clarinet.wav", "hwa.clarinet-isolation", "clarinet-isolation-2"
+    },
+    [HWA_ISOLATION_PICCOLO] = {
+        "piccolo", "audio/piccolo.wav", "hwa.piccolo-isolation", "piccolo-isolation-2"
+    },
+    [HWA_ISOLATION_BASSOON] = {
+        "bassoon", "audio/bassoon.wav", "hwa.bassoon-isolation", "bassoon-isolation-2"
+    },
+    [HWA_ISOLATION_BASS_CLARINET] = {
+        "bass-clarinet", "audio/bass-clarinet.wav", "hwa.bass-clarinet-isolation",
+        "bass-clarinet-isolation-2"
+    },
+    [HWA_ISOLATION_CONTRABASSOON] = {
+        "contrabassoon", "audio/contrabassoon.wav", "hwa.contrabassoon-isolation",
+        "contrabassoon-isolation-2"
+    },
+    [HWA_ISOLATION_E_FLAT_CLARINET] = {
+        "e-flat-clarinet", "audio/e-flat-clarinet.wav", "hwa.e-flat-clarinet-isolation",
+        "e-flat-clarinet-isolation-2"
+    },
+    [HWA_ISOLATION_ALTO_FLUTE] = {
+        "alto-flute", "audio/alto-flute.wav", "hwa.alto-flute-isolation", "alto-flute-isolation-2"
+    },
+    [HWA_ISOLATION_ALTO_SAXOPHONE] = {
+        "alto-saxophone", "audio/alto-saxophone.wav", "hwa.alto-saxophone-isolation",
+        "alto-saxophone-isolation-2"
+    },
+    [HWA_ISOLATION_TENOR_SAXOPHONE] = {
+        "tenor-saxophone", "audio/tenor-saxophone.wav", "hwa.tenor-saxophone-isolation",
+        "tenor-saxophone-isolation-2"
+    },
+    [HWA_ISOLATION_RECORDER] = {
+        "recorder", "audio/recorder.wav", "hwa.recorder-isolation", "recorder-isolation-2"
+    },
+    [HWA_ISOLATION_SOPRANINO_RECORDER] = {
+        "sopranino-recorder", "audio/sopranino-recorder.wav", "hwa.sopranino-recorder-isolation",
+        "sopranino-recorder-isolation-2"
     }
 };
 
@@ -391,13 +441,18 @@ int hwa_isolate_instrument_wav(const char *source_path,
                                instrument, ranges, range_count, work_available,
                                estimate, error, error_size) != 0)
         goto cleanup;
-    /* Subtract the delivered float estimate to keep the two outputs additive. */
+    /* Subtract the delivered float estimate where cleanup changed the source. */
     for (index = 0U; index < count; ++index) {
         if (!isfinite(estimate[index]) || fabs(estimate[index]) > FLT_MAX) {
             hwa_set_error(error, error_size, "instrument isolation produced an out-of-range estimate");
             goto cleanup;
         }
-        input[index] -= (double)(float)estimate[index];
+        /* Keep the removed stem silent when a sample only needs format conversion. */
+        if (input[index] == estimate[index]) {
+            input[index] = 0.0;
+        } else {
+            input[index] -= (double)(float)estimate[index];
+        }
         if (!isfinite(input[index]) || fabs(input[index]) > FLT_MAX) {
             hwa_set_error(error, error_size, "instrument isolation produced out-of-range removed audio");
             goto cleanup;

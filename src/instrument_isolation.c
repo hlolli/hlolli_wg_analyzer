@@ -14,17 +14,24 @@
 
 typedef struct IsolationProfile {
     double min_pitch_hz;
+    double max_pitch_hz;
     double low_band_hz;
     double low_mask_start_hz;
     double low_mask_width_hz;
     double min_window_seconds;
     double auto_pitch_context_seconds;
     double rest_context_seconds;
+    double min_rest_power_ratio;
+    double short_low_note_hz;
+    double tonal_release_off_fraction;
     unsigned window_overlap;
     int protect_marked_chords;
     int protect_marked_spectrum;
     int protect_low_notes;
     int detect_marked_rests;
+    int pitched_wind;
+    int low_wind;
+    int recorder;
 } IsolationProfile;
 
 static const IsolationProfile isolation_profiles[] = {
@@ -61,6 +68,130 @@ static const IsolationProfile isolation_profiles[] = {
         .min_window_seconds = 0.125, .rest_context_seconds = 0.75,
         .window_overlap = 4U, .protect_marked_spectrum = 1,
         .detect_marked_rests = 1
+    },
+    [HWA_ISOLATION_FLUTE] = {
+        /* Allow the B foot and keep the low mask clear of its lowest note. */
+        .min_pitch_hz = 228.0, .max_pitch_hz = 3200.0, .low_band_hz = 190.0,
+        .low_mask_start_hz = 105.0, .low_mask_width_hz = 75.0,
+        .min_window_seconds = 0.040, .rest_context_seconds = 0.70, .min_rest_power_ratio = 6.0,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_OBOE] = {
+        /* Leave room around the oboe's B-flat3 to A6 range. */
+        .min_pitch_hz = 215.0, .max_pitch_hz = 1950.0, .low_band_hz = 180.0,
+        .low_mask_start_hz = 100.0, .low_mask_width_hz = 70.0,
+        .min_window_seconds = 0.040, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .tonal_release_off_fraction = 0.05,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_ENGLISH_HORN] = {
+        /* Use sounding pitches, with room below the usual low E3. */
+        .min_pitch_hz = 145.0, .max_pitch_hz = 1180.0, .low_band_hz = 125.0,
+        .low_mask_start_hz = 65.0, .low_mask_width_hz = 55.0,
+        .min_window_seconds = 0.040, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 225.0, .tonal_release_off_fraction = 0.05,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_CLARINET] = {
+        /* Use the B-flat clarinet's sounding D3 to B-flat6 range. */
+        .min_pitch_hz = 135.0, .max_pitch_hz = 2050.0, .low_band_hz = 115.0,
+        .low_mask_start_hz = 60.0, .low_mask_width_hz = 50.0,
+        .min_window_seconds = 0.040, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 225.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_PICCOLO] = {
+        /* Use sounding pitches and leave room for a low C extension. */
+        .min_pitch_hz = 480.0, .max_pitch_hz = 4400.0, .low_band_hz = 400.0,
+        .low_mask_start_hz = 220.0, .low_mask_width_hz = 180.0,
+        .min_window_seconds = 0.025, .rest_context_seconds = 0.70, .min_rest_power_ratio = 6.0,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_BASSOON] = {
+        /* Leave room around the sounding B-flat1 to F5 range. */
+        .min_pitch_hz = 53.0, .max_pitch_hz = 740.0, .low_band_hz = 48.0,
+        .low_mask_start_hz = 22.0, .low_mask_width_hz = 25.0,
+        .min_window_seconds = 0.065, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 180.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1, .low_wind = 1
+    },
+    [HWA_ISOLATION_BASS_CLARINET] = {
+        /* Use sounding pitches for a bass clarinet with a low C extension. */
+        .min_pitch_hz = 53.0, .max_pitch_hz = 1080.0, .low_band_hz = 48.0,
+        .low_mask_start_hz = 22.0, .low_mask_width_hz = 25.0,
+        .min_window_seconds = 0.065, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 180.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1, .low_wind = 1
+    },
+    [HWA_ISOLATION_CONTRABASSOON] = {
+        /* Keep the rumble mask below low A0 and track several cycles of the reed. */
+        .min_pitch_hz = 24.5, .max_pitch_hz = 300.0, .low_band_hz = 21.0,
+        .low_mask_start_hz = 11.0, .low_mask_width_hz = 10.0,
+        .min_window_seconds = 0.135, .rest_context_seconds = 0.85, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 90.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1, .low_wind = 1
+    },
+    [HWA_ISOLATION_E_FLAT_CLARINET] = {
+        /* Leave room around the sounding G3 to C7 range. */
+        .min_pitch_hz = 180.0, .max_pitch_hz = 2250.0, .low_band_hz = 165.0,
+        .low_mask_start_hz = 90.0, .low_mask_width_hz = 60.0,
+        .min_window_seconds = 0.025, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 300.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_ALTO_FLUTE] = {
+        /* Use sounding pitches, with room for a low B foot and the upper register. */
+        .min_pitch_hz = 172.0, .max_pitch_hz = 1900.0, .low_band_hz = 150.0,
+        .low_mask_start_hz = 85.0, .low_mask_width_hz = 60.0,
+        .min_window_seconds = 0.025, .rest_context_seconds = 0.70, .min_rest_power_ratio = 6.0,
+        .short_low_note_hz = 250.0, .tonal_release_off_fraction = 0.08,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_ALTO_SAXOPHONE] = {
+        /* Leave room for bends around the sounding D-flat3 to A5 range. */
+        .min_pitch_hz = 120.0, .max_pitch_hz = 1050.0, .low_band_hz = 100.0,
+        .low_mask_start_hz = 55.0, .low_mask_width_hz = 45.0,
+        .min_window_seconds = 0.030, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 215.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_TENOR_SAXOPHONE] = {
+        /* Leave room for bends around the sounding A-flat2 to E5 range. */
+        .min_pitch_hz = 90.0, .max_pitch_hz = 790.0, .low_band_hz = 74.0,
+        .low_mask_start_hz = 42.0, .low_mask_width_hz = 30.0,
+        .min_window_seconds = 0.042, .rest_context_seconds = 0.70, .min_rest_power_ratio = 4.5,
+        .short_low_note_hz = 180.0, .tonal_release_off_fraction = 0.12,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1
+    },
+    [HWA_ISOLATION_RECORDER] = {
+        /* Use sounding pitches and allow room for lower historical tuning. */
+        .min_pitch_hz = 470.0, .max_pitch_hz = 2650.0, .low_band_hz = 420.0,
+        .low_mask_start_hz = 220.0, .low_mask_width_hz = 180.0,
+        .min_window_seconds = 0.0225, .rest_context_seconds = 0.70, .min_rest_power_ratio = 6.0,
+        .tonal_release_off_fraction = 0.08,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1, .recorder = 1
+    },
+    [HWA_ISOLATION_SOPRANINO_RECORDER] = {
+        /* The sopranino sounds a fourth above the soprano. */
+        .min_pitch_hz = 625.0, .max_pitch_hz = 3480.0, .low_band_hz = 560.0,
+        .low_mask_start_hz = 275.0, .low_mask_width_hz = 250.0,
+        .min_window_seconds = 0.0225, .rest_context_seconds = 0.70, .min_rest_power_ratio = 6.0,
+        .tonal_release_off_fraction = 0.08,
+        .window_overlap = 8U, .protect_marked_spectrum = 1,
+        .detect_marked_rests = 1, .pitched_wind = 1, .recorder = 1
     }
 };
 
@@ -86,6 +217,7 @@ typedef struct IsolationWorkspace {
     const double *input;
     size_t frame_count;
     unsigned channels;
+    unsigned frame_stride;
     unsigned sample_rate;
     size_t length;
     size_t hop;
@@ -136,7 +268,7 @@ static int spectral_frame(IsolationWorkspace *work, size_t start)
             if (padded_sample >= work->padding &&
                 padded_sample - work->padding < work->frame_count) {
                 size_t frame = padded_sample - work->padding;
-                sample = work->input[frame * work->channels + channel];
+                sample = work->input[frame * work->frame_stride + channel];
             }
             spectrum[index].real = sample * work->window[index];
             spectrum[index].imag = 0.0;
@@ -152,6 +284,89 @@ static int spectral_frame(IsolationWorkspace *work, size_t start)
     return 0;
 }
 
+static double narrow_peak_power(const IsolationWorkspace *work, double pitch_hz)
+{
+    size_t bin = (size_t)floor(pitch_hz / work->bin_hz + 0.5);
+    double peak, shoulders;
+    if (bin < 2U || bin + 2U > work->length / 2U) return 0.0;
+    peak = fmax(work->power[bin], fmax(work->power[bin - 1U], work->power[bin + 1U]));
+    shoulders = fmax(work->power[bin - 2U], work->power[bin + 2U]);
+    return peak >= 4.0 * shoulders ? peak : 0.0;
+}
+
+static double clarinet_fundamental(const IsolationWorkspace *work, const IsolationFrame *frame)
+{
+    double candidate = frame->pitch_hz / 3.0;
+    double peak;
+    if (candidate < work->profile->min_pitch_hz) return frame->pitch_hz;
+
+    /* A strong third harmonic can hide a weaker fundamental a twelfth below. */
+    peak = narrow_peak_power(work, candidate);
+    if (peak >= 0.006 * frame->power)
+        return candidate;
+    /* Use another odd partial to confirm a weak bass clarinet fundamental. */
+    if (work->profile == &isolation_profiles[HWA_ISOLATION_BASS_CLARINET] &&
+        peak >= 0.001 * frame->power &&
+        narrow_peak_power(work, 5.0 * candidate) >= 0.00005 * frame->power)
+        return candidate;
+    return frame->pitch_hz;
+}
+
+static double saxophone_fundamental(const IsolationWorkspace *work, const IsolationFrame *frame)
+{
+    double candidate = 0.5 * frame->pitch_hz;
+    int tenor = work->profile == &isolation_profiles[HWA_ISOLATION_TENOR_SAXOPHONE];
+    double min_fundamental = (tenor ? 0.00025 : 0.0015) * frame->power;
+    /* Confirm the weaker fundamental with the third partial or, for tenor, the fifth. */
+    if (candidate >= work->profile->min_pitch_hz &&
+        narrow_peak_power(work, candidate) >= min_fundamental &&
+        (narrow_peak_power(work, 3.0 * candidate) >= 0.0005 * frame->power ||
+         (tenor && narrow_peak_power(work, 5.0 * candidate) >= 0.0005 * frame->power)))
+        return candidate;
+    return frame->pitch_hz;
+}
+
+static int measure_narrow_wind_pitch(const IsolationWorkspace *work, IsolationFrame *frame, size_t first)
+{
+    size_t half = work->length / 2U;
+    size_t last = (size_t)(work->profile->max_pitch_hz / work->bin_hz);
+    size_t peak = first;
+    size_t bin;
+    double left, center, right, local, pitch_hz, adjustment = 0.0;
+    double concentration = work->profile->recorder ? 0.55 : 0.65;
+
+    if (last > half) last = half;
+    if (first > last) return 0;
+    for (bin = first + 1U; bin <= last; ++bin) {
+        if (work->power[bin] > work->power[peak])
+            peak = bin;
+    }
+    left = work->power[peak - 1U];
+    center = work->power[peak];
+    right = peak < half ? work->power[peak + 1U] : 0.0;
+    local = left + center + right;
+    if (center < left || center < right) return 0;
+    if (peak == half) {
+        /* The sampled amplitude of a tone this close to Nyquist depends on phase. */
+        if (center < 0.15 * frame->power || local < 0.20 * frame->power) return 0;
+    } else {
+        double curvature = left - 2.0 * center + right;
+        if (center < 0.30 * frame->power || local < concentration * frame->power) return 0;
+        if (curvature < 0.0)
+            adjustment = (left - right) / (2.0 * curvature);
+    }
+    pitch_hz = ((double)peak + adjustment) * work->bin_hz;
+    /* A strong second partial can exceed the fundamental on some recorder notes. */
+    if (work->profile->recorder && 0.5 * pitch_hz >= work->profile->min_pitch_hz &&
+        narrow_peak_power(work, 0.5 * pitch_hz) >= 0.02 * frame->power)
+        return 0;
+    frame->pitch_hz = pitch_hz;
+    frame->confidence = local / frame->power;
+    /* An accepted recorder peak meets the confidence floor used by the wind masks. */
+    if (work->profile->recorder) frame->confidence = fmax(frame->confidence, 0.65);
+    return 1;
+}
+
 static int measure_pitch(IsolationWorkspace *work, IsolationFrame *frame,
                          double excluded_pitch_hz)
 {
@@ -162,6 +377,28 @@ static int measure_pitch(IsolationWorkspace *work, IsolationFrame *frame,
     double best = 0.0;
     double zero_lag;
     size_t index;
+    /* A concentrated spectral peak gives better pitch precision near Nyquist. */
+    if (work->profile == &isolation_profiles[HWA_ISOLATION_PICCOLO] &&
+        excluded_pitch_hz == 0.0 && measure_narrow_wind_pitch(work, frame, work->length / 4U))
+        return 0;
+    /* A recorder can keep a narrow peak through noise that obscures its period. */
+    if (work->profile->recorder && excluded_pitch_hz == 0.0 &&
+        measure_narrow_wind_pitch(work, frame, (size_t)(work->profile->min_pitch_hz / work->bin_hz)))
+        return 0;
+    /* At low rates the full window can favor a suboctave during a slur. */
+    if (work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_FLUTE] &&
+        excluded_pitch_hz == 0.0 && measure_narrow_wind_pitch(work, frame, work->length / 8U))
+        return 0;
+    /* With fewer than six samples per cycle, the lag search can lock onto an octave below. */
+    if (work->profile == &isolation_profiles[HWA_ISOLATION_E_FLAT_CLARINET] &&
+        excluded_pitch_hz == 0.0 && measure_narrow_wind_pitch(work, frame, work->length / 6U)) {
+        frame->pitch_hz = clarinet_fundamental(work, frame);
+        return 0;
+    }
+    if (work->profile->max_pitch_hz > 0.0)
+        min_lag = (size_t)((double)work->sample_rate / work->profile->max_pitch_hz);
+    /* The sampling limit sets the shortest useful period. */
+    if (min_lag < 2U) min_lag = 2U;
     /* Combine channel powers so opposite polarity does not cancel a note. */
     for (index = 0U; index < work->length; ++index) {
         size_t bin = index <= work->length / 2U ? index : work->length - index;
@@ -194,6 +431,13 @@ static int measure_pitch(IsolationWorkspace *work, IsolationFrame *frame,
             double adjustment = curvature < 0.0 ? (left - right) / (2.0 * curvature) : 0.0;
             frame->pitch_hz = (double)work->sample_rate / ((double)index + adjustment);
             frame->confidence = center / zero_lag;
+            if (work->profile == &isolation_profiles[HWA_ISOLATION_CLARINET] ||
+                work->profile == &isolation_profiles[HWA_ISOLATION_BASS_CLARINET] ||
+                work->profile == &isolation_profiles[HWA_ISOLATION_E_FLAT_CLARINET])
+                frame->pitch_hz = clarinet_fundamental(work, frame);
+            else if (work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_SAXOPHONE] ||
+                     work->profile == &isolation_profiles[HWA_ISOLATION_TENOR_SAXOPHONE])
+                frame->pitch_hz = saxophone_fundamental(work, frame);
             break;
         }
     }
@@ -211,7 +455,7 @@ static double off_harmonic_power(const IsolationWorkspace *work, double pitch_hz
     return power;
 }
 
-static double piano_broadband_weight(const double *power, size_t half, size_t bin)
+static double spectral_broadband_weight(const double *power, size_t half, size_t bin)
 {
     double left, right, floor;
     if (bin < 4U || bin + 4U > half || power[bin] == 0.0) return 0.0;
@@ -221,12 +465,12 @@ static double piano_broadband_weight(const double *power, size_t half, size_t bi
     return smooth_step((floor / power[bin] - 0.04) / 0.25);
 }
 
-static double piano_broadband_power(const double *power, size_t half)
+static double spectral_broadband_power(const double *power, size_t half)
 {
     double broadband = 0.0;
     size_t bin;
     for (bin = 4U; bin + 4U <= half; ++bin)
-        broadband += power[bin] * piano_broadband_weight(power, half, bin);
+        broadband += power[bin] * spectral_broadband_weight(power, half, bin);
     return broadband;
 }
 
@@ -306,7 +550,7 @@ static void measure_piano_spectrum(const IsolationWorkspace *work, size_t index)
             }
         }
     }
-    piano->broad_power = piano_broadband_power(work->power, half);
+    piano->broad_power = spectral_broadband_power(work->power, half);
     piano->separated_partials = has_piano_partials_in_channels(work, work->frames[index].power);
 }
 
@@ -385,6 +629,259 @@ static int pitches_agree(double first, double second)
 {
     return first > 0.0 && second > 0.0 &&
            fmax(first, second) <= 1.06 * fmin(first, second);
+}
+
+static int wind_frame_has_note(const IsolationFrame *frame)
+{
+    return frame->confidence >= 0.65 && frame->off_harmonic_power <= 0.48 * frame->power;
+}
+
+static int wind_pitch_persists(const IsolationFrame *left, const IsolationFrame *right)
+{
+    return wind_frame_has_note(left) && wind_frame_has_note(right) &&
+           fmax(left->pitch_hz, right->pitch_hz) <= 1.028 * fmin(left->pitch_hz, right->pitch_hz);
+}
+
+static int wind_short_pitch_pair(const IsolationFrame *left, const IsolationFrame *right,
+                                 double minimum_power)
+{
+    return left->power >= minimum_power && right->power >= minimum_power &&
+           left->confidence >= 0.55 && right->confidence >= 0.55 &&
+           left->off_harmonic_power <= 0.10 * left->power &&
+           right->off_harmonic_power <= 0.10 * right->power &&
+           pitches_agree(left->pitch_hz, right->pitch_hz);
+}
+
+static int wind_overlaps_note(const IsolationWorkspace *work, size_t index)
+{
+    size_t overlap = work->profile->window_overlap - 1U;
+    size_t first = index > overlap ? index - overlap : 0U;
+    size_t last = index + overlap < work->grid_count ? index + overlap : work->grid_count - 1U;
+    size_t separation = work->profile->window_overlap / 2U;
+    size_t breath_span = (size_t)work->sample_rate / (8U * work->hop);
+    double power = work->frames[index].power;
+    size_t i;
+    /* Protect the air and tongue around a pitch that persists beyond an impact. */
+    for (i = first; i + separation <= last; ++i) {
+        if (wind_pitch_persists(&work->frames[i], &work->frames[i + separation]))
+            return 1;
+    }
+    /* Two clean neighboring frames can reveal a note shorter than the usual
+     * pitch-persistence interval. Long windows can depress its confidence. */
+    for (i = first + 1U; i <= last; ++i) {
+        const IsolationFrame *right = &work->frames[i];
+        const IsolationFrame *left = right - 1;
+        if (wind_short_pitch_pair(left, right, 0.10 * power))
+            return 1;
+    }
+    /* The highest sampled tone can emerge slowly from its breath near Nyquist. */
+    if (work->profile == &isolation_profiles[HWA_ISOLATION_PICCOLO] &&
+        0.5 * (double)work->sample_rate <= work->profile->max_pitch_hz) {
+        size_t nyquist_span = 2U * work->profile->window_overlap - 1U;
+        size_t near_first = index > nyquist_span ? index - nyquist_span : 0U;
+        size_t near_last = index + nyquist_span < work->grid_count ?
+            index + nyquist_span : work->grid_count - 1U;
+        double nyquist_hz = 0.5 * (double)work->sample_rate;
+        for (i = near_first; i + separation <= near_last; ++i) {
+            const IsolationFrame *left = &work->frames[i];
+            const IsolationFrame *right = left + separation;
+            if (left->pitch_hz == nyquist_hz && right->pitch_hz == nyquist_hz)
+                return 1;
+        }
+    }
+    /* One window can span several fast changes in a wind phrase. */
+    if (work->profile->low_wind || work->profile->recorder ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_FLUTE] ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_SAXOPHONE] ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_TENOR_SAXOPHONE]) {
+        int contrabassoon = work->profile == &isolation_profiles[HWA_ISOLATION_CONTRABASSOON];
+        unsigned supporting = 0U;
+        size_t first_tonal = first;
+        for (i = first; i <= last; ++i) {
+            const IsolationFrame *frame = &work->frames[i];
+            if (frame->confidence < 0.55 || frame->power < 0.10 * power ||
+                frame->off_harmonic_power > 0.18 * frame->power)
+                continue;
+            /* Short low contrabassoon notes may fill only part of a window. */
+            if (contrabassoon && i > first && frame->pitch_hz <= work->profile->short_low_note_hz &&
+                frame->off_harmonic_power <= 0.06 * frame->power) {
+                const IsolationFrame *previous = frame - 1;
+                if (previous->confidence >= 0.55 && previous->power >= 0.10 * power &&
+                    previous->off_harmonic_power <= 0.06 * previous->power &&
+                    pitches_agree(previous->pitch_hz, frame->pitch_hz))
+                    return 1;
+            }
+            if (supporting++ == 0U) first_tonal = i;
+            if (supporting >= 3U && i - first_tonal >= separation) return 1;
+        }
+    }
+    /* A short wind note may have reliable pitch in only a few windows. */
+    if (work->profile->tonal_release_off_fraction > 0.0) {
+        size_t short_separation = separation / 2U;
+        const double max_off_fraction = 0.08;
+        for (i = first; i + short_separation <= last; ++i) {
+            const IsolationFrame *left = &work->frames[i];
+            const IsolationFrame *middle = left + short_separation / 2U;
+            const IsolationFrame *right = left + short_separation;
+            if (!wind_pitch_persists(left, right)) continue;
+            if (left->pitch_hz <= work->profile->short_low_note_hz &&
+                right->pitch_hz <= work->profile->short_low_note_hz &&
+                left->off_harmonic_power <= 0.05 * left->power &&
+                right->off_harmonic_power <= 0.05 * right->power)
+                return 1;
+            /* Require an energy peak to avoid protecting the decay of an impact. */
+            if (wind_pitch_persists(left, middle) &&
+                middle->power >= fmax(left->power, right->power) &&
+                left->off_harmonic_power <= max_off_fraction * left->power &&
+                middle->off_harmonic_power <= max_off_fraction * middle->power &&
+                right->off_harmonic_power <= max_off_fraction * right->power)
+                return 1;
+        }
+    }
+    /* A stronger note can take longer to emerge from its breath. */
+    for (i = 0U; i < 2U; ++i) {
+        size_t available = i == 0U ? index : work->grid_count - index - 1U;
+        size_t limit = available < breath_span ? available : breath_span;
+        size_t step;
+        for (step = 1U; step + separation <= limit; ++step) {
+            size_t nearest = i == 0U ? index - step : index + step;
+            const IsolationFrame *near = &work->frames[nearest];
+            const IsolationFrame *far = i == 0U ? near - separation : near + separation;
+            if (near->power <= 0.06 * power) break;
+            if (near->power >= 4.0 * power && far->power >= 4.0 * power &&
+                wind_pitch_persists(near, far))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static double wind_breath_floor(const IsolationWorkspace *work, size_t index, int forward)
+{
+    const IsolationFrame *current = &work->frames[index];
+    size_t available = forward ? work->grid_count - index - 1U : index;
+    size_t limit = (size_t)work->sample_rate / (3U * work->hop);
+    size_t noisy_octave_limit = work->profile->recorder ?
+        (size_t)work->sample_rate / (8U * work->hop) : 0U;
+    size_t noisy_octave_windows = 0U;
+    double floor = 1.0;
+    size_t step;
+    if (limit > available) limit = available;
+    /* Use a stable note on both sides without measuring a different note or a rest. */
+    for (step = work->profile->window_overlap; step <= limit; ++step) {
+        const IsolationFrame *frame = &work->frames[forward ? index + step : index - step];
+        double off;
+        if (frame->power < 0.08 * current->power) break;
+        if (!wind_frame_has_note(frame)) continue;
+        if (!pitches_agree(current->pitch_hz, frame->pitch_hz)) {
+            /* A cough can briefly pull the pitch estimate down an octave. */
+            if (noisy_octave_windows < noisy_octave_limit &&
+                frame->off_harmonic_power > 0.08 * frame->power &&
+                pitches_agree(current->pitch_hz, 2.0 * frame->pitch_hz)) {
+                ++noisy_octave_windows;
+                continue;
+            }
+            break;
+        }
+        /* Overlapping notes in a long window can shift the pitch estimate. */
+        if (work->profile->low_wind && fmax(current->pitch_hz, frame->pitch_hz) >
+                                      1.035 * fmin(current->pitch_hz, frame->pitch_hz))
+            break;
+        /* Compare breath power against the softer frame when note level changes. */
+        off = frame->off_harmonic_power / fmin(frame->power, current->power);
+        if (off < floor) floor = off;
+    }
+    return floor;
+}
+
+static int wind_pitch_changes_near_frame(const IsolationWorkspace *work, size_t index)
+{
+    size_t overlap = work->profile->window_overlap - 1U;
+    size_t first = index > overlap ? index - overlap : 0U;
+    size_t last = index + overlap < work->grid_count ? index + overlap : work->grid_count - 1U;
+    double pitch = work->frames[index].pitch_hz;
+    double low_limit = pitch / 1.10;
+    double high_limit = 1.10 * pitch;
+    double lowest = high_limit;
+    double highest = 0.0;
+    int recorder = work->profile->recorder;
+    int tenor = work->profile == &isolation_profiles[HWA_ISOLATION_TENOR_SAXOPHONE];
+    int bass_clarinet = work->profile == &isolation_profiles[HWA_ISOLATION_BASS_CLARINET];
+    int protect_octave = tenor || recorder ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_E_FLAT_CLARINET] ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_FLUTE] ||
+        work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_SAXOPHONE];
+    size_t i;
+
+    /* Clean partials from a nearby note can spread beyond the current harmonic mask. */
+    for (i = first; i <= last; ++i) {
+        const IsolationFrame *frame = &work->frames[i];
+        const IsolationFrame *previous = i > first ? frame - 1 : NULL;
+        int clean_pitch_pair = protect_octave && previous != NULL &&
+            frame->off_harmonic_power <= 0.035 * frame->power &&
+            previous->off_harmonic_power <= 0.035 * previous->power &&
+            wind_pitch_persists(previous, frame);
+        /* Pitch slides into the higher note also spread across harmonic bins. */
+        if (protect_octave && (frame->confidence >= 0.85 || clean_pitch_pair) &&
+            frame->power >= 0.20 * work->frames[index].power &&
+            frame->off_harmonic_power <= 0.08 * frame->power &&
+            pitches_agree(frame->pitch_hz, 2.0 * pitch))
+            return 1;
+        /* Higher harmonic masks can cut partials of a nearby lower note. */
+        int lower_octave = protect_octave && pitches_agree(2.0 * frame->pitch_hz, pitch);
+        int lower_twelfth = bass_clarinet && pitches_agree(3.0 * frame->pitch_hz, pitch);
+        if (previous != NULL && (lower_octave || lower_twelfth)) {
+            /* Fewer periods fit in a window at the bottom of the tenor range. */
+            if (frame->power >= 0.20 * work->frames[index].power &&
+                frame->off_harmonic_power <= 0.08 * frame->power &&
+                previous->off_harmonic_power <= 0.08 * previous->power &&
+                (lower_twelfth || (tenor && frame->pitch_hz <= 120.0) || clean_pitch_pair ||
+                 (previous->confidence >= 0.85 && frame->confidence >= 0.85)) &&
+                wind_pitch_persists(previous, frame))
+                return 1;
+        }
+        if (frame->confidence < 0.75 ||
+            frame->off_harmonic_power > (recorder ? 0.08 : 0.04) * frame->power ||
+            frame->pitch_hz < low_limit || frame->pitch_hz > high_limit)
+            continue;
+        lowest = fmin(lowest, frame->pitch_hz);
+        highest = fmax(highest, frame->pitch_hz);
+    }
+    return highest > (recorder ? 1.04 : 1.05) * lowest;
+}
+
+static int wind_clip_edge_holds(const IsolationWorkspace *work, const IsolationFrame *frame,
+                               int end)
+{
+    size_t center = (end ? work->frame_count : 0U) + work->padding - work->length / 2U;
+    const IsolationFrame *edge = &work->frames[(center + work->hop / 2U) / work->hop];
+    return edge->power >= 0.15 * frame->power &&
+           pitches_agree(frame->pitch_hz, edge->pitch_hz);
+}
+
+static void wind_gain(const IsolationWorkspace *work, size_t index, int marked,
+                      const HwaIsolationRange *active_range,
+                      double *pitch_hz, double *strength, double *low_strength)
+{
+    const IsolationFrame *frame = &work->frames[index];
+    int short_lead = active_range != NULL && active_range->start_sample < work->length;
+    int short_tail = active_range != NULL &&
+        work->frame_count - active_range->end_sample < work->length;
+    double left_floor, right_floor;
+    double floor, excess;
+    *pitch_hz = frame->pitch_hz;
+    *strength = 0.0;
+    *low_strength = 0.76 * smooth_step((frame->low_power / frame->power - 0.05) / 0.23);
+    if (!wind_frame_has_note(frame)) return;
+    /* Use one clean flank only when the held pitch already reaches the clip edge. */
+    left_floor = short_lead && !short_tail && wind_clip_edge_holds(work, frame, 0) ? 0.0 :
+        wind_breath_floor(work, index, 0);
+    right_floor = short_tail && !short_lead && wind_clip_edge_holds(work, frame, 1) ? 0.0 :
+        wind_breath_floor(work, index, 1);
+    floor = fmax(0.002, fmax(left_floor, right_floor));
+    excess = frame->off_harmonic_power / frame->power - (marked ? 1.70 : 2.25) * floor;
+    *strength = (marked ? 0.80 : 0.74) * smooth_step((excess - 0.008) / 0.045);
+    if (*strength > 0.0 && wind_pitch_changes_near_frame(work, index)) *strength = 0.0;
 }
 
 static int piano_frame_is_tonal(const IsolationWorkspace *work, size_t index)
@@ -715,13 +1212,23 @@ static size_t find_quiet_shoulder(const IsolationWorkspace *work, size_t index,
     double previous_pitch = 0.0;
     size_t available = forward ? work->grid_count - index - 1U : index;
     size_t step;
+    int preserve_breath = work->profile->recorder ||
+                          work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_FLUTE] ||
+                          work->profile == &isolation_profiles[HWA_ISOLATION_ALTO_SAXOPHONE] ||
+                          work->profile == &isolation_profiles[HWA_ISOLATION_TENOR_SAXOPHONE];
+    size_t breath_span = preserve_breath ? (size_t)work->sample_rate / (5U * work->hop) : 0U;
+    int stop_at_note = !work->profile->pitched_wind || work->profile->low_wind;
+    /* In a long window, a louder note can mask the gap before a quiet attack. */
+    double note_power = (work->profile->low_wind ? 0.50 : 0.12) * peak;
+    /* Follow the connected air of a slow attack or release into a stronger tone. */
+    if (preserve_breath) note_power = 2.0 * peak;
 
     if (limit > available) limit = available;
     for (step = 1U; step <= limit; ++step) {
         size_t other = forward ? index + step : index - step;
         const IsolationFrame *frame = &work->frames[other];
-        double pitch = frame->power >= 0.12 * peak && likely_instrument_pitch(frame)
-            ? frame->pitch_hz : 0.0;
+        double pitch = (stop_at_note || step <= breath_span) &&
+            frame->power >= note_power && likely_instrument_pitch(frame) ? frame->pitch_hz : 0.0;
         if (pitches_agree(previous_pitch, pitch) ||
             (work->piano_frames != NULL && frame->power >= 0.12 * peak &&
              piano_frame_has_note(work, other)))
@@ -779,15 +1286,21 @@ static double rest_disturbance_strength(const IsolationWorkspace *work, size_t i
     double floor, total_power = 0.0, peak_power = 0.0;
     double impulse_power_ratio;
     size_t left, right, i;
+    int pitched_wind = work->profile->pitched_wind;
 
-    if (frame->power == 0.0 || likely_instrument_pitch(frame) ||
+    /* A wind release can stay tonal even when its pitch starts to move. */
+    if (work->profile->tonal_release_off_fraction > 0.0 && frame->confidence >= 0.80 &&
+        frame->off_harmonic_power <= work->profile->tonal_release_off_fraction * frame->power)
+        return 0.0;
+    if (frame->power == 0.0 ||
+        (pitched_wind ? wind_overlaps_note(work, index) : likely_instrument_pitch(frame)) ||
         (work->piano_frames != NULL && piano_frame_has_note(work, index)))
         return 0.0;
     left = find_quiet_shoulder(work, index, limit, 0, &left_floor);
     if (left == 0U) return 0.0;
     right = find_quiet_shoulder(work, index, limit - left, 1, &right_floor);
-    if (right == 0U || overlaps_short_note(work, index) ||
-        (work->profile->window_overlap > 4U && overlaps_moving_pitch(work, index)))
+    if (right == 0U || (!pitched_wind && (overlaps_short_note(work, index) ||
+        (work->profile->window_overlap > 4U && overlaps_moving_pitch(work, index)))))
         return 0.0;
     floor = fmax(left_floor, right_floor);
     /* A burst dominated by frequencies below the instrument can be filtered even if
@@ -797,6 +1310,11 @@ static double rest_disturbance_strength(const IsolationWorkspace *work, size_t i
     }
     for (i = index - left + 1U; i < index + right; ++i) {
         double power = fmax(0.0, work->frames[i].power - floor);
+        const IsolationFrame *current = &work->frames[i];
+        /* The quiet shoulders can enclose a whole phrase of short notes. */
+        if (pitched_wind && i > index - left + 1U &&
+            wind_short_pitch_pair(current - 1, current, 0.10 * frame->power))
+            return 0.0;
         total_power += power;
         peak_power = fmax(peak_power, power);
     }
@@ -804,6 +1322,8 @@ static double rest_disturbance_strength(const IsolationWorkspace *work, size_t i
      * impulse. Allow for impulses falling between window centers. */
     impulse_power_ratio = work->profile->window_overlap > 4U
         ? 3.0 * work->profile->window_overlap / 8.0 + 0.50 : 2.25;
+    /* Brief wind attacks can carry energy before their pitch is trackable. */
+    impulse_power_ratio = fmax(impulse_power_ratio, work->profile->min_rest_power_ratio);
     if (total_power <= impulse_power_ratio * peak_power) return 0.0;
     return 0.85 * (1.0 - sqrt(floor / frame->power));
 }
@@ -969,7 +1489,7 @@ static int add_correction(IsolationWorkspace *work, size_t start,
                 rest_power[channel] = work->piano_channel_power + (half + 1U) * channel;
                 total = 0.0;
                 for (bin = 0U; bin <= half; ++bin) total += rest_power[channel][bin];
-                broadband = piano_broadband_power(rest_power[channel], half);
+                broadband = spectral_broadband_power(rest_power[channel], half);
             }
             /* The other channel may have supplied all the noise evidence. */
             if (total > 0.0)
@@ -988,8 +1508,8 @@ static int add_correction(IsolationWorkspace *work, size_t start,
         }
         if (!confirmed_rest) {
             if (work->piano_frames != NULL)
-                weight = piano_broadband_weight(work->power, half, bin);
-            else if (work->marked_background != NULL)
+                weight = spectral_broadband_weight(work->power, half, bin);
+            else if (work->marked_background != NULL && !work->profile->pitched_wind)
                 weight = marked_broadband_weight(work, bin, pitch_hz > 0.0);
         }
         double correction = -fmax(strength * (1.0 - harmonic) * weight, low_strength * low);
@@ -1001,7 +1521,7 @@ static int add_correction(IsolationWorkspace *work, size_t start,
             HwaDspComplex *spectrum = work->spectrum + work->length * channel;
             double channel_correction = correction;
             if (rest_power[channel] != NULL) {
-                double spectral_weight = piano_broadband_weight(rest_power[channel], half, bin);
+                double spectral_weight = spectral_broadband_weight(rest_power[channel], half, bin);
                 double mix = rest_broadband_mix[channel];
                 channel_correction *= mix * (mix + (1.0 - mix) * spectral_weight);
             }
@@ -1019,7 +1539,7 @@ static int add_correction(IsolationWorkspace *work, size_t start,
         if (hwa_dsp_fft(spectrum, work->length, 1) != HWA_DSP_OK) return -1;
         for (index = first; index < end; ++index) {
             size_t frame = start + index - work->padding;
-            output[frame * work->channels + channel] +=
+            output[frame * work->frame_stride + channel] +=
                 spectrum[index].real * work->window[index];
         }
     }
@@ -1035,12 +1555,15 @@ static int accumulate_frame_correction(IsolationWorkspace *work, size_t index,
     double strength;
     double low_strength;
     int confirmed_rest = 0;
+    int pitched_wind = work->profile->pitched_wind;
     IsolationFrame alternate = {0};
-    if (spectral_frame(work, start) != 0) return -1;
+    if (!pitched_wind && spectral_frame(work, start) != 0) return -1;
     if (work->piano_frames != NULL) {
         pitch_hz = 0.0;
         low_strength = 0.0;
         strength = piano_chord_gain(work, index, marked);
+    } else if (pitched_wind) {
+        wind_gain(work, index, marked, active_range, &pitch_hz, &strength, &low_strength);
     } else {
         isolation_gain(work, index, marked, &pitch_hz, &strength, &low_strength);
     }
@@ -1050,7 +1573,7 @@ static int accumulate_frame_correction(IsolationWorkspace *work, size_t index,
             confirmed_rest = 1;
             strength = rest_strength;
             pitch_hz = 0.0;
-        } else if (!marked && strength > 0.0 && work->piano_frames == NULL) {
+        } else if (!marked && strength > 0.0 && work->piano_frames == NULL && !pitched_wind) {
             /* A short played note can appear in the spectrum of its neighbors. */
             if (measure_pitch(work, &alternate, pitch_hz) != 0) return -1;
             if (alternate.confidence >= 0.80) strength = 0.0;
@@ -1063,6 +1586,15 @@ static int accumulate_frame_correction(IsolationWorkspace *work, size_t index,
         if (conflict > 0) return 0;
     }
     if (strength == 0.0 && low_strength == 0.0) return 0;
+    /* Wind gain uses cached frame measures, so transform only when needed. */
+    if (pitched_wind && spectral_frame(work, start) != 0) return -1;
+    /* A long contrabassoon window can span several notes with no single pitch.
+     * Reduce broadband rest noise in proportion to its share of that spectrum. */
+    if (confirmed_rest && work->profile == &isolation_profiles[HWA_ISOLATION_CONTRABASSOON]) {
+        double broadband = spectral_broadband_power(work->power, work->length / 2U);
+        strength *= smooth_step((broadband / work->frames[index].power - 0.22) / 0.15);
+        if (strength == 0.0 && low_strength == 0.0) return 0;
+    }
     return add_correction(work, start, pitch_hz, alternate.pitch_hz, strength,
                           low_strength, confirmed_rest, active_range, output);
 }
@@ -1099,7 +1631,7 @@ static int accumulate_correction(IsolationWorkspace *work,
     size_t index;
     if (work->marked_background != NULL &&
         (work->profile == &isolation_profiles[HWA_ISOLATION_DOUBLE_BASS] ||
-         work->piano_frames != NULL))
+         work->piano_frames != NULL || work->profile->pitched_wind))
         return accumulate_marked_ranges(work, ranges, range_count, output);
     for (index = 0U; index < work->grid_count; ++index) {
         size_t start = index * work->hop;
@@ -1138,7 +1670,7 @@ static void finish_estimate(const IsolationWorkspace *work,
             }
         }
         for (channel = 0U; channel < work->channels; ++channel) {
-            size_t sample = index * work->channels + channel;
+            size_t sample = index * work->frame_stride + channel;
             if (strength == 0.0 || output[sample] == 0.0) {
                 output[sample] = work->input[sample];
             } else {
@@ -1161,6 +1693,8 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     size_t per_frame_work;
     size_t sample_count;
     size_t index;
+    unsigned channel_passes;
+    unsigned pass;
     int use_marked_background;
     int measure_low_peaks;
     int piano = instrument == HWA_ISOLATION_PIANO;
@@ -1197,12 +1731,17 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     use_marked_background = range_count != 0U && work.profile->protect_marked_spectrum;
     measure_low_peaks = work.profile->protect_low_notes &&
                         (range_count == 0U || work.profile->detect_marked_rests);
-    work.input = input;
+    /* Noise on one stereo channel cannot supply evidence to cut the other. */
+    channel_passes = work.profile->pitched_wind ? channels : 1U;
     work.frame_count = frame_count;
-    work.channels = channels;
+    work.channels = channels / channel_passes;
+    work.frame_stride = channels;
     work.sample_rate = sample_rate_hz;
-    work.length = 512U;
     /* Keep enough cycles of the lowest notes in each power-of-two window. */
+    work.length = work.profile->recorder || instrument == HWA_ISOLATION_PICCOLO ||
+        instrument == HWA_ISOLATION_E_FLAT_CLARINET ||
+        instrument == HWA_ISOLATION_ALTO_FLUTE ||
+        instrument == HWA_ISOLATION_ALTO_SAXOPHONE ? 256U : 512U;
     while ((double)work.length < work.profile->min_window_seconds * sample_rate_hz)
         work.length *= 2U;
     work.hop = work.length / work.profile->window_overlap;
@@ -1211,7 +1750,7 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
     work.bin_hz = (double)sample_rate_hz / (double)work.length;
     work.grid_count = (frame_count + work.padding - 1U) / work.hop + 1U;
     fixed_work = (work.length + work.length / 2U + 1U + work.hop) * sizeof(double) +
-                 work.length * (channels + (piano ? 0U : 1U)) * sizeof(HwaDspComplex);
+                 work.length * (work.channels + (piano ? 0U : 1U)) * sizeof(HwaDspComplex);
     if (use_marked_background)
         fixed_work += (work.length / 2U + 1U) * sizeof(*work.marked_background);
     if (piano_stereo)
@@ -1232,7 +1771,7 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
                                           sizeof(*work.piano_channel_power));
     }
     work.normalizer = calloc(work.hop, sizeof(*work.normalizer));
-    work.spectrum = malloc(work.length * channels * sizeof(*work.spectrum));
+    work.spectrum = malloc(work.length * work.channels * sizeof(*work.spectrum));
     if (!piano) work.autocorrelation = malloc(work.length * sizeof(*work.autocorrelation));
     work.frames = calloc(work.grid_count, sizeof(*work.frames));
     if (piano) work.piano_frames = calloc(work.grid_count, sizeof(*work.piano_frames));
@@ -1256,9 +1795,14 @@ int hwa_isolate_instrument(const double *input, size_t frame_count,
         work.normalizer[index % work.hop] += work.window[index] * work.window[index];
     }
     memset(output, 0, sample_count * sizeof(*output));
-    if (measure_frames(&work, ranges, range_count) != 0 ||
-        accumulate_correction(&work, ranges, range_count, output) != 0) goto transform_error;
-    finish_estimate(&work, ranges, range_count, output);
+    for (pass = 0U; pass < channel_passes; ++pass) {
+        work.input = input + pass;
+        if (pass != 0U) memset(work.frames, 0, work.grid_count * sizeof(*work.frames));
+        if (measure_frames(&work, ranges, range_count) != 0 ||
+            accumulate_correction(&work, ranges, range_count, output + pass) != 0)
+            goto transform_error;
+        finish_estimate(&work, ranges, range_count, output + pass);
+    }
     result = 0;
     goto cleanup;
 

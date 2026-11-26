@@ -1468,6 +1468,66 @@ if(HWA_PYTHON3_EXECUTABLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> PianoIsolation)
   set_tests_properties(cli.piano-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.flute-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> FluteIsolation)
+  set_tests_properties(cli.flute-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.oboe-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> OboeIsolation)
+  set_tests_properties(cli.oboe-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.english-horn-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> EnglishHornIsolation)
+  set_tests_properties(cli.english-horn-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.clarinet-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ClarinetIsolation)
+  set_tests_properties(cli.clarinet-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.piccolo-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> PiccoloIsolation)
+  set_tests_properties(cli.piccolo-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.bassoon-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> BassoonIsolation)
+  set_tests_properties(cli.bassoon-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.bass-clarinet-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> BassClarinetIsolation)
+  set_tests_properties(cli.bass-clarinet-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.contrabassoon-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ContrabassoonIsolation)
+  set_tests_properties(cli.contrabassoon-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.e-flat-clarinet-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> EFlatClarinetIsolation)
+  set_tests_properties(cli.e-flat-clarinet-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.alto-flute-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> AltoFluteIsolation)
+  set_tests_properties(cli.alto-flute-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.alto-saxophone-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> AltoSaxophoneIsolation)
+  set_tests_properties(cli.alto-saxophone-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.tenor-saxophone-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> TenorSaxophoneIsolation)
+  set_tests_properties(cli.tenor-saxophone-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.recorder-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> RecorderIsolation)
+  set_tests_properties(cli.recorder-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.sopranino-recorder-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> SopraninoRecorderIsolation)
+  set_tests_properties(cli.sopranino-recorder-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.wind-marked-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> WindMarkedIsolation)
+  set_tests_properties(cli.wind-marked-isolation PROPERTIES TIMEOUT 60)
   add_test(
     NAME cli.isolated-note
     COMMAND

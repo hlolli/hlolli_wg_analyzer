@@ -137,23 +137,50 @@ build/hlolli-wg-analyzer isolate-instrument recital.wav \
   --instrument piano --output piano.hwa-events
 ```
 
-Choose `violin`, `viola`, `cello`, `double-bass`, or `piano` with
-`--instrument` for a mostly solo recording with interference such as coughs
-and footsteps.
+Choose `violin`, `viola`, `cello`, `double-bass`, `piano`, `flute`, `oboe`,
+`english-horn`, `clarinet`, `piccolo`, `bassoon`, `bass-clarinet`,
+`contrabassoon`, `e-flat-clarinet`, `alto-flute`, `alto-saxophone`,
+`tenor-saxophone`, `recorder`, or `sopranino-recorder` with `--instrument`
+to clean up coughs, footsteps, and similar disturbances in a mostly solo
+recording.
 Each profile accounts for the instrument's low notes, including the viola's
 C3 and the cello's C2. The double bass profile covers E1, C1 extensions, and
-the low B0 of a five-string bass. The command runs offline in C and accepts
-mono or stereo WAVE at 8–192 kHz with finite samples within float32 range.
+the low B0 of a five-string bass. The flute profile covers the classical
+concert flute, including low B3 on a flute with a B footjoint. The oboe profile
+covers low B♭3, and the English horn profile covers sounding E3 through C6.
+The B♭ clarinet profile covers sounding D3 through B♭6. The piccolo profile
+covers sounding D5 through C8 and extends down to C5 for a low C footjoint.
+The bassoon profile covers sounding B♭1 through F5.
+The bass clarinet profile covers sounding B♭1 through B5, including the low C
+extension's written C3, which sounds as B♭1.
+The contrabassoon profile covers sounding B♭0 through C4 and extends down to
+A0 for instruments with a low A extension.
+The E♭ clarinet profile covers sounding G3 through C7, a minor third above
+written E3 through A6.
+The alto flute profile covers sounding G3 through G6, a perfect fourth below
+written C4 through C7.
+The alto saxophone profile covers sounding D♭3 through A5, a major sixth below
+written B♭3 through F♯6.
+The tenor saxophone profile covers sounding A♭2 through E5, a major ninth
+below written B♭3 through F♯6.
+The `recorder` profile covers soprano (descant) recorder in C, sounding C5
+through D7. The `sopranino-recorder` profile covers sopranino recorder in F,
+sounding F5 through G7.
+The command runs offline in C and accepts mono or stereo WAVE at 8–192 kHz with
+finite samples within float32 range. Sounding C8 is about 4,186 Hz at standard
+tuning and needs a sample rate of at least 8,373 Hz.
 The bundle contains the named instrument stem, such as `audio/piano.wav`,
 alongside `audio/removed.wav` on the source sample clock. You can pass the
 instrument stem to `analyze-events`.
 
 Automatic cleanup looks for brief disturbances between quiet windows and
 compares spectral energy across nearby frames during stable notes. The piano
-profile protects spectral peaks from several sounding notes at once.
+profile protects spectral peaks from several sounding notes at once. The
+woodwind profiles use pitch to protect notes and check each stereo channel
+separately.
 Noise that shares the instrument's harmonics can still bleed into the stem.
-Listen to the removed audio for bow or hammer attacks and note tails you want
-to keep.
+Listen to the removed audio for bow, hammer, or breath attacks and note tails
+you want to keep.
 
 To limit cleanup to known disturbances, repeat `--disturbance-samples` with
 zero-based, end-exclusive start and end samples. Samples outside those spans
