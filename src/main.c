@@ -121,6 +121,7 @@ typedef struct HWACli {
     const char *isolation_instrument;
     HwaIsolationRange disturbances[HWA_CLI_MAX_DISTURBANCES];
     size_t disturbance_count;
+    int isolation_deconv;
     const char *physical_bindings[HWA_CLI_MAX_BINDINGS];
     size_t physical_binding_count;
     HWABasicPitchDecoderOptions basic_pitch_options;
@@ -220,7 +221,7 @@ static void hwa_print_usage(FILE *stream)
         "--instrument violin|viola|cello|double-bass|piano|flute|oboe|english-horn|"
         "clarinet|piccolo|bassoon|bass-clarinet|contrabassoon|e-flat-clarinet|alto-flute|"
         "alto-saxophone|tenor-saxophone|recorder|sopranino-recorder --output NEW.hwa-events "
-        "[--disturbance-samples START:END ...]\n"
+        "[--disturbance-samples START:END ...] [--deconv[=true|false]]\n"
         "  hlolli-wg-analyzer infer-stem-note-events STEMS.hwa-events "
         "--model MODEL.onnx --output NEW.hwa-events\n"
         "  hlolli-wg-analyzer [--json] inference-capabilities\n");
@@ -271,6 +272,7 @@ static void hwa_print_usage(FILE *stream)
         "or sopranino-recorder.\n"
         "  --disturbance-samples START:END  Limit cleanup to a source span "
         "(0-based, end excluded; repeatable).\n"
+        "  --deconv[=true|false]       Reduce late reverb using the recording alone.\n"
         "  --allow-run                 Permit the named renderer to run.\n"
         "\n"
         "Paired note spectra:\n"
@@ -1760,6 +1762,22 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
         } else if (!end_options && strcmp(current, "--phase-partials") == 0) {
             if (cli->note_phase_partials) return -1;
             cli->note_phase_partials = 1;
+        } else if (!end_options &&
+                   (strcmp(current, "--deconv") == 0 ||
+                    strncmp(current, "--deconv=", sizeof("--deconv=") - 1U) == 0)) {
+            if (cli->isolation_deconv != 0) {
+                (void)fputs("hlolli-wg-analyzer: --deconv may only be set once\n", stderr);
+                return -1;
+            }
+            if (strcmp(current, "--deconv=false") == 0) {
+                cli->isolation_deconv = -1;
+            } else if (strcmp(current, "--deconv") == 0 ||
+                       strcmp(current, "--deconv=true") == 0) {
+                cli->isolation_deconv = 1;
+            } else {
+                (void)fputs("hlolli-wg-analyzer: --deconv expects true or false\n", stderr);
+                return -1;
+            }
         } else if (!end_options && strcmp(current, "--replace") == 0) {
             cli->replace = 1;
         } else if (!end_options && strcmp(current, "--allow-run") == 0) {
@@ -3824,7 +3842,7 @@ static int hwa_run_isolate_instrument(HWACli *cli)
     }
     hwa_event_bundle_limits_default(&bundle_limits);
     if (hwa_isolate_instrument_wav(cli->positionals[1], cli->output_path, instrument,
-                                   cli->disturbances, range_count,
+                                   cli->disturbances, range_count, cli->isolation_deconv > 0,
                                    &cli->options, &bundle_limits,
                                    error, sizeof(error)) != 0) {
         (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n",
@@ -4606,7 +4624,8 @@ int main(int argc, char **argv)
         return 2;
     }
     if (strcmp(cli.positionals[0], "isolate-instrument") != 0 &&
-        (cli.isolation_instrument != NULL || cli.disturbance_count != 0U)) {
+        (cli.isolation_instrument != NULL || cli.disturbance_count != 0U ||
+         cli.isolation_deconv != 0)) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "import-score") != 0 && cli.musicxml_option_set) {
         result = -1;

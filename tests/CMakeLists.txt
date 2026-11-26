@@ -1452,6 +1452,10 @@ if(HWA_PYTHON3_EXECUTABLE)
     ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ViolinIsolation)
   set_tests_properties(cli.violin-isolation PROPERTIES TIMEOUT 60)
+  add_test(NAME cli.blind-dereverb COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> BlindDereverb)
+  set_tests_properties(cli.blind-dereverb PROPERTIES TIMEOUT 60)
   add_test(NAME cli.viola-isolation COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_instrument_isolation_cli.py
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer> ViolaIsolation)

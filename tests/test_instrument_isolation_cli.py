@@ -561,6 +561,163 @@ class ViolinIsolation(InstrumentIsolationTest):
             self.assertNotEqual(result.returncode, 0)
 
 
+class BlindDereverb(InstrumentIsolationTest):
+    def isolate_as(self, name, *flags):
+        self.output = self.root / f"{name}.hwa-events"
+        result = self.isolate(*flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.output
+
+    def test_flag_forms_and_option_scope(self):
+        write_pcm(self.source, [0] * 1024, 16000, 1)
+        default = self.isolate_as("default")
+        disabled = self.isolate_as("disabled", "--deconv=false")
+        enabled = self.isolate_as("enabled", "--deconv")
+        explicit = self.isolate_as("explicit", "--deconv=true")
+        for initial, equivalent in ((default, disabled), (enabled, explicit)):
+            initial_files = {path.relative_to(initial): path.read_bytes()
+                             for path in initial.rglob("*") if path.is_file()}
+            equivalent_files = {path.relative_to(equivalent): path.read_bytes()
+                                for path in equivalent.rglob("*") if path.is_file()}
+            self.assertEqual(initial_files, equivalent_files)
+        default_settings = json.loads((default / "manifest.json").read_bytes())["providers"][0]["settings"]
+        enabled_settings = json.loads((enabled / "manifest.json").read_bytes())["providers"][0]["settings"]
+        self.assertNotIn("dereverberation", default_settings)
+        self.assertEqual(enabled_settings["dereverberation"], {
+            "method": "blind-late-reverb-1", "estimated_rt60_ms": 0, "supporting_releases": 0
+        })
+        self.output = self.root / "invalid.hwa-events"
+        for flags in (("--deconv=",), ("--deconv=yes",), ("--deconv=1",),
+                      ("--deconv", "--deconv=false")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.isolate(*flags).returncode, 2)
+                self.assertFalse(self.output.exists())
+        for flag in ("--deconv", "--deconv=true", "--deconv=false"):
+            with self.subTest(flag=flag):
+                self.assertEqual(self.cli("inspect", self.source, flag).returncode, 2)
+
+    def test_preserves_a_sustained_note_with_natural_decay(self):
+        rate = 22050
+        self.instrument = "viola"
+        samples = read_fixture("viola-c3", VIOLA_FIXTURES)
+        write_pcm(self.source, samples, rate, 1)
+        original = self.isolate_as("isolation")
+        processed = self.isolate_as("dereverb", "--deconv")
+        for path in ("audio/viola.wav", "audio/removed.wav"):
+            self.assertEqual((original / path).read_bytes(), (processed / path).read_bytes())
+        settings = json.loads((processed / "manifest.json").read_bytes())["providers"][0]["settings"]
+        self.assertEqual(settings["dereverberation"]["estimated_rt60_ms"], 0)
+
+    def test_preserves_naturally_decaying_piano_notes(self):
+        self.instrument = "piano"
+        rate = 16000
+        samples = [0] * (rate // 8)
+        for pitch, tau in ((261.6, 0.08), (329.6, 0.09), (392.0, 0.10),
+                           (440.0, 0.09), (523.3, 0.08)):
+            for frame in range(rate):
+                t = frame / rate
+                onset = min(1.0, t / 0.004)
+                tone = sum(harmonic ** -1.4 * math.exp(-harmonic * t / tau)
+                           * math.sin(math.tau * harmonic * pitch * t)
+                           for harmonic in range(1, 6))
+                samples.append(round(6000 * onset * tone))
+            samples.extend([0] * (rate // 8))
+        write_pcm(self.source, samples, rate, 1)
+        original = self.isolate_as("isolation")
+        processed = self.isolate_as("dereverb", "--deconv")
+        for path in ("audio/piano.wav", "audio/removed.wav"):
+            self.assertEqual((original / path).read_bytes(), (processed / path).read_bytes())
+
+    def test_preserves_dry_detached_notes_with_slow_damped_releases(self):
+        rate = 16000
+        for vibrato_cents in (0, 40):
+            with self.subTest(vibrato_cents=vibrato_cents):
+                samples = [0] * (rate // 6)
+                for pitch in (330, 392, 440, 523, 659):
+                    phase = 0.0
+                    for frame in range(round(0.8 * rate)):
+                        t = frame / rate
+                        if t < 0.306:
+                            envelope = min(1.0, t / 0.015)
+                        elif t < 0.312:
+                            envelope = 1.0 - 0.86 * (t - 0.306) / 0.006
+                        else:
+                            envelope = 0.14 * math.exp(-(t - 0.312) / 0.084)
+                        tone = sum(harmonic ** -1.5 * math.sin(harmonic * phase)
+                                   for harmonic in range(1, 6))
+                        cents = vibrato_cents * math.sin(math.tau * 5.5 * t)
+                        phase += math.tau * pitch * 2 ** (cents / 1200) / rate
+                        samples.append(round(6000 * envelope * tone))
+                write_pcm(self.source, samples, rate, 1)
+                flags = ("--disturbance-samples", "0:1")
+                original = self.isolate_as(f"isolation-{vibrato_cents}", *flags)
+                processed = self.isolate_as(f"dereverb-{vibrato_cents}", *flags, "--deconv")
+                for path in ("audio/violin.wav", "audio/removed.wav"):
+                    self.assertEqual((original / path).read_bytes(), (processed / path).read_bytes())
+
+    @staticmethod
+    def room_reflections(rate, seed, gain):
+        rng = random.Random(seed)
+        taps = [(0, gain)]
+        for time_ms in range(12, 310, 5):
+            delay = round(rate * (time_ms + rng.uniform(-2, 2)) / 1000)
+            polarity = rng.choice((-1, 1))
+            taps.append((delay, polarity * gain * 0.25 * 10 ** (-3 * time_ms / 650)))
+        return taps
+
+    def test_reduces_recurring_room_tails_and_preserves_clock(self):
+        rate = 16000
+        note_frames = round(0.32 * rate)
+        spacing = round(0.68 * rate)
+        starts = [rate // 6 + index * spacing for index in range(5)]
+        frames = starts[-1] + spacing
+        reflections = [self.room_reflections(rate, 19, 1.0),
+                       self.room_reflections(rate, 82, 0.8)]
+        interleaved = [0.0] * (2 * frames)
+        for start, pitch, level in zip(starts, (392, 466, 554, 659, 740),
+                                       (3300, 3700, 2400, 3100, 2800)):
+            note = self.bowed_note(rate, note_frames, pitch, level, edge_ms=15)
+            for channel, taps in enumerate(reflections):
+                for delay, gain in taps:
+                    for index, sample in enumerate(note, start + delay):
+                        interleaved[2 * index + channel] += gain * sample
+        stereo = list(map(round, interleaved))
+        for channels, samples, mask in ((2, stereo, 3), (1, stereo[::2], 0)):
+            with self.subTest(channels=channels):
+                write_pcm(self.source, samples, rate, channels, mask=mask)
+                # Mark one leading zero so the comparison only changes dereverberation.
+                flags = ("--disturbance-samples", "0:1")
+                original = self.isolate_as(f"isolation-{channels}", *flags)
+                processed = self.isolate_as(f"dereverb-{channels}", *flags, "--deconv=true")
+                validated = self.cli("validate-event-bundle", processed)
+                self.assertEqual(validated.returncode, 0, validated.stderr)
+                baseline = read_float_pcm(original / "audio" / "violin.wav")
+                stem = read_float_pcm(processed / "audio" / "violin.wav")
+                removed = read_float_pcm(processed / "audio" / "removed.wav")
+                self.assertEqual((len(stem), len(removed)), (len(samples), len(samples)))
+                self.assertLess(max(abs(a + b - expected / 32768)
+                                    for a, b, expected in zip(stem, removed, samples)), 1e-7)
+                manifest = json.loads((processed / "manifest.json").read_bytes())
+                for audio in manifest["audio"]:
+                    fmt = audio["format"]
+                    self.assertEqual((fmt["sample_rate_hz"], fmt["channels"], fmt["channel_mask"],
+                                      fmt["frames"]), (rate, channels, mask, frames))
+                settings = manifest["providers"][0]["settings"]["dereverberation"]
+                self.assertGreater(settings["estimated_rt60_ms"], 0)
+                self.assertGreaterEqual(settings["supporting_releases"], 2)
+                tails = [index for start in starts
+                         for index in range(channels * (start + note_frames + rate // 20),
+                                            channels * (start + note_frames + rate // 5))]
+                held_notes = [index for start in starts
+                              for index in range(channels * start,
+                                                 channels * (start + note_frames - rate // 40))]
+                max_tail_fraction = 0.85 if channels == 2 else 0.92
+                self.assertLess(sum(stem[i] ** 2 for i in tails),
+                                max_tail_fraction * sum(baseline[i] ** 2 for i in tails))
+                self.assertLess(sum((stem[i] - baseline[i]) ** 2 for i in held_notes),
+                                0.003 * sum(baseline[i] ** 2 for i in held_notes))
+
+
 class ViolaIsolation(InstrumentIsolationTest):
     instrument = "viola"
 

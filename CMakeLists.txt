@@ -63,6 +63,7 @@ add_library(hlolli_wg_analyzer_core STATIC
   src/basic_pitch.c
   src/basic_pitch_audio_provider.c
   src/basic_pitch_provider.c
+  src/blind_dereverb.c
   src/body_envelope.c
   src/dsp.c
   src/experiment.c

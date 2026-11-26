@@ -1,5 +1,6 @@
 #include "instrument_isolation_file.h"
 
+#include "blind_dereverb.h"
 #include "event_bundle.h"
 #include "inference_provider.h"
 #include "internal.h"
@@ -293,11 +294,13 @@ static int hwa_isolation_wave_read(void *context, uint64_t offset,
 static char *hwa_isolation_settings(const char *instrument,
                                     const HwaIsolationRange *ranges,
                                     size_t range_count,
+                                    const HwaBlindDereverbResult *dereverb,
                                     const HWAEventBundleLimits *limits,
                                     char *error,
                                     size_t error_size)
 {
     char prefix[80];
+    char suffix[160] = "]}";
     /* Two uint64_t decimals, brackets, and at most two commas per range. */
     const size_t range_capacity = 44U;
     size_t capacity;
@@ -307,16 +310,28 @@ static char *hwa_isolation_settings(const char *instrument,
     int prefix_size = snprintf(prefix, sizeof(prefix),
                                "{\"instrument\":\"%s\",\"disturbance_samples\":[",
                                instrument);
+    int suffix_size = 2;
     if (prefix_size < 0 || (size_t)prefix_size >= sizeof(prefix)) {
         hwa_set_error(error, error_size, "cannot encode isolation instrument");
         return NULL;
     }
+    if (dereverb != NULL) {
+        suffix_size = snprintf(suffix, sizeof(suffix),
+                               "],\"dereverberation\":{\"method\":\"blind-late-reverb-1\","
+                               "\"estimated_rt60_ms\":%ld,\"supporting_releases\":%zu}}",
+                               lround(dereverb->decay_seconds * 1000.0),
+                               dereverb->release_count);
+        if (suffix_size < 0 || (size_t)suffix_size >= sizeof(suffix)) {
+            hwa_set_error(error, error_size, "cannot encode dereverberation settings");
+            return NULL;
+        }
+    }
     offset = (size_t)prefix_size;
-    if (range_count > (SIZE_MAX - offset - 3U) / range_capacity) {
+    if (range_count > (SIZE_MAX - offset - (size_t)suffix_size - 1U) / range_capacity) {
         hwa_set_error(error, error_size, "instrument isolation settings size overflows");
         return NULL;
     }
-    capacity = offset + range_count * range_capacity + 3U;
+    capacity = offset + range_count * range_capacity + (size_t)suffix_size + 1U;
     if (capacity > limits->max_manifest_bytes ||
         capacity > limits->max_work_bytes) {
         hwa_set_error(error, error_size, "instrument isolation settings exceed the bundle limits");
@@ -341,7 +356,7 @@ static char *hwa_isolation_settings(const char *instrument,
         }
         offset += (size_t)written;
     }
-    memcpy(settings + offset, "]}", 3U);
+    memcpy(settings + offset, suffix, (size_t)suffix_size + 1U);
     return settings;
 }
 
@@ -350,6 +365,7 @@ int hwa_isolate_instrument_wav(const char *source_path,
                                HwaIsolationInstrument instrument,
                                const HwaIsolationRange *ranges,
                                size_t range_count,
+                               int deconv,
                                const HWAAnalysisOptions *input_limits,
                                const HWAEventBundleLimits *bundle_limits,
                                char *error,
@@ -385,6 +401,7 @@ int hwa_isolate_instrument_wav(const char *source_path,
     };
     const HwaIsolationArtifact *artifact;
     HWAEventBundleLimits write_limits;
+    HwaBlindDereverbResult dereverb = {0};
     char current_source_sha256[HWA_SHA256_HEX_SIZE];
     double *input = NULL;
     double *estimate = NULL;
@@ -441,6 +458,11 @@ int hwa_isolate_instrument_wav(const char *source_path,
                                instrument, ranges, range_count, work_available,
                                estimate, error, error_size) != 0)
         goto cleanup;
+    if (deconv &&
+        hwa_blind_dereverb(estimate, (size_t)audio[0].format.frames,
+                           audio[0].format.channels, audio[0].format.sample_rate_hz,
+                           work_available, &dereverb, error, error_size) != 0)
+        goto cleanup;
     /* Subtract the delivered float estimate where cleanup changed the source. */
     for (index = 0U; index < count; ++index) {
         if (!isfinite(estimate[index]) || fabs(estimate[index]) > FLT_MAX) {
@@ -465,6 +487,7 @@ int hwa_isolate_instrument_wav(const char *source_path,
     if (write_limits.max_work_bytes > work_available)
         write_limits.max_work_bytes = work_available;
     provider.settings_json = hwa_isolation_settings(artifact->instrument, ranges, range_count,
+                                                      deconv ? &dereverb : NULL,
                                                       &write_limits,
                                                       error, error_size);
     if (provider.settings_json == NULL) goto cleanup;

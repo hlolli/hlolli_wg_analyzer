@@ -183,15 +183,32 @@ Listen to the removed audio for bow, hammer, or breath attacks and note tails
 you want to keep.
 
 To limit cleanup to known disturbances, repeat `--disturbance-samples` with
-zero-based, end-exclusive start and end samples. Samples outside those spans
-pass through at the output WAVE's precision. The command joins touching spans
-and rejects overlaps.
+zero-based, end-exclusive start and end samples. With noise cleanup alone,
+samples outside those spans pass through at the output WAVE's precision.
+The command joins touching spans and rejects overlaps.
 
 ```sh
 build/hlolli-wg-analyzer isolate-instrument performance.wav \
   --instrument violin --disturbance-samples 48000:62400 \
   --disturbance-samples 134400:144000 --output marked.hwa-events
 ```
+
+Add `--deconv` or `--deconv=true` to reduce late reverb using the recording
+alone. The pass looks for at least two clear releases with similar decay and
+reduces the late tails it can identify. Continuous playing and overlapping
+notes can give too little evidence, in which case the isolated audio passes
+through. The pass keeps the original sample rate, channel layout, and frame
+count. Use `--deconv=false` to run noise cleanup alone, which is the default.
+
+```sh
+build/hlolli-wg-analyzer isolate-instrument recital.wav \
+  --instrument violin --deconv --output drier.hwa-events
+```
+
+Disturbance spans limit noise cleanup. Dereverberation looks for releases
+across the cleaned recording. The bundle records the estimated decay and the
+number of releases that support it. Both values are zero when the evidence is
+weak. `audio/removed.wav` lets you hear the combined changes from both passes.
 
 The command buffers the recording and its estimate. For longer recordings,
 `--max-work-bytes` can raise the default 256 MiB work limit.
