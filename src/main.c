@@ -37,6 +37,7 @@
 #include "musicxml_report.h"
 #include "output.h"
 #include "paired_spectrum_report.h"
+#include "speech_span_report.h"
 #include "physical_file.h"
 #include "physical_report.h"
 #include "production_file.h"
@@ -102,6 +103,9 @@ typedef struct HWACli {
     int paired_notes_clock_set;
     int paired_notes_on_target;
     int paired_spectrum_option_set;
+    int paired_mapping_option_set;
+    const char *speech_spans_path;
+    const char *speech_excerpt_dir;
     int musicxml_option_set;
     uint64_t event_score_source_id;
     unsigned event_score_option_set;
@@ -185,6 +189,8 @@ static void hwa_print_usage(FILE *stream)
         "--note-end-sample N\n"
         "  hlolli-wg-analyzer compare-note-spectra REFERENCE.wav TARGET.wav "
         "--alignment MAP.hwa-align (--notes NOTES.csv|--score-alignment SCORE.hwa-align)\n"
+        "  hlolli-wg-analyzer compare-speech-spans REFERENCE.wav CANDIDATE.wav "
+        "--alignment MAP.hwa-align --spans PHONES.csv [--excerpt-dir DIRECTORY]\n"
         "  hlolli-wg-analyzer [OPTIONS] segment --alignment ALIGN.hwa-align "
         "AUDIO.wav --output FILE.hwa-items\n"
         "  hlolli-wg-analyzer [OPTIONS] measure --items ITEMS.hwa-items "
@@ -831,6 +837,12 @@ static int hwa_parse_option_with_value(HWACli *cli,
         cli->score_path = value;
     } else if (strcmp(option, "--alignment") == 0) {
         cli->alignment_path = value;
+    } else if (strcmp(option, "--spans") == 0) {
+        if (cli->speech_spans_path != NULL || value[0] == '\0') return -1;
+        cli->speech_spans_path = value;
+    } else if (strcmp(option, "--excerpt-dir") == 0) {
+        if (cli->speech_excerpt_dir != NULL || value[0] == '\0') return -1;
+        cli->speech_excerpt_dir = value;
     } else if (strcmp(option, "--notes") == 0) {
         if (cli->paired_notes_path != NULL || value[0] == '\0') return -1;
         cli->paired_notes_path = value;
@@ -848,11 +860,11 @@ static int hwa_parse_option_with_value(HWACli *cli,
     } else if (strcmp(option, "--alignment-reference") == 0) {
         if (cli->paired_alignment_reference_path != NULL || value[0] == '\0') return -1;
         cli->paired_alignment_reference_path = value;
-        cli->paired_spectrum_option_set = 1;
+        cli->paired_mapping_option_set = 1;
     } else if (strcmp(option, "--alignment-target") == 0) {
         if (cli->paired_alignment_target_path != NULL || value[0] == '\0') return -1;
         cli->paired_alignment_target_path = value;
-        cli->paired_spectrum_option_set = 1;
+        cli->paired_mapping_option_set = 1;
     } else if (strcmp(option, "--band") == 0) {
         HWAPairedSpectrumReportOptions *paired = &cli->paired_spectrum_options;
         if (paired->band_count == HWA_PAIRED_SPECTRUM_MAX_BANDS ||
@@ -879,7 +891,7 @@ static int hwa_parse_option_with_value(HWACli *cli,
     } else if (strcmp(option, "--min-pair-confidence") == 0) {
         double *confidence = &cli->paired_spectrum_options.min_pair_confidence;
         if (hwa_parse_double(value, confidence) != 0 || *confidence < 0.0 || *confidence > 1.0) return -1;
-        cli->paired_spectrum_option_set = 1;
+        cli->paired_mapping_option_set = 1;
     } else if (strcmp(option, "--labels") == 0) {
         cli->labels_path = value;
     } else if (strcmp(option, "--amend") == 0) {
@@ -4602,6 +4614,42 @@ static int hwa_run_paired_spectra(const HWACli *cli)
     return 0;
 }
 
+static int hwa_run_speech_spans(const HWACli *cli)
+{
+    char error[HWA_ERROR_SIZE] = {0};
+
+    if (cli->positional_count != 3U || cli->alignment_path == NULL ||
+        cli->speech_spans_path == NULL || cli->export_kind != 0 ||
+        cli->score_path != NULL || cli->labels_path != NULL || cli->amend_path != NULL ||
+        cli->items_path != NULL || cli->room_ir_path != NULL ||
+        cli->physical_binding_count != 0U || cli->options.channel_mode != HWA_CHANNEL_KEEP ||
+        cli->silence_option_set || cli->decode_block_option_set ||
+        cli->analysis_only_option_set || cli->max_track_points_option_set ||
+        cli->frame_size_option_set || cli->hop_size_option_set ||
+        cli->alignment_option_set || cli->segmentation_option_set ||
+        cli->measurement_option_set || cli->comparison_option_set ||
+        cli->physical_option_set || cli->production_option_set || cli->run_option_set) {
+        return -1;
+    }
+    HWASpeechReportOptions options = {
+        .reference_path = cli->positionals[1],
+        .candidate_path = cli->positionals[2],
+        .alignment_path = cli->alignment_path,
+        .alignment_reference_path = cli->paired_alignment_reference_path,
+        .alignment_candidate_path = cli->paired_alignment_target_path,
+        .spans_path = cli->speech_spans_path,
+        .output_path = cli->output_path != NULL ? cli->output_path : "-",
+        .excerpt_dir = cli->speech_excerpt_dir,
+        .min_confidence = cli->paired_spectrum_options.min_pair_confidence,
+        .replace = cli->replace
+    };
+    if (hwa_speech_span_report(&options, &cli->options, error, sizeof(error)) != 0) {
+        (void)fprintf(stderr, "hlolli-wg-analyzer: %s\n", error);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     HWACli cli;
@@ -4637,6 +4685,13 @@ int main(int argc, char **argv)
         result = -1;
     } else if (strcmp(cli.positionals[0], "compare-note-spectra") != 0 &&
                cli.paired_spectrum_option_set) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "compare-speech-spans") != 0 &&
+               (cli.speech_spans_path != NULL || cli.speech_excerpt_dir != NULL)) {
+        result = -1;
+    } else if (strcmp(cli.positionals[0], "compare-speech-spans") != 0 &&
+               strcmp(cli.positionals[0], "compare-note-spectra") != 0 &&
+               cli.paired_mapping_option_set) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "infer-note-events") != 0 &&
         strcmp(cli.positionals[0], "separate-instruments") != 0 &&
@@ -4677,6 +4732,8 @@ int main(int argc, char **argv)
         result = hwa_run_note_phases(&cli);
     } else if (strcmp(cli.positionals[0], "compare-note-spectra") == 0) {
         result = hwa_run_paired_spectra(&cli);
+    } else if (strcmp(cli.positionals[0], "compare-speech-spans") == 0) {
+        result = hwa_run_speech_spans(&cli);
     } else if (strcmp(cli.positionals[0], "isolated-note") == 0) {
         result = hwa_run_isolated_note(&cli);
     } else if (strcmp(cli.positionals[0], "harmonic-decay") == 0) {

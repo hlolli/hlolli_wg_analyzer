@@ -408,7 +408,7 @@ int hwa_paired_spectrum_report(const char *reference_path, const char *target_pa
     if (hwa_paired_spectrum_dsp_options_validate(&options->dsp, error, error_size) != 0 ||
         hwa_paired_spans_open(reference_path, target_path, alignment_path,
             alignment_reference_path, alignment_target_path, notes_path, score_alignment_path,
-            notes_on_target, limits, options->held_fraction, options->min_pair_confidence,
+            notes_on_target, 0, limits, options->held_fraction, options->min_pair_confidence,
             &spans, error, error_size) != 0) return -1;
     report.spans = &spans;
     report.options = options;

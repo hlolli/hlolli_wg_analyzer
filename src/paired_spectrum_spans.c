@@ -15,6 +15,8 @@ typedef struct PairedMap {
     const HWAFormat *target;
     double *minimum_confidence;
     double *gap_ends;
+    double *uncertain_ends;
+    int include_uncertain;
     size_t target_gap_start;
     double held_fraction;
     double min_confidence;
@@ -32,10 +34,10 @@ static int paired_map_init(PairedMap *map, uint64_t *remaining,
     const HWAAlignment *alignment = map->alignment;
     size_t anchors = alignment->anchor_count;
     size_t gap_count = alignment->unmatched_span_count;
-    uint64_t bytes = ((uint64_t)anchors * 2U + (uint64_t)gap_count) *
-                     sizeof(double);
+    uint64_t gap_values = (uint64_t)gap_count * (map->include_uncertain ? 2U : 1U);
+    uint64_t bytes = ((uint64_t)anchors * 2U + gap_values) * sizeof(double);
     size_t index;
-    double gap_end = 0.0;
+    double gap_end = 0.0, uncertain_end = 0.0;
 
     if (bytes > *remaining) {
         hwa_set_error(error, error_size, "alignment index exceeds the work limit");
@@ -48,6 +50,7 @@ static int paired_map_init(PairedMap *map, uint64_t *remaining,
             return -1;
         }
         map->gap_ends = map->minimum_confidence + anchors * 2U;
+        if (map->include_uncertain) map->uncertain_ends = map->gap_ends + gap_count;
     }
     *remaining -= bytes;
 
@@ -67,12 +70,18 @@ static int paired_map_init(PairedMap *map, uint64_t *remaining,
         if (span->side == HWA_ALIGNMENT_TARGET && map->target_gap_start == gap_count) {
             map->target_gap_start = index;
             gap_end = 0.0;
+            uncertain_end = 0.0;
         }
-        if (span->reason != HWA_UNMATCHED_LOW_CONFIDENCE &&
-            span->reason != HWA_UNMATCHED_NO_EVIDENCE &&
-            span->start_seconds < span->end_seconds)
-            gap_end = fmax(gap_end, span->end_seconds);
+        if (span->start_seconds < span->end_seconds) {
+            if (span->reason == HWA_UNMATCHED_LOW_CONFIDENCE ||
+                span->reason == HWA_UNMATCHED_NO_EVIDENCE) {
+                uncertain_end = fmax(uncertain_end, span->end_seconds);
+            } else {
+                gap_end = fmax(gap_end, span->end_seconds);
+            }
+        }
         map->gap_ends[index] = gap_end;
+        if (map->include_uncertain) map->uncertain_ends[index] = uncertain_end;
     }
     return 0;
 }
@@ -131,7 +140,7 @@ static double paired_confidence(const PairedMap *map, size_t start, size_t end)
 }
 
 static int paired_intersects_gap(const PairedMap *map, int target,
-                                 double start, double end)
+                                 double start, double end, const double *ends)
 {
     size_t side_start = target ? map->target_gap_start : 0U;
     size_t first = side_start;
@@ -144,7 +153,7 @@ static int paired_intersects_gap(const PairedMap *map, int target,
         else
             last = middle;
     }
-    return first > side_start && map->gap_ends[first - 1U] > start;
+    return ends != NULL && first > side_start && ends[first - 1U] > start;
 }
 
 static uint64_t paired_sample(double seconds, const HWAFormat *format)
@@ -208,10 +217,12 @@ static void paired_map_span(const PairedMap *map, HwaPairedSpan *row,
     if (!target_span->valid) return;
     row->confidence = fmin(row->confidence, paired_confidence(map, left.left, right.right));
     row->confidence_valid = 1;
-    if (paired_intersects_gap(map, reverse, held_start, held_end) ||
-        paired_intersects_gap(map, !reverse, left.time, right.time)) {
+    if (paired_intersects_gap(map, reverse, held_start, held_end, map->gap_ends) ||
+        paired_intersects_gap(map, !reverse, left.time, right.time, map->gap_ends)) {
         paired_skip(row, "unmatched-alignment");
-    } else if (row->confidence < map->min_confidence) {
+    } else if (row->confidence < map->min_confidence ||
+               paired_intersects_gap(map, reverse, held_start, held_end, map->uncertain_ends) ||
+               paired_intersects_gap(map, !reverse, left.time, right.time, map->uncertain_ends)) {
         paired_skip(row, "low-alignment-confidence");
     }
 }
@@ -628,7 +639,7 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const char *alignment_path,
                           const char *alignment_reference_path, const char *alignment_target_path,
                           const char *notes_path, const char *score_alignment_path,
-                          int notes_on_target,
+                          int notes_on_target, int keep_map,
                           const HWAAnalysisOptions *limits, double held_fraction,
                           double min_confidence, HwaPairedSpans *result,
                           char *error, size_t error_size)
@@ -683,7 +694,20 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
     map.target = &result->target.format;
     map.held_fraction = held_fraction;
     map.min_confidence = min_confidence;
+    map.include_uncertain = keep_map;
     if (paired_map_init(&map, &remaining, error, error_size) != 0) goto cleanup;
+    if (keep_map) {
+        if (remaining < sizeof(*result->map)) {
+            hwa_set_error(error, error_size, "alignment map exceeds the work limit");
+            goto cleanup;
+        }
+        remaining -= sizeof(*result->map);
+        result->map = calloc(1U, sizeof(*result->map));
+        if (result->map == NULL) {
+            hwa_set_error(error, error_size, "cannot retain alignment map");
+            goto cleanup;
+        }
+    }
     if (notes_path != NULL) {
         result->notes_on_target = notes_on_target;
         status = paired_load_csv(notes_path, &file_limits, remaining, &map, notes_on_target,
@@ -691,6 +715,15 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
     } else {
         status = paired_load_score(score_alignment_path, file_limits, remaining, &map, result,
                                    error, error_size);
+    }
+
+    if (status == 0 && keep_map) {
+        result->audio_alignment = alignment;
+        *result->map = map;
+        result->map->alignment = &result->audio_alignment;
+        result->retained_work_bytes += file_limits.max_work_bytes - remaining;
+        memset(&alignment, 0, sizeof(alignment));
+        map.minimum_confidence = NULL;
     }
 
 cleanup:
@@ -704,11 +737,25 @@ cleanup:
     return status;
 }
 
+void hwa_paired_spans_map_reference(const HwaPairedSpans *spans, HwaPairedSpan *row)
+{
+    const HWAFormat *format = &spans->reference.format;
+    HwaPairedSampleSpan *span = &row->reference;
+
+    span->present = 1;
+    span->valid = span->start_sample < span->end_sample && span->end_sample <= format->frames;
+    paired_map_span(spans->map, row, (double)span->start_sample / format->sample_rate_hz,
+                   (double)span->end_sample / format->sample_rate_hz, 0);
+}
+
 void hwa_paired_spans_close(HwaPairedSpans *result)
 {
     if (result == NULL) return;
     free(result->rows);
     free(result->csv_data);
+    if (result->map != NULL) free(result->map->minimum_confidence);
+    free(result->map);
+    hwa_alignment_free(&result->audio_alignment);
     hwa_alignment_free(&result->score_alignment);
     hwa_wav_reader_close(&result->reference);
     hwa_wav_reader_close(&result->target);

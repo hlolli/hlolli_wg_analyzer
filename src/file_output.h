@@ -55,6 +55,12 @@ int hwa_file_output_finish(HWAFileOutput *output,
  */
 int hwa_file_output_abort(HWAFileOutput *output);
 
+/* Flush and close a new file while retaining its identity for rollback.
+ * Finish a group of sealed outputs with keep_sealed, or abort each file. */
+int hwa_file_output_seal_new(HWAFileOutput *output, const char *output_name,
+                             char *error, size_t error_size);
+void hwa_file_output_keep_sealed(HWAFileOutput *output);
+
 #if defined(HWA_FILE_OUTPUT_TESTING)
 /* Fail the next created-file identity reads in the focused unit test. */
 void hwa_file_output_test_fail_created_identity(unsigned count);

@@ -1586,6 +1586,11 @@ if(HWA_PYTHON3_EXECUTABLE)
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
   set_tests_properties(cli.paired-note-spectra PROPERTIES TIMEOUT 60)
 
+  add_test(NAME cli.speech-spans COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_speech_spans_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.speech-spans PROPERTIES TIMEOUT 60)
+
   find_program(HWA_LILYPOND_EXECUTABLE NAMES lilypond)
   set(HWA_EVENT_SCORE_RENDER_ARGS "")
   if(HWA_LILYPOND_EXECUTABLE)

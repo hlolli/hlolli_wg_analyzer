@@ -32,6 +32,8 @@ typedef struct HwaPairedSpan {
     size_t label_count;
 } HwaPairedSpan;
 
+struct PairedMap;
+
 typedef struct HwaPairedSpans {
     HWAWavReader reference;
     HWAWavReader target;
@@ -49,6 +51,8 @@ typedef struct HwaPairedSpans {
     char alignment_target_sha256[HWA_SHA256_HEX_SIZE];
     unsigned char *csv_data;
     HWAAlignment score_alignment;
+    HWAAlignment audio_alignment;
+    struct PairedMap *map;
 } HwaPairedSpans;
 
 /* Confidence combines the annotation and the lowest supporting anchor for the
@@ -58,10 +62,13 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const char *alignment_path,
                           const char *alignment_reference_path, const char *alignment_target_path,
                           const char *notes_path, const char *score_alignment_path,
-                          int notes_on_target,
+                          int notes_on_target, int keep_map,
                           const HWAAnalysisOptions *limits, double held_fraction,
                           double min_confidence, HwaPairedSpans *result,
                           char *error, size_t error_size);
+/* Map a fresh interval on the reference clock using a retained mapping index.
+ * The caller sets reference bounds and any annotation confidence on the row. */
+void hwa_paired_spans_map_reference(const HwaPairedSpans *spans, HwaPairedSpan *row);
 void hwa_paired_spans_close(HwaPairedSpans *result);
 
 #endif
