@@ -9,12 +9,37 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+    PAIRED_LOW_CONFIDENCE = 1U,
+    PAIRED_UNMATCHED = 2U
+};
+
+typedef struct PairedEvidence {
+    double confidence;
+    unsigned flags;
+} PairedEvidence;
+
+typedef struct PairedInterval {
+    double start;
+    double end;
+    PairedEvidence evidence;
+} PairedInterval;
+
+typedef struct PairedEvidenceIndex {
+    double *times;
+    PairedEvidence *tree;
+    size_t count;
+} PairedEvidenceIndex;
+
 typedef struct PairedMap {
     const HWAAlignment *alignment;
     const HWAFormat *reference;
     const HWAFormat *target;
     double *minimum_confidence;
     double *gap_ends;
+    PairedEvidenceIndex reference_evidence;
+    PairedEvidenceIndex target_evidence;
+    int include_interval_support;
     size_t target_gap_start;
     double held_fraction;
     double min_confidence;
@@ -26,14 +51,180 @@ typedef struct PairedBound {
     size_t right;
 } PairedBound;
 
+static PairedEvidence paired_evidence_min(PairedEvidence left, PairedEvidence right)
+{
+    return (PairedEvidence){fmin(left.confidence, right.confidence), left.flags | right.flags};
+}
+
+static int paired_uncertain_span(const HWAUnmatchedSpan *span)
+{
+    return span->reason == HWA_UNMATCHED_LOW_CONFIDENCE || span->reason == HWA_UNMATCHED_NO_EVIDENCE;
+}
+
+static int paired_evidence_interval(const HWAAlignment *alignment, int target,
+                                     size_t index, PairedInterval *interval)
+{
+    if (index < alignment->match_count) {
+        const HWAAlignmentMatch *match = &alignment->matches[index];
+        unsigned flags = 0U;
+
+        if (match->status == HWA_ALIGNMENT_LOW_CONFIDENCE) flags = PAIRED_LOW_CONFIDENCE;
+        else if (match->status != HWA_ALIGNMENT_MATCHED) flags = PAIRED_UNMATCHED;
+        *interval = (PairedInterval){
+            .start = target ? match->target_start_seconds : match->reference_start_seconds,
+            .end = target ? match->target_end_seconds : match->reference_end_seconds,
+            .evidence = {match->confidence, flags}
+        };
+    } else {
+        const HWAUnmatchedSpan *span = &alignment->unmatched_spans[index - alignment->match_count];
+        HWAAlignmentSide side = target ? HWA_ALIGNMENT_TARGET : HWA_ALIGNMENT_REFERENCE;
+        if (span->side != side || !paired_uncertain_span(span)) return 0;
+        *interval = (PairedInterval){
+            .start = span->start_seconds, .end = span->end_seconds,
+            .evidence = {span->confidence, PAIRED_LOW_CONFIDENCE}
+        };
+    }
+    return interval->start < interval->end;
+}
+
+static int paired_time_order(const void *left, const void *right)
+{
+    double a = *(const double *)left;
+    double b = *(const double *)right;
+    return (a > b) - (a < b);
+}
+
+static size_t paired_interval_bound(const PairedEvidenceIndex *index, double time, int upper)
+{
+    size_t low = 0U, high = index->count;
+    while (low < high) {
+        size_t mid = low + (high - low) / 2U;
+        double next = index->times[mid];
+        if (next < time || (upper && next == time)) low = mid + 1U;
+        else high = mid;
+    }
+    return low;
+}
+
+/* Each leaf covers the half-open interval between consecutive distinct saved
+ * endpoints. Mark each source interval on its covering nodes, propagate those
+ * marks to leaves, then recompute node minima for logarithmic overlap queries. */
+static int paired_evidence_index_init(PairedEvidenceIndex *evidence, const HWAAlignment *alignment,
+                                       int target, uint64_t *remaining, char *error, size_t error_size)
+{
+    size_t count = alignment->match_count + alignment->unmatched_span_count;
+    size_t index, leaves, endpoints = 0U;
+    uint64_t bytes;
+    PairedInterval interval;
+
+    for (index = 0U; index < count; ++index) {
+        if (paired_evidence_interval(alignment, target, index, &interval)) endpoints += 2U;
+    }
+    if (endpoints == 0U) return 0;
+
+    bytes = (uint64_t)endpoints * sizeof(*evidence->times);
+    if (bytes > *remaining || bytes > SIZE_MAX) goto limit;
+    evidence->times = malloc((size_t)bytes);
+    if (evidence->times == NULL) goto allocation;
+    *remaining -= bytes;
+
+    for (index = 0U; index < count; ++index) {
+        if (paired_evidence_interval(alignment, target, index, &interval)) {
+            evidence->times[evidence->count++] = interval.start;
+            evidence->times[evidence->count++] = interval.end;
+        }
+    }
+    qsort(evidence->times, evidence->count, sizeof(*evidence->times), paired_time_order);
+    endpoints = 1U;
+    for (index = 1U; index < evidence->count; ++index) {
+        if (evidence->times[index] != evidence->times[endpoints - 1U]) {
+            evidence->times[endpoints++] = evidence->times[index];
+        }
+    }
+    evidence->count = endpoints;
+    leaves = endpoints - 1U;
+    bytes = (uint64_t)leaves * 2U * sizeof(*evidence->tree);
+    if (bytes > *remaining || bytes > SIZE_MAX) goto limit;
+    evidence->tree = malloc((size_t)bytes);
+    if (evidence->tree == NULL) goto allocation;
+    *remaining -= bytes;
+    for (index = 1U; index < 2U * leaves; ++index) {
+        evidence->tree[index] = (PairedEvidence){1.0, 0U};
+    }
+
+    for (index = 0U; index < count; ++index) {
+        size_t left, right;
+        if (!paired_evidence_interval(alignment, target, index, &interval)) continue;
+        left = leaves + paired_interval_bound(evidence, interval.start, 0);
+        right = leaves + paired_interval_bound(evidence, interval.end, 0);
+        while (left < right) {
+            if (left % 2U != 0U) {
+                evidence->tree[left] = paired_evidence_min(evidence->tree[left], interval.evidence);
+                ++left;
+            }
+            if (right % 2U != 0U) {
+                --right;
+                evidence->tree[right] = paired_evidence_min(evidence->tree[right], interval.evidence);
+            }
+            left /= 2U;
+            right /= 2U;
+        }
+    }
+    for (index = 1U; index < leaves; ++index) {
+        size_t left = 2U * index;
+        size_t right = left + 1U;
+        evidence->tree[left] = paired_evidence_min(evidence->tree[left], evidence->tree[index]);
+        evidence->tree[right] = paired_evidence_min(evidence->tree[right], evidence->tree[index]);
+    }
+    for (index = leaves - 1U; index != 0U; --index) {
+        evidence->tree[index] = paired_evidence_min(evidence->tree[2U * index],
+                                                    evidence->tree[2U * index + 1U]);
+    }
+    return 0;
+
+limit:
+    hwa_set_error(error, error_size, "alignment evidence index exceeds the work limit");
+    return -1;
+allocation:
+    hwa_set_error(error, error_size, "cannot allocate alignment evidence index");
+    return -1;
+}
+
+static PairedEvidence paired_evidence_support(const PairedEvidenceIndex *index, double start, double end)
+{
+    PairedEvidence result = {1.0, 0U};
+    size_t left, right, leaves;
+    if (index->count == 0U || start >= end) return result;
+    leaves = index->count - 1U;
+    if (end <= index->times[0] || start >= index->times[leaves]) return result;
+    left = leaves;
+    if (start >= index->times[0]) left += paired_interval_bound(index, start, 1) - 1U;
+    right = leaves + (end >= index->times[leaves] ? leaves : paired_interval_bound(index, end, 0));
+    while (left < right) {
+        if (left % 2U != 0U) result = paired_evidence_min(result, index->tree[left++]);
+        if (right % 2U != 0U) result = paired_evidence_min(result, index->tree[--right]);
+        left /= 2U;
+        right /= 2U;
+    }
+    return result;
+}
+
+static void paired_map_free(PairedMap *map)
+{
+    free(map->minimum_confidence);
+    free(map->reference_evidence.times);
+    free(map->reference_evidence.tree);
+    free(map->target_evidence.times);
+    free(map->target_evidence.tree);
+}
+
 static int paired_map_init(PairedMap *map, uint64_t *remaining,
                            char *error, size_t error_size)
 {
     const HWAAlignment *alignment = map->alignment;
     size_t anchors = alignment->anchor_count;
     size_t gap_count = alignment->unmatched_span_count;
-    uint64_t bytes = ((uint64_t)anchors * 2U + (uint64_t)gap_count) *
-                     sizeof(double);
+    uint64_t bytes = ((uint64_t)anchors * 2U + gap_count) * sizeof(double);
     size_t index;
     double gap_end = 0.0;
 
@@ -68,12 +259,16 @@ static int paired_map_init(PairedMap *map, uint64_t *remaining,
             map->target_gap_start = index;
             gap_end = 0.0;
         }
-        if (span->reason != HWA_UNMATCHED_LOW_CONFIDENCE &&
-            span->reason != HWA_UNMATCHED_NO_EVIDENCE &&
-            span->start_seconds < span->end_seconds)
+        if (span->start_seconds < span->end_seconds && !paired_uncertain_span(span)) {
             gap_end = fmax(gap_end, span->end_seconds);
+        }
         map->gap_ends[index] = gap_end;
     }
+    if (map->include_interval_support &&
+        (paired_evidence_index_init(&map->reference_evidence, alignment, 0,
+                                     remaining, error, error_size) != 0 ||
+         paired_evidence_index_init(&map->target_evidence, alignment, 1,
+                                     remaining, error, error_size) != 0)) return -1;
     return 0;
 }
 
@@ -164,6 +359,32 @@ static HwaPairedSampleSpan paired_sample_span(double start, double end,
     return span;
 }
 
+/* The original and its validated proxy may differ by sample rounding. Only
+ * translate a file endpoint when the last saved anchor reaches proxy EOF. */
+static double paired_clock_endpoint(const PairedMap *map, int target, double time, int to_alignment)
+{
+    const HWAAlignment *alignment = map->alignment;
+    const HWAFormat *format = target ? map->target : map->reference;
+    double proxy_end = target ? alignment->target_duration_seconds
+                              : alignment->reference_duration_seconds;
+    double original_end = format->duration_seconds;
+
+    if (map->include_interval_support && proxy_end != original_end && alignment->anchor_count != 0U &&
+        time == (to_alignment ? original_end : proxy_end) &&
+        paired_anchor_time(&alignment->anchors[alignment->anchor_count - 1U], target) == proxy_end) {
+        return to_alignment ? proxy_end : original_end;
+    }
+    return time;
+}
+
+static HwaPairedSampleSpan paired_destination_span(const PairedMap *map, int target,
+                                                     double start, double end)
+{
+    return paired_sample_span(paired_clock_endpoint(map, target, start, 0),
+                              paired_clock_endpoint(map, target, end, 0),
+                              target ? map->target : map->reference);
+}
+
 static void paired_skip(HwaPairedSpan *row, const char *reason)
 {
     if (row->skip_reason == NULL) row->skip_reason = reason;
@@ -173,7 +394,6 @@ static void paired_map_span(const PairedMap *map, HwaPairedSpan *row,
                             double start, double end, int reverse)
 {
     const HWAFormat *source = reverse ? map->target : map->reference;
-    const HWAFormat *destination = reverse ? map->reference : map->target;
     HwaPairedSampleSpan *source_span = reverse ? &row->target : &row->reference;
     HwaPairedSampleSpan *target_span = reverse ? &row->reference : &row->target;
     HwaPairedSampleSpan *source_held = reverse ? &row->held_target : &row->held_reference;
@@ -182,17 +402,22 @@ static void paired_map_span(const PairedMap *map, HwaPairedSpan *row,
     double held_start = start + margin;
     double held_end = end - margin;
     PairedBound left, right;
+    PairedEvidence evidence;
 
     if (!source_span->valid) {
         paired_skip(row, "invalid-span");
         return;
     }
     *source_held = paired_sample_span(held_start, held_end, source);
+    start = paired_clock_endpoint(map, reverse, start, 1);
+    end = paired_clock_endpoint(map, reverse, end, 1);
+    held_start = paired_clock_endpoint(map, reverse, held_start, 1);
+    held_end = paired_clock_endpoint(map, reverse, held_end, 1);
     if (paired_map_bound(map, start, reverse, &left) != 0 ||
         paired_map_bound(map, end, reverse, &right) != 0) {
         paired_skip(row, "outside-alignment");
     } else {
-        *target_span = paired_sample_span(left.time, right.time, destination);
+        *target_span = paired_destination_span(map, !reverse, left.time, right.time);
         if (!target_span->valid) paired_skip(row, "collapsed-span");
     }
     if (paired_map_bound(map, held_start, reverse, &left) != 0 ||
@@ -200,18 +425,23 @@ static void paired_map_span(const PairedMap *map, HwaPairedSpan *row,
         paired_skip(row, "outside-alignment");
         return;
     }
-    *target_held = paired_sample_span(left.time, right.time, destination);
+    *target_held = paired_destination_span(map, !reverse, left.time, right.time);
     if (!source_held->valid || !target_held->valid) {
         paired_skip(row, "collapsed-span");
         return;
     }
     if (!target_span->valid) return;
+    evidence = paired_evidence_min(
+        paired_evidence_support(reverse ? &map->target_evidence : &map->reference_evidence, held_start, held_end),
+        paired_evidence_support(reverse ? &map->reference_evidence : &map->target_evidence, left.time, right.time));
     row->confidence = fmin(row->confidence, paired_confidence(map, left.left, right.right));
+    row->confidence = fmin(row->confidence, evidence.confidence);
     row->confidence_valid = 1;
-    if (paired_intersects_gap(map, reverse, held_start, held_end) ||
+    if ((evidence.flags & PAIRED_UNMATCHED) != 0U ||
+        paired_intersects_gap(map, reverse, held_start, held_end) ||
         paired_intersects_gap(map, !reverse, left.time, right.time)) {
         paired_skip(row, "unmatched-alignment");
-    } else if (row->confidence < map->min_confidence) {
+    } else if (row->confidence < map->min_confidence || (evidence.flags & PAIRED_LOW_CONFIDENCE) != 0U) {
         paired_skip(row, "low-alignment-confidence");
     }
 }
@@ -628,7 +858,7 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const char *alignment_path,
                           const char *alignment_reference_path, const char *alignment_target_path,
                           const char *notes_path, const char *score_alignment_path,
-                          int notes_on_target,
+                          int notes_on_target, int keep_map,
                           const HWAAnalysisOptions *limits, double held_fraction,
                           double min_confidence, HwaPairedSpans *result,
                           char *error, size_t error_size)
@@ -683,7 +913,20 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
     map.target = &result->target.format;
     map.held_fraction = held_fraction;
     map.min_confidence = min_confidence;
+    map.include_interval_support = keep_map;
     if (paired_map_init(&map, &remaining, error, error_size) != 0) goto cleanup;
+    if (keep_map) {
+        if (remaining < sizeof(*result->map)) {
+            hwa_set_error(error, error_size, "alignment map exceeds the work limit");
+            goto cleanup;
+        }
+        remaining -= sizeof(*result->map);
+        result->map = calloc(1U, sizeof(*result->map));
+        if (result->map == NULL) {
+            hwa_set_error(error, error_size, "cannot retain alignment map");
+            goto cleanup;
+        }
+    }
     if (notes_path != NULL) {
         result->notes_on_target = notes_on_target;
         status = paired_load_csv(notes_path, &file_limits, remaining, &map, notes_on_target,
@@ -693,8 +936,17 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                                    error, error_size);
     }
 
+    if (status == 0 && keep_map) {
+        result->audio_alignment = alignment;
+        *result->map = map;
+        result->map->alignment = &result->audio_alignment;
+        result->retained_work_bytes += file_limits.max_work_bytes - remaining;
+        memset(&alignment, 0, sizeof(alignment));
+        memset(&map, 0, sizeof(map));
+    }
+
 cleanup:
-    free(map.minimum_confidence);
+    paired_map_free(&map);
     hwa_alignment_free(&alignment);
     if (hwa_c_numeric_locale_end(&locale) != 0 && status == 0) {
         hwa_set_error(error, error_size, "cannot restore the note input numeric locale");
@@ -704,11 +956,25 @@ cleanup:
     return status;
 }
 
+void hwa_paired_spans_map_interval(const HwaPairedSpans *spans, HwaPairedSpan *row, int reverse)
+{
+    const HWAFormat *format = reverse ? &spans->target.format : &spans->reference.format;
+    HwaPairedSampleSpan *span = reverse ? &row->target : &row->reference;
+
+    span->present = 1;
+    span->valid = span->start_sample < span->end_sample && span->end_sample <= format->frames;
+    paired_map_span(spans->map, row, (double)span->start_sample / format->sample_rate_hz,
+                   (double)span->end_sample / format->sample_rate_hz, reverse);
+}
+
 void hwa_paired_spans_close(HwaPairedSpans *result)
 {
     if (result == NULL) return;
     free(result->rows);
     free(result->csv_data);
+    if (result->map != NULL) paired_map_free(result->map);
+    free(result->map);
+    hwa_alignment_free(&result->audio_alignment);
     hwa_alignment_free(&result->score_alignment);
     hwa_wav_reader_close(&result->reference);
     hwa_wav_reader_close(&result->target);

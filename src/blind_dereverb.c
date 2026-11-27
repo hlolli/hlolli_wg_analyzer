@@ -324,7 +324,7 @@ int hwa_blind_dereverb(double *samples, size_t frames, unsigned channels,
     uint64_t release_bytes;
     double floor;
     double block_seconds;
-    double decay_seconds;
+    double decay_seconds = 0.0;
     double decay_step;
     int status = -1;
     if (samples == NULL || result == NULL || (channels != 1U && channels != 2U) ||

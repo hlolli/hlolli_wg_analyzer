@@ -737,10 +737,10 @@ int hwa_file_output_abort(HWAFileOutput *output)
     return result;
 }
 
-int hwa_file_output_finish(HWAFileOutput *output,
+static int hwa_file_output_complete(HWAFileOutput *output,
                            const char *output_name,
                            char *error,
-                           size_t error_size)
+                           size_t error_size, int keep_new)
 {
     int flush_result;
     int stream_error;
@@ -796,6 +796,27 @@ int hwa_file_output_finish(HWAFileOutput *output,
         hwa_file_output_clear(output);
         return -1;
     }
-    hwa_file_output_clear(output);
+    if (!keep_new) hwa_file_output_clear(output);
     return 0;
+}
+
+int hwa_file_output_finish(HWAFileOutput *output, const char *output_name,
+                           char *error, size_t error_size)
+{
+    return hwa_file_output_complete(output, output_name, error, error_size, 0);
+}
+
+int hwa_file_output_seal_new(HWAFileOutput *output, const char *output_name,
+                             char *error, size_t error_size)
+{
+    if (output == NULL || !output->direct_path_created) {
+        hwa_output_error(error, error_size, "only a new file can be sealed");
+        return -1;
+    }
+    return hwa_file_output_complete(output, output_name, error, error_size, 1);
+}
+
+void hwa_file_output_keep_sealed(HWAFileOutput *output)
+{
+    hwa_file_output_clear(output);
 }
