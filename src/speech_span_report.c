@@ -14,6 +14,8 @@
 #define SPEECH_MIN_CHANGE_DB 3.0
 #define SPEECH_TRANSITION_MS 20U
 #define SPEECH_CONTEXT_MS 150U
+#define SPEECH_TIMING_SEARCH_MS 55U
+#define SPEECH_EXCERPT_RMS 0.125
 
 enum SpeechSide { SPEECH_REFERENCE, SPEECH_CANDIDATE, SPEECH_SIDE_COUNT };
 enum SpeechKind { SPEECH_VOWEL, SPEECH_CONSONANT };
@@ -38,6 +40,7 @@ typedef struct SpeechExcerpt {
 
 typedef struct SpeechRow {
     const HwaPairedSpan *phone;
+    const struct SpeechRow *next_phone;
     const char *word;
     const char *phone_label;
     const char *vowel_id;
@@ -54,6 +57,7 @@ typedef struct SpeechRow {
     HwaPairedSampleSpan vowel[SPEECH_SIDE_COUNT];
     uint64_t transition_edge[SPEECH_SIDE_COUNT];
     int transition_edge_valid;
+    uint64_t candidate_nearby_cue;
     union {
         SpeechBuzzSide buzz[SPEECH_SIDE_COUNT];
         HWASpeechContrast contrast[SPEECH_SIDE_COUNT];
@@ -91,6 +95,19 @@ static const char *speech_label(const HwaPairedSpan *row, const char *name)
         if (strcmp(row->labels[index].name, name) == 0) return row->labels[index].value;
     }
     return NULL;
+}
+
+static int speech_time_order(const void *left, const void *right)
+{
+    const SpeechRow *const *first = left;
+    const SpeechRow *const *second = right;
+    HwaPairedSampleSpan a = (*first)->phone->reference;
+    HwaPairedSampleSpan b = (*second)->phone->reference;
+
+    if (a.valid != b.valid) return a.valid ? -1 : 1;
+    if (a.start_sample != b.start_sample) return a.start_sample < b.start_sample ? -1 : 1;
+    if (a.end_sample != b.end_sample) return a.end_sample < b.end_sample ? -1 : 1;
+    return (*first)->index < (*second)->index ? -1 : ((*first)->index != (*second)->index);
 }
 
 static int speech_id_order(const void *left, const void *right)
@@ -148,6 +165,11 @@ static int speech_load_labels(SpeechReport *report, char *error, size_t error_si
             row->release = edge == NULL || strcmp(edge, "end") == 0;
         }
     }
+    qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_time_order);
+    for (index = 1U; index < report->spans.count &&
+         report->ordered[index]->phone->reference.valid; ++index) {
+        report->ordered[index - 1U]->next_phone = report->ordered[index];
+    }
     qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_id_order);
     for (index = 1U; index < report->spans.count; ++index) {
         if (speech_id_order(&report->ordered[index - 1U], &report->ordered[index]) == 0) {
@@ -163,7 +185,7 @@ static HwaPairedSpan speech_map(const SpeechReport *report, uint64_t start, uint
 {
     HwaPairedSpan row = {.reference = {.start_sample = start, .end_sample = end},
                          .confidence = 1.0};
-    hwa_paired_spans_map_reference(&report->spans, &row);
+    hwa_paired_spans_map_interval(&report->spans, &row, 0);
     return row;
 }
 
@@ -245,9 +267,10 @@ static const HWASpeechPeak *speech_find_fixed(const HWASpeechBuzz *reference, do
     return best;
 }
 
-static int speech_probe_buzz(SpeechReport *report, const SpeechRow *row, double frequency,
-                              unsigned harmonic, HWASpeechPeak peaks[SPEECH_SIDE_COUNT],
-                              char *error, size_t error_size)
+static int speech_probe_buzz(SpeechReport *report, const SpeechRow *row,
+                            const HWASpeechPeak *const *targets, size_t target_count,
+                            HWASpeechPeak peaks[SPEECH_SIDE_COUNT][HWA_SPEECH_BUZZ_PROBE_LIMIT],
+                            char *error, size_t error_size)
 {
     size_t side;
 
@@ -259,7 +282,8 @@ static int speech_probe_buzz(SpeechReport *report, const SpeechRow *row, double 
         int status;
         if (samples == NULL) return -1;
         status = hwa_speech_buzz_probe(samples, count, reader->format.sample_rate_hz,
-            report->shared_nyquist, frequency, harmonic, &report->work, &peaks[side], error, error_size);
+            report->shared_nyquist, targets, target_count, &report->work, peaks[side],
+            error, error_size);
         free(samples);
         report->work.available_bytes += (uint64_t)count * sizeof(double);
         if (status != 0) return -1;
@@ -270,21 +294,20 @@ static int speech_probe_buzz(SpeechReport *report, const SpeechRow *row, double 
 typedef struct SpeechBuzzChoice {
     const HWASpeechPeak *reference;
     const HWASpeechPeak *candidate;
-    const HWASpeechPeak *unmatched;
+    const HWASpeechPeak *reference_probe;
+    const HWASpeechPeak *candidate_probe;
     double change_db;
 } SpeechBuzzChoice;
 
 static void speech_consider_peak(SpeechBuzzChoice *choice, const HWASpeechPeak *reference,
-                                  const HWASpeechPeak *candidate)
+                                  const HWASpeechPeak *candidate,
+                                  const HWASpeechPeak **targets, size_t *target_count)
 {
     double change;
 
     if (!candidate->present) return;
     if (reference == NULL || !reference->present) {
-        if (choice->unmatched == NULL ||
-            candidate->relative_level_db > choice->unmatched->relative_level_db) {
-            choice->unmatched = candidate;
-        }
+        targets[(*target_count)++] = candidate;
         return;
     }
     change = speech_peak_change(reference, candidate);
@@ -295,35 +318,18 @@ static void speech_consider_peak(SpeechBuzzChoice *choice, const HWASpeechPeak *
     }
 }
 
-static int speech_choose_peak(SpeechReport *report, const SpeechRow *row, SpeechBuzzChoice *choice,
-                                HWASpeechPeak *reference, HWASpeechPeak *candidate,
-                                HWASpeechPeak *reference_probe, HWASpeechPeak *candidate_probe,
-                                int *unavailable, char *error, size_t error_size)
+static void speech_export_peak(const SpeechBuzzChoice *choice, HWASpeechPeak *reference,
+                               HWASpeechPeak *candidate, HWASpeechPeak *reference_probe,
+                               HWASpeechPeak *candidate_probe)
 {
     if (choice->candidate != NULL) {
-        *reference = *choice->reference;
+        *reference = choice->reference != NULL ? *choice->reference : (HWASpeechPeak){0};
         *candidate = *choice->candidate;
     }
-    if (choice->unmatched != NULL) {
-        const HWASpeechPeak *peak = choice->unmatched;
-        HWASpeechPeak probes[SPEECH_SIDE_COUNT];
-        unsigned harmonic = isfinite(peak->harmonic_number) ? (unsigned)peak->harmonic_number : 0U;
-        double change;
-
-        if (speech_probe_buzz(report, row, peak->frequency_hz, harmonic,
-                               probes, error, error_size) != 0) return -1;
-        change = speech_peak_change(&probes[SPEECH_REFERENCE], &probes[SPEECH_CANDIDATE]);
-        if (!isfinite(change)) {
-            *unavailable = 1;
-        } else if (change > choice->change_db) {
-            *reference = (HWASpeechPeak){0};
-            *candidate = *peak;
-            *reference_probe = probes[SPEECH_REFERENCE];
-            *candidate_probe = probes[SPEECH_CANDIDATE];
-            choice->change_db = change;
-        }
+    if (choice->reference_probe != NULL) {
+        *reference_probe = *choice->reference_probe;
+        *candidate_probe = *choice->candidate_probe;
     }
-    return 0;
 }
 
 static int speech_compare_buzz(SpeechReport *report, SpeechRow *row, const HWASpeechBuzz *reference,
@@ -334,22 +340,43 @@ static int speech_compare_buzz(SpeechReport *report, SpeechRow *row, const HWASp
     SpeechBuzzChoice harmonic = {.change_db = -INFINITY};
     SpeechBuzzSide *ref = &row->measure.buzz[SPEECH_REFERENCE];
     SpeechBuzzSide *cand = &row->measure.buzz[SPEECH_CANDIDATE];
+    const HWASpeechPeak *targets[HWA_SPEECH_BUZZ_PROBE_LIMIT];
+    HWASpeechPeak probes[SPEECH_SIDE_COUNT][HWA_SPEECH_BUZZ_PROBE_LIMIT];
     int unavailable = 0;
+    size_t target_count = 0U;
+    size_t fixed_count;
     size_t index;
 
     for (index = 0U; index < HWA_SPEECH_FIXED_PEAKS; ++index) {
         const HWASpeechPeak *peak = &candidate->fixed_peaks[index];
         if (peak->present) {
-            speech_consider_peak(&fixed, speech_find_fixed(reference, peak->frequency_hz, tolerance), peak);
+            speech_consider_peak(&fixed, speech_find_fixed(reference, peak->frequency_hz, tolerance),
+                                 peak, targets, &target_count);
         }
     }
+    fixed_count = target_count;
     for (index = 0U; index < HWA_SPEECH_HARMONICS; ++index) {
-        speech_consider_peak(&harmonic, &reference->harmonics[index], &candidate->harmonics[index]);
+        speech_consider_peak(&harmonic, &reference->harmonics[index], &candidate->harmonics[index],
+                             targets, &target_count);
     }
-    if (speech_choose_peak(report, row, &fixed, &ref->fixed, &cand->fixed,
-            &ref->fixed_probe, &cand->fixed_probe, &unavailable, error, error_size) != 0 ||
-        speech_choose_peak(report, row, &harmonic, &ref->harmonic, &cand->harmonic,
-            &ref->harmonic_probe, &cand->harmonic_probe, &unavailable, error, error_size) != 0) return -1;
+    if (target_count != 0U &&
+        speech_probe_buzz(report, row, targets, target_count, probes, error, error_size) != 0)
+        return -1;
+    for (index = 0U; index < target_count; ++index) {
+        SpeechBuzzChoice *choice = index < fixed_count ? &fixed : &harmonic;
+        const HWASpeechPeak *reference_probe = &probes[SPEECH_REFERENCE][index];
+        const HWASpeechPeak *candidate_probe = &probes[SPEECH_CANDIDATE][index];
+        double change = speech_peak_change(reference_probe, candidate_probe);
+
+        if (!isfinite(change)) {
+            unavailable = 1;
+        } else if (change > choice->change_db) {
+            *choice = (SpeechBuzzChoice){NULL, targets[index], reference_probe, candidate_probe, change};
+        }
+    }
+    speech_export_peak(&fixed, &ref->fixed, &cand->fixed, &ref->fixed_probe, &cand->fixed_probe);
+    speech_export_peak(&harmonic, &ref->harmonic, &cand->harmonic,
+                       &ref->harmonic_probe, &cand->harmonic_probe);
     row->status = "no-finding";
     if (fmax(fixed.change_db, harmonic.change_db) >= SPEECH_MIN_CHANGE_DB) {
         row->status = "finding";
@@ -397,16 +424,158 @@ static int speech_measure_buzz(SpeechReport *report, SpeechRow *row, char *error
     return 0;
 }
 
+typedef struct SpeechCue {
+    double strength;
+    double roughness;
+    uint64_t sample;
+} SpeechCue;
+
+static SpeechCue speech_edge_cue(const double *samples, HwaPairedSampleSpan span, unsigned rate,
+                                  double vowel_power)
+{
+    SpeechCue cue = {0};
+    size_t count = (size_t)(span.end_sample - span.start_sample);
+    size_t window = rate / 250U;
+    size_t hop = rate / 1000U;
+    size_t start;
+
+    if (hop == 0U || count < window || vowel_power <= 0.0) return cue;
+    for (start = 0U; start <= count - window; start += hop) {
+        double power = 0.0, difference = 0.0;
+        size_t index;
+        for (index = start + 1U; index < start + window; ++index) {
+            double sample = samples[index];
+            double delta = sample - samples[index - 1U];
+            power += sample * sample;
+            difference += delta * delta;
+        }
+        double strength = difference / ((double)(window - 1U) * vowel_power) *
+                          ((double)rate * (double)rate);
+        if (strength > cue.strength && power > 0.0) {
+            cue.strength = strength;
+            cue.roughness = difference / power * ((double)rate * (double)rate);
+            cue.sample = span.start_sample + start + window / 2U;
+        }
+    }
+    return cue;
+}
+
+static int speech_edge_locked(const SpeechReport *report, uint64_t edge)
+{
+    const HWAAlignment *alignment = &report->spans.audio_alignment;
+    double time = (double)edge / report->spans.reference.format.sample_rate_hz;
+    size_t first = 0U, last = alignment->anchor_count;
+
+    while (first < last) {
+        size_t middle = first + (last - first) / 2U;
+        const HWAAlignmentAnchor *anchor = &alignment->anchors[middle];
+        if (anchor->reference_seconds == time) return anchor->locked;
+        if (anchor->reference_seconds < time) first = middle + 1U;
+        else last = middle;
+    }
+    return 0;
+}
+
+static double speech_vowel_power(const double *samples, size_t count)
+{
+    double power = 0.0;
+    size_t index;
+
+    for (index = 0U; index < count; ++index) power += samples[index] * samples[index];
+    return power / (double)count;
+}
+
+static int speech_read_edge_cue(SpeechReport *report, size_t side, HwaPairedSampleSpan bounds,
+                                 double vowel_power, SpeechCue *cue, char *error, size_t error_size)
+{
+    double *samples = speech_read_mono(report, side, bounds, NULL, error, error_size);
+    if (samples == NULL) return -1;
+    *cue = speech_edge_cue(samples, bounds, speech_reader(report, side)->format.sample_rate_hz,
+                           vowel_power);
+    free(samples);
+    report->work.available_bytes += (bounds.end_sample - bounds.start_sample) * sizeof(double);
+    return 0;
+}
+
+static int speech_similar_cue(SpeechCue observed, SpeechCue expected)
+{
+    return observed.strength >= 0.25 * expected.strength &&
+           observed.roughness >= 0.5 * expected.roughness &&
+           observed.roughness <= 2.0 * expected.roughness;
+}
+
+static int speech_contains_cue(HwaPairedSampleSpan bounds, SpeechCue cue)
+{
+    return cue.sample >= bounds.start_sample && cue.sample < bounds.end_sample;
+}
+
+/* Corroborating a neighboring transient can disqualify the saved edge. Leave
+ * the supplied mapping intact since the other phone boundaries remain unknown. */
+static int speech_verify_edge(SpeechReport *report, SpeechRow *row, const SpeechRow *vowel,
+                               const SpeechCue inside[SPEECH_SIDE_COUNT],
+                               const double vowel_power[SPEECH_SIDE_COUNT], char *error, size_t error_size)
+{
+    const HwaPairedSampleSpan *phone = &row->phone->target;
+    const HwaPairedSampleSpan *neighbor = &vowel->phone->target;
+    HwaPairedSampleSpan measured = row->transition[SPEECH_CANDIDATE];
+    unsigned rate = report->spans.target.format.sample_rate_hz;
+    uint64_t edge = row->transition_edge[SPEECH_CANDIDATE];
+    uint64_t pad = ((uint64_t)rate * SPEECH_TIMING_SEARCH_MS + 500U) / 1000U;
+    HwaPairedSampleSpan probe = {
+        .start_sample = speech_lower(edge, pad),
+        .end_sample = speech_upper(edge, pad, report->spans.target.format.frames)
+    };
+    uint64_t start = row->release ? phone->start_sample : neighbor->start_sample;
+    uint64_t end = row->release ? neighbor->end_sample : phone->end_sample;
+    SpeechCue cue;
+    HwaPairedSpan peer = {.confidence = 1.0};
+
+    if (!neighbor->valid || inside[SPEECH_REFERENCE].strength <= 0.0 ||
+        vowel_power[SPEECH_CANDIDATE] <= 0.0) return 0;
+    if (probe.start_sample < start) probe.start_sample = start;
+    if (probe.end_sample > end) probe.end_sample = end;
+    if (probe.start_sample >= probe.end_sample ||
+        (probe.start_sample >= measured.start_sample && probe.end_sample <= measured.end_sample)) return 0;
+    if (speech_read_edge_cue(report, SPEECH_CANDIDATE, probe, vowel_power[SPEECH_CANDIDATE],
+                             &cue, error, error_size) != 0) return -1;
+    if (speech_contains_cue(measured, cue) ||
+        cue.strength <= 2.0 * inside[SPEECH_CANDIDATE].strength ||
+        !speech_similar_cue(cue, inside[SPEECH_REFERENCE])) return 0;
+
+    /* A counterpart at the saved offset supports treating the nearby
+     * sound as a separate event. */
+    pad = ((uint64_t)rate * 8U + 500U) / 1000U;
+    peer.target.start_sample = speech_lower(cue.sample, pad);
+    peer.target.end_sample = speech_upper(cue.sample, pad, report->spans.target.format.frames);
+    hwa_paired_spans_map_interval(&report->spans, &peer, 1);
+    if (peer.skip_reason == NULL) {
+        SpeechCue reference;
+        if (speech_read_edge_cue(report, SPEECH_REFERENCE, peer.reference, vowel_power[SPEECH_REFERENCE],
+                                 &reference, error, error_size) != 0) return -1;
+        if (!speech_contains_cue(row->transition[SPEECH_REFERENCE], reference) &&
+            speech_similar_cue(reference, cue)) return 0;
+    }
+
+    row->status = "indeterminate";
+    row->reason = "transition-timing-disagreement";
+    row->candidate_nearby_cue = cue.sample;
+    return 0;
+}
+
 static int speech_measure_consonant(SpeechReport *report, SpeechRow *row,
                                     char *error, size_t error_size)
 {
     const SpeechRow *vowel = speech_find_row(report, row->vowel_id);
     const HwaPairedSampleSpan *phone = &row->phone->reference;
+    const HwaPairedSampleSpan *neighbor;
     uint64_t edge = row->release ? phone->end_sample : phone->start_sample;
     uint64_t frames = report->spans.reference.format.frames;
     uint64_t pad = speech_padding(report, SPEECH_TRANSITION_MS);
     HwaPairedSpan transition, left, interior;
-    uint64_t edges[SPEECH_SIDE_COUNT], margin;
+    uint64_t edges[SPEECH_SIDE_COUNT], margin, start, end;
+    SpeechCue cues[SPEECH_SIDE_COUNT] = {0};
+    double vowel_power[SPEECH_SIDE_COUNT] = {0};
+    int verify;
     size_t side;
     const HWASpeechContrast *ref = &row->measure.contrast[SPEECH_REFERENCE];
     const HWASpeechContrast *cand = &row->measure.contrast[SPEECH_CANDIDATE];
@@ -417,22 +586,51 @@ static int speech_measure_consonant(SpeechReport *report, SpeechRow *row,
         return -1;
     }
     if (!phone->valid) return 0;
-    if ((row->release && vowel->phone->reference.start_sample < edge) ||
-        (!row->release && vowel->phone->reference.end_sample > edge)) {
+    neighbor = &vowel->phone->reference;
+    if (!neighbor->valid) {
+        if (row->status == NULL) {
+            row->status = "indeterminate";
+            row->reason = "invalid-neighboring-vowel";
+        }
+        return 0;
+    }
+    if ((row->release && neighbor->start_sample < edge) ||
+        (!row->release && neighbor->end_sample > edge)) {
         hwa_set_error(error, error_size, "vowel '%s' is on the wrong side of consonant '%s'",
                       vowel->phone->id, row->phone->id);
         return -1;
     }
-    transition = speech_map(report, speech_lower(edge, pad), speech_upper(edge, pad, frames));
+    /* A short unlabeled bridge can contain the transition. It cannot include
+     * an intervening annotated phone. Touching labels need no gap check. */
+    if ((row->release && neighbor->start_sample > edge && row->next_phone != vowel) ||
+        (!row->release && neighbor->end_sample < edge && vowel->next_phone != row)) {
+        if (row->status == NULL) {
+            row->status = "indeterminate";
+            row->reason = "non-neighboring-vowel";
+        }
+        return 0;
+    }
+    start = speech_lower(edge, pad);
+    end = speech_upper(edge, pad, frames);
+    if (start < (row->release ? phone->start_sample : neighbor->start_sample)) {
+        start = row->release ? phone->start_sample : neighbor->start_sample;
+    }
+    if (end > (row->release ? neighbor->end_sample : phone->end_sample)) {
+        end = row->release ? neighbor->end_sample : phone->end_sample;
+    }
+    if ((row->release && neighbor->start_sample >= end) ||
+        (!row->release && neighbor->end_sample <= start)) {
+        if (row->status == NULL) {
+            row->status = "indeterminate";
+            row->reason = "vowel-outside-transition";
+        }
+        return 0;
+    }
+    transition = speech_map(report, start, end);
     row->transition[SPEECH_REFERENCE] = transition.reference;
     row->transition[SPEECH_CANDIDATE] = transition.target;
     speech_check_support(row, &transition);
     if (row->status != NULL) return 0;
-    if (!vowel->phone->reference.valid) {
-        row->status = "indeterminate";
-        row->reason = "invalid-neighboring-vowel";
-        return 0;
-    }
     if (edge == transition.reference.start_sample || edge == transition.reference.end_sample) {
         row->status = "indeterminate";
         row->reason = "transition-outside-recording";
@@ -458,6 +656,7 @@ static int speech_measure_consonant(SpeechReport *report, SpeechRow *row,
         row->status = "low-alignment-confidence";
         return 0;
     }
+    verify = !speech_edge_locked(report, edge);
     for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
         HwaPairedSampleSpan trans = row->transition[side];
         HwaPairedSampleSpan baseline = *speech_phone_bounds(&interior, side);
@@ -473,9 +672,13 @@ static int speech_measure_consonant(SpeechReport *report, SpeechRow *row,
         }
         samples = speech_read_mono(report, side, trans, &baseline, error, error_size);
         if (samples == NULL) return -1;
-        status = hwa_speech_contrast(samples, count, (size_t)(edges[side] - trans.start_sample),
-            row->release, samples + count, vowel_count, reader->format.sample_rate_hz,
-            report->shared_nyquist, &report->work, &row->measure.contrast[side], error, error_size);
+        status = hwa_speech_contrast(samples, count, samples + count, vowel_count,
+            reader->format.sample_rate_hz, report->shared_nyquist, &report->work,
+            &row->measure.contrast[side], error, error_size);
+        if (verify && status == 0) {
+            vowel_power[side] = speech_vowel_power(samples + count, vowel_count);
+            cues[side] = speech_edge_cue(samples, trans, reader->format.sample_rate_hz, vowel_power[side]);
+        }
         free(samples);
         report->work.available_bytes += ((uint64_t)count + vowel_count) * sizeof(double);
         if (status != 0) return -1;
@@ -488,6 +691,10 @@ static int speech_measure_consonant(SpeechReport *report, SpeechRow *row,
         row->reason = "no-shared-transition-measure";
     } else {
         row->status = row->score >= SPEECH_MIN_CHANGE_DB ? "finding" : "no-finding";
+    }
+    if (verify && row->score >= SPEECH_MIN_CHANGE_DB) {
+        return speech_verify_edge(report, row, vowel, cues, vowel_power,
+                                  error, error_size);
     }
     return 0;
 }
@@ -559,10 +766,10 @@ static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechRepo
         if (hwa_speech_audio_level(speech_reader(report, side), row->excerpt.bounds[side],
                                    &report->work, &level[side], error, error_size) != 0) return -1;
     }
-    rms = fmin(level[SPEECH_REFERENCE].rms, level[SPEECH_CANDIDATE].rms);
-    if (rms <= 0.0) return 0;
+    rms = SPEECH_EXCERPT_RMS;
     for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
-        rms = fmin(rms, (0.99 / level[side].peak) * level[side].rms);
+        if (level[side].rms <= 0.0) return 0;
+        rms = fmin(rms, 0.99 * (level[side].rms / level[side].peak));
     }
     for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
         size_t length = strlen(options->excerpt_dir) + 64U;
@@ -753,6 +960,9 @@ static int speech_row_json(FILE *stream, const SpeechRow *row, unsigned referenc
         fputc(',', stream) == EOF ||
         speech_number(stream, "candidate_edge_seconds", row->transition_edge_valid ?
                       (double)row->transition_edge[SPEECH_CANDIDATE] / candidate_rate : NAN) != 0 ||
+        fputc(',', stream) == EOF ||
+        speech_number(stream, "candidate_nearby_cue_seconds", row->candidate_nearby_cue != 0U ?
+                      (double)row->candidate_nearby_cue / candidate_rate : NAN) != 0 ||
         fputc(',', stream) == EOF ||
         speech_bounds(stream, "reference_vowel", row->vowel[SPEECH_REFERENCE], reference_rate) != 0 ||
         fputc(',', stream) == EOF ||

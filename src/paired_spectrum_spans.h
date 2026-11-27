@@ -56,7 +56,9 @@ typedef struct HwaPairedSpans {
 } HwaPairedSpans;
 
 /* Confidence combines the annotation and the lowest supporting anchor for the
- * held interval. A held interval overlapping a saved prefix, suffix, skip,
+ * held interval. When keep_map is set, confidence also uses overlapping
+ * saved match and uncertain span records on both clocks.
+ * A held interval overlapping a saved prefix, suffix, skip,
  * repeat, rest or cadenza gap on either recording yields unmatched-alignment. */
 int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const char *alignment_path,
@@ -66,9 +68,9 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const HWAAnalysisOptions *limits, double held_fraction,
                           double min_confidence, HwaPairedSpans *result,
                           char *error, size_t error_size);
-/* Map a fresh interval on the reference clock using a retained mapping index.
- * The caller sets reference bounds and any annotation confidence on the row. */
-void hwa_paired_spans_map_reference(const HwaPairedSpans *spans, HwaPairedSpan *row);
+/* Map a fresh interval using a retained mapping index. The caller sets bounds
+ * on the reference clock, or the target clock when reverse is set. */
+void hwa_paired_spans_map_interval(const HwaPairedSpans *spans, HwaPairedSpan *row, int reverse);
 void hwa_paired_spans_close(HwaPairedSpans *result);
 
 #endif

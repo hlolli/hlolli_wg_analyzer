@@ -11,6 +11,7 @@
 #define BUZZ_PITCH_MIN_HZ 60U
 #define BUZZ_PITCH_MAX_HZ 550U
 #define BUZZ_PITCH_BUCKETS (BUZZ_PITCH_MAX_HZ + 1U)
+#define BUZZ_PITCH_LINES 12U
 #define BUZZ_MIN_COVERAGE 0.70
 #define BUZZ_MIN_PERSISTENCE 0.55
 #define BUZZ_MIN_INDEPENDENT 0.35
@@ -36,6 +37,7 @@ typedef struct BuzzPitchTrack {
     double previous_hz;
     size_t count;
     size_t jumps;
+    int large_jump;
 } BuzzPitchTrack;
 
 typedef struct BuzzSpectrum {
@@ -156,14 +158,88 @@ static double buzz_peak_offset(double left, double center, double right)
     return curvature < 0.0 ? 0.5 * (left - right) / curvature : 0.0;
 }
 
-static int buzz_pitch(BuzzSpectrum *spectrum, unsigned rate, double *pitch)
+static size_t buzz_harmonic_index(const BuzzSpectrum *spectrum, double frequency_hz, double pitch);
+static int buzz_line_peak(const BuzzSpectrum *spectrum, size_t bin, double total,
+                          BuzzPeak *peak, double *height);
+static int buzz_narrow_peak(const BuzzSpectrum *spectrum, size_t bin);
+
+static unsigned buzz_common_divisor(unsigned first, unsigned second)
+{
+    while (second != 0U) {
+        unsigned remainder = first % second;
+        first = second;
+        second = remainder;
+    }
+    return first;
+}
+
+static double buzz_pitch_weight(double frequency)
+{
+    /* Keep a strong high-frequency tone from supplying the voice period. */
+    double ratio = frequency / 650.0;
+    double squared = ratio * ratio;
+    return 1.0 / (1.0 + squared * squared);
+}
+
+static size_t buzz_pitch_lines(const BuzzSpectrum *spectrum, double total, BuzzPeak *lines)
+{
+    size_t bin, count = 0U;
+    size_t first = (size_t)ceil(45.0 / spectrum->bin_hz);
+    size_t end = (size_t)ceil(1800.0 / spectrum->bin_hz);
+
+    if (first < 1U) first = 1U;
+    if (end > spectrum->last_bin) end = spectrum->last_bin;
+    for (bin = first; bin < end; ++bin) {
+        BuzzPeak peak = {0};
+        double height;
+        size_t pos;
+
+        if (!buzz_narrow_peak(spectrum, bin) ||
+            !buzz_line_peak(spectrum, bin, total, &peak, &height)) continue;
+        peak.power_share *= buzz_pitch_weight(peak.frequency_hz);
+        pos = count < BUZZ_PITCH_LINES ? count : BUZZ_PITCH_LINES - 1U;
+        if (count == BUZZ_PITCH_LINES && peak.power_share <= lines[pos].power_share) continue;
+        while (pos > 0U && peak.power_share > lines[pos - 1U].power_share) {
+            lines[pos] = lines[pos - 1U];
+            --pos;
+        }
+        lines[pos] = peak;
+        if (count < BUZZ_PITCH_LINES) ++count;
+    }
+    return count;
+}
+
+static double buzz_pitch_score(const BuzzSpectrum *spectrum, const BuzzPeak *lines,
+                                size_t count, double pitch)
+{
+    size_t index;
+    unsigned divisor = 0U;
+    double score = 0.0;
+
+    /* A longer period needs interleaved lines to support it. Spectral
+     * lines at harmonics 2 and 4 alone establish the shorter period. */
+    for (index = 0U; index < count; ++index) {
+        unsigned harmonic = (unsigned)buzz_harmonic_index(spectrum, lines[index].frequency_hz, pitch);
+        if (harmonic != 0U) {
+            divisor = buzz_common_divisor(divisor, harmonic);
+            score += lines[index].power_share;
+        }
+    }
+    return divisor == 1U ? score : 0.0;
+}
+
+static int buzz_pitch(BuzzSpectrum *spectrum, unsigned rate, double total, double previous,
+                      double *pitch)
 {
     size_t first = (size_t)ceil((double)rate / BUZZ_PITCH_MAX_HZ);
     size_t last = rate / BUZZ_PITCH_MIN_HZ;
     size_t bin;
     size_t lag;
-    double zero;
-    double best = 0.0;
+    BuzzPeak lines[BUZZ_PITCH_LINES];
+    size_t line_count;
+    double zero, floor;
+    double best = 0.0, best_score = 0.0;
+    double continuation_hz = 0.0, continuation_score = 0.0;
 
     *pitch = 0.0;
     if (last > spectrum->frame_size / 2U) last = spectrum->frame_size / 2U;
@@ -174,12 +250,8 @@ static int buzz_pitch(BuzzSpectrum *spectrum, unsigned rate, double *pitch)
         double hz = (double)folded * spectrum->bin_hz;
         double power = 0.0;
 
-        if (hz >= 45.0 && hz <= 1800.0 && folded <= spectrum->last_bin) {
-            /* Keep a strong high-frequency tone from supplying the voice period. */
-            double ratio = hz / 650.0;
-            double squared = ratio * ratio;
-            power = spectrum->power[folded] / (1.0 + squared * squared);
-        }
+        if (hz >= 45.0 && hz <= 1800.0 && folded <= spectrum->last_bin)
+            power = spectrum->power[folded] * buzz_pitch_weight(hz);
         spectrum->fft[bin] = (HwaDspComplex){power, 0.0};
     }
     if (hwa_dsp_fft(spectrum->fft, spectrum->fft_size, 1) != HWA_DSP_OK) return -1;
@@ -197,16 +269,32 @@ static int buzz_pitch(BuzzSpectrum *spectrum, unsigned rate, double *pitch)
         if (buzz_correlation_peak(spectrum->fft, lag))
             best = fmax(best, spectrum->fft[lag].real);
     }
+    floor = fmax(0.70, 0.92 * best);
+    if (best < floor) return 0;
+    line_count = buzz_pitch_lines(spectrum, total, lines);
     for (lag = first; lag <= last; ++lag) {
         double center = spectrum->fft[lag].real;
+        double offset, frequency, score;
 
-        if (center >= fmax(0.70, 0.92 * best) && buzz_correlation_peak(spectrum->fft, lag)) {
-            double offset = buzz_peak_offset(spectrum->fft[lag - 1U].real, center,
-                                             spectrum->fft[lag + 1U].real);
-            *pitch = (double)rate / ((double)lag + offset);
-            break;
+        if (center < floor || !buzz_correlation_peak(spectrum->fft, lag)) continue;
+        offset = buzz_peak_offset(spectrum->fft[lag - 1U].real, center,
+                                 spectrum->fft[lag + 1U].real);
+        frequency = (double)rate / ((double)lag + offset);
+        score = buzz_pitch_score(spectrum, lines, line_count, frequency);
+        if (score > best_score) {
+            best_score = score;
+            *pitch = frequency;
+        }
+        if (frequency <= 1.18 * previous && previous <= 1.18 * frequency &&
+            score > continuation_score) {
+            continuation_hz = frequency;
+            continuation_score = score;
         }
     }
+    /* A narrow fixed tone can briefly align with a subharmonic. Keep a
+     * comparably supported pitch when an isolated window suggests a jump. */
+    if (continuation_score > 0.0 && continuation_score >= 0.90 * best_score)
+        *pitch = continuation_hz;
     return 0;
 }
 
@@ -256,15 +344,11 @@ static size_t buzz_harmonic_index(const BuzzSpectrum *spectrum, double frequency
         ? (size_t)harmonic : 0U;
 }
 
-static int buzz_measure_peak(const BuzzSpectrum *spectrum, size_t bin,
-                             double total, BuzzPeak *peak)
+static int buzz_line_peak(const BuzzSpectrum *spectrum, size_t bin, double total,
+                          BuzzPeak *peak, double *height)
 {
     double center = spectrum->power[bin];
-    double left;
-    double right;
-    double offset;
-    double height;
-    double surrounding;
+    double left, right, offset;
 
     if (center <= spectrum->power[bin - 1U] || center < spectrum->power[bin + 1U] ||
         center * spectrum->line_scale < 0.80 * spectrum->min_power_share * total) return 0;
@@ -272,11 +356,17 @@ static int buzz_measure_peak(const BuzzSpectrum *spectrum, size_t bin,
     right = log(fmax(spectrum->power[bin + 1U], center * 1.0e-12));
     center = log(center);
     offset = buzz_peak_offset(left, center, right);
-    height = exp(center - 0.25 * (left - right) * offset);
+    *height = exp(center - 0.25 * (left - right) * offset);
     peak->frequency_hz = ((double)bin + offset) * spectrum->bin_hz;
-    peak->power_share = height * spectrum->line_scale / total;
-    if (peak->power_share < spectrum->min_power_share) return 0;
+    peak->power_share = *height * spectrum->line_scale / total;
+    return peak->power_share >= spectrum->min_power_share;
+}
 
+static int buzz_measure_peak(const BuzzSpectrum *spectrum, size_t bin, double total, BuzzPeak *peak)
+{
+    double height, surrounding;
+
+    if (!buzz_line_peak(spectrum, bin, total, peak, &height)) return 0;
     surrounding = buzz_surrounding_power(spectrum, bin);
     peak->strength_db = 10.0 * log10(height / fmax(surrounding, total * 1.0e-10));
     return peak->strength_db >= 6.0;
@@ -446,18 +536,17 @@ static int buzz_pitched_window(BuzzSpectrum *spectrum, const double *samples,
     if (buzz_window_power(spectrum, samples, work, total, error, error_size) != 0) return -1;
     if (*total > 0.0) {
         if (hwa_speech_charge_transforms(work, 1U, error, error_size) != 0) return -1;
-        if (buzz_pitch(spectrum, rate, &current) != 0) {
+        if (buzz_pitch(spectrum, rate, *total, track->previous_hz, &current) != 0) {
             hwa_set_error(error, error_size, "speech buzz FFT failed");
             return -1;
         }
     }
-    if (current < BUZZ_PITCH_MIN_HZ || current > BUZZ_PITCH_MAX_HZ) {
-        track->previous_hz = 0.0;
-        return 0;
-    }
+    if (current < BUZZ_PITCH_MIN_HZ || current > BUZZ_PITCH_MAX_HZ) return 0;
     if (track->previous_hz > 0.0 &&
         (current > 1.18 * track->previous_hz || track->previous_hz > 1.18 * current)) {
         ++track->jumps;
+        if (current > 1.6 * track->previous_hz || track->previous_hz > 1.6 * current)
+            track->large_jump = 1;
     } else {
         ++track->count;
         *pitch = current;
@@ -520,7 +609,7 @@ int hwa_speech_buzz(const double *samples, size_t count, unsigned rate,
         goto cleanup;
     result->pitch_coverage = (double)track.count / (double)windows;
     if (track.count < 4U || result->pitch_coverage < BUZZ_MIN_COVERAGE ||
-        track.jumps > 1U + track.count / 8U) {
+        track.large_jump || track.jumps > 1U + track.count / 8U) {
         result->reason = "unreliable-pitch";
     } else {
         result->pitch_min_hz = buzz_pitch_percentile(pitch_buckets, track.count, 10U);
@@ -568,70 +657,90 @@ static int buzz_probe_detected(const BuzzSpectrum *spectrum, size_t bin, double 
     return 0;
 }
 
-int hwa_speech_buzz_probe(const double *samples, size_t count, unsigned rate,
-                          double max_hz, double frequency_hz, unsigned harmonic,
-                          HWASpeechWork *work, HWASpeechPeak *result, char *error, size_t error_size)
+typedef struct BuzzProbe {
+    double frequency_sum;
+    double level_sum;
+    double strength_sum;
+    size_t eligible;
+    size_t detections;
+} BuzzProbe;
+
+static void buzz_probe_window(BuzzProbe *probe, const HWASpeechPeak *target,
+                              const BuzzSpectrum *spectrum, double max_hz, double pitch,
+                              double total)
+{
+    unsigned harmonic = isfinite(target->harmonic_number) ? (unsigned)target->harmonic_number : 0U;
+    double frequency = harmonic == 0U ? target->frequency_hz : pitch * (double)harmonic;
+    double bin_position, fraction, height;
+    size_t bin, lower;
+
+    if (frequency < 45.0 || frequency >= max_hz ||
+        (harmonic == 0U && buzz_harmonic_index(spectrum, frequency, pitch) != 0U)) return;
+    bin_position = frequency / spectrum->bin_hz;
+    lower = (size_t)floor(bin_position);
+    fraction = bin_position - (double)lower;
+    bin = (size_t)floor(bin_position + 0.5);
+    if (bin <= 1U || bin >= spectrum->last_bin) return;
+
+    height = (1.0 - fraction) * spectrum->power[lower] + fraction * spectrum->power[lower + 1U];
+    probe->frequency_sum += frequency;
+    probe->level_sum += height * spectrum->line_scale / total;
+    probe->strength_sum += 10.0 * log10(fmax(height, total * 1.0e-15) /
+        fmax(buzz_surrounding_power(spectrum, bin), total * 1.0e-10));
+    ++probe->eligible;
+    if (buzz_probe_detected(spectrum, bin, frequency, pitch, harmonic, total))
+        ++probe->detections;
+}
+
+int hwa_speech_buzz_probe(const double *samples, size_t count, unsigned rate, double max_hz,
+                          const HWASpeechPeak *const *targets, size_t target_count,
+                          HWASpeechWork *work, HWASpeechPeak *results, char *error, size_t error_size)
 {
     BuzzSpectrum spectrum = {0};
     BuzzPitchTrack track = {0};
+    BuzzProbe probes[HWA_SPEECH_BUZZ_PROBE_LIMIT] = {0};
     const char *reason;
     size_t frame_size = buzz_frame_size(count, rate, max_hz, &reason);
     size_t hop_size;
     size_t window;
-    size_t eligible = 0U;
-    size_t detections = 0U;
-    double frequency_sum = 0.0;
-    double level_sum = 0.0;
-    double strength_sum = 0.0;
+    size_t index;
     int status = -1;
 
-    *result = (HWASpeechPeak){0};
-    max_hz = fmin(max_hz, 0.5 * (double)rate);
-    if (frame_size == 0U || harmonic > HWA_SPEECH_HARMONICS ||
-        (harmonic == 0U && (!isfinite(frequency_hz) || frequency_hz < 45.0 ||
-                           frequency_hz >= max_hz))) return 0;
+    if (target_count > HWA_SPEECH_BUZZ_PROBE_LIMIT) {
+        hwa_set_error(error, error_size, "too many speech buzz probes");
+        return -1;
+    }
+    memset(results, 0, target_count * sizeof(*results));
+    if (frame_size == 0U || target_count == 0U) return 0;
 
+    max_hz = fmin(max_hz, 0.5 * (double)rate);
     hop_size = frame_size / 4U;
     if (buzz_spectrum_open(&spectrum, frame_size, rate, max_hz,
                             0, work->available_bytes, error, error_size) != 0) goto cleanup;
     for (window = 0U; window <= (count - frame_size) / hop_size; ++window) {
-        double total;
-        double pitch;
-        double frequency;
-        double bin_position;
-        size_t lower;
-        size_t bin;
-        double fraction;
-        double height;
+        double total, pitch;
 
         if (buzz_pitched_window(&spectrum, samples + window * hop_size, rate, work,
                                 &track, &total, &pitch, error, error_size) != 0) goto cleanup;
         if (pitch <= 0.0) continue;
-        if (harmonic == 0U && buzz_harmonic_index(&spectrum, frequency_hz, pitch) != 0U) continue;
-        frequency = harmonic == 0U ? frequency_hz : pitch * (double)harmonic;
-        if (frequency >= max_hz) continue;
-        bin_position = frequency / spectrum.bin_hz;
-        lower = (size_t)floor(bin_position);
-        fraction = bin_position - (double)lower;
-        bin = (size_t)floor(bin_position + 0.5);
-        if (bin <= 1U || bin >= spectrum.last_bin) continue;
-
-        height = (1.0 - fraction) * spectrum.power[lower] + fraction * spectrum.power[lower + 1U];
-        frequency_sum += frequency;
-        level_sum += height * spectrum.line_scale / total;
-        strength_sum += 10.0 * log10(fmax(height, total * 1.0e-15) /
-            fmax(buzz_surrounding_power(&spectrum, bin), total * 1.0e-10));
-        ++eligible;
-        if (buzz_probe_detected(&spectrum, bin, frequency, pitch, harmonic, total)) ++detections;
+        for (index = 0U; index < target_count; ++index) {
+            buzz_probe_window(&probes[index], targets[index], &spectrum, max_hz, pitch, total);
+        }
     }
-    if (eligible >= 2U && (double)eligible >= BUZZ_MIN_INDEPENDENT * (double)track.count) {
-        *result = (HWASpeechPeak){
+    for (index = 0U; index < target_count; ++index) {
+        const BuzzProbe *probe = &probes[index];
+        double eligible = (double)probe->eligible;
+
+        if (probe->eligible < 2U || eligible < BUZZ_MIN_INDEPENDENT * (double)track.count)
+            continue;
+        results[index] = (HWASpeechPeak){
             .present = 1,
-            .frequency_hz = harmonic == 0U ? frequency_hz : frequency_sum / (double)eligible,
-            .persistence = (double)detections / (double)eligible,
-            .strength_db = strength_sum / (double)eligible,
-            .relative_level_db = 10.0 * log10(fmax(level_sum / (double)eligible, 1.0e-15)),
-            .harmonic_number = harmonic > 0U ? (double)harmonic : NAN
+            .frequency_hz = isfinite(targets[index]->harmonic_number)
+                ? probe->frequency_sum / eligible : targets[index]->frequency_hz,
+            .persistence = (double)probe->detections / eligible,
+            .strength_db = probe->strength_sum / eligible,
+            .relative_level_db = 10.0 * log10(fmax(probe->level_sum / eligible, 1.0e-15)),
+            .harmonic_number = targets[index]->harmonic_number
         };
     }
     status = 0;

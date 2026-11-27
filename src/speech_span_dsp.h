@@ -5,6 +5,7 @@
 
 #define HWA_SPEECH_HARMONICS 64U
 #define HWA_SPEECH_FIXED_PEAKS 8U
+#define HWA_SPEECH_BUZZ_PROBE_LIMIT (HWA_SPEECH_FIXED_PEAKS + HWA_SPEECH_HARMONICS)
 #define HWA_SPEECH_BUZZ_LEVEL_FLOOR_DB (-40.0)
 
 typedef struct HWASpeechWork {
@@ -52,13 +53,15 @@ int hwa_speech_buzz(const double *samples, size_t count, unsigned rate,
                     double max_hz, HWASpeechWork *work, HWASpeechBuzz *result,
                     char *error, size_t error_size);
 
-int hwa_speech_buzz_probe(const double *samples, size_t count, unsigned rate,
-                          double max_hz, double frequency_hz, unsigned harmonic, HWASpeechWork *work,
-                          HWASpeechPeak *result, char *error, size_t error_size);
+/* Measure the candidate peak frequencies or harmonic numbers in one pass
+ * over the signal. Results use the same order as the targets. */
+int hwa_speech_buzz_probe(const double *samples, size_t count, unsigned rate, double max_hz,
+                          const HWASpeechPeak *const *targets, size_t target_count,
+                          HWASpeechWork *work, HWASpeechPeak *results, char *error, size_t error_size);
 
 int hwa_speech_contrast(const double *transition, size_t transition_count,
-                        size_t edge, int release, const double *vowel,
-                        size_t vowel_count, unsigned rate, double max_hz,
+                        const double *vowel, size_t vowel_count,
+                        unsigned rate, double max_hz,
                         HWASpeechWork *work, HWASpeechContrast *result,
                         char *error, size_t error_size);
 

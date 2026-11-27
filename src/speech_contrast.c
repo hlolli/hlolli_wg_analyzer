@@ -41,36 +41,27 @@ static size_t speech_next_window(size_t start, size_t last, size_t hop)
 }
 
 static void speech_transition_envelope(const double *transition, size_t transition_count,
-                                       size_t edge, int release, size_t window_size,
-                                       size_t hop, double baseline, double floor_power,
-                                       HWASpeechContrast *result)
+                                       size_t window_size, size_t hop, double baseline,
+                                       double floor_power, HWASpeechContrast *result)
 {
-    size_t first = release ? 0U : edge;
-    size_t end = release ? edge : transition_count;
-    size_t start;
-    size_t last;
-    double previous = 0.0;
-    double peak = 0.0;
+    size_t last = transition_count - window_size;
+    size_t start = 0U;
+    double previous = speech_mean_power(transition, window_size);
+    double peak = previous;
     double attack = 0.0;
-    int previous_present = 0;
 
-    if (end - first < window_size) return;
-    last = end - window_size;
-    if (!release && edge >= hop) {
-        previous = speech_mean_power(transition + edge - hop, window_size);
-        previous_present = 1;
-    }
-    for (start = first;; start = speech_next_window(start, last, hop)) {
-        double power = speech_mean_power(transition + start, window_size);
+    /* A release can peak on either side of the phone boundary. */
+    while (start < last) {
+        double power;
 
+        start = speech_next_window(start, last, hop);
+        power = speech_mean_power(transition + start, window_size);
         peak = fmax(peak, power);
-        if (previous_present) attack = fmax(attack, power - previous);
-        if (start == last) break;
+        attack = fmax(attack, power - previous);
         previous = power;
-        previous_present = 1;
     }
     result->level_contrast_db = speech_contrast_db(peak, baseline, floor_power);
-    if (previous_present) {
+    if (last != 0U) {
         result->attack_contrast_db = speech_contrast_db(attack, baseline, floor_power);
     }
 }
@@ -190,8 +181,7 @@ cleanup:
 }
 
 int hwa_speech_contrast(const double *transition, size_t transition_count,
-                        size_t edge, int release, const double *vowel,
-                        size_t vowel_count, unsigned rate, double max_hz,
+                        const double *vowel, size_t vowel_count, unsigned rate, double max_hz,
                         HWASpeechWork *work, HWASpeechContrast *result,
                         char *error, size_t error_size)
 {
@@ -202,7 +192,7 @@ int hwa_speech_contrast(const double *transition, size_t transition_count,
     double floor_power;
 
     *result = (HWASpeechContrast){"indeterminate", "transition-too-short", NAN, NAN, NAN};
-    if (window_size < 3U || hop == 0U || transition_count < window_size || edge > transition_count)
+    if (window_size < 3U || hop == 0U || transition_count < window_size)
         return 0;
     if (vowel_count < window_size) {
         result->reason = "vowel-too-short";
@@ -215,8 +205,8 @@ int hwa_speech_contrast(const double *transition, size_t transition_count,
     }
     floor_power = baseline * SPEECH_CONTRAST_FLOOR_SHARE;
 
-    speech_transition_envelope(transition, transition_count, edge, release, window_size,
-                               hop, baseline, floor_power, result);
+    speech_transition_envelope(transition, transition_count, window_size, hop,
+                               baseline, floor_power, result);
     if (high_hz > SPEECH_HIGH_BAND_LOW_HZ &&
         speech_transition_band(transition, transition_count, vowel, vowel_count, window_size,
                                hop, rate, high_hz, floor_power, work,

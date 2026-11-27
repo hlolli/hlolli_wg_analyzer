@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import struct
 from pathlib import Path
 import subprocess
 import tempfile
@@ -175,6 +176,71 @@ class SpeechSpansTests(unittest.TestCase):
                 self.assert_no_findings([unchanged])
                 self.alignment.unlink()
 
+    def compare_vowel_pair(self, duration, waveform):
+        start = RATE // 10
+        count = round(duration * RATE)
+        end = start + count
+        for path, candidate in ((self.reference, False), (self.candidate, True)):
+            samples = [round(32767 * waveform(i / RATE, candidate)) for i in range(count)]
+            write_wave(path, [0] * start + samples + [0] * start)
+        anchors = (0, start, end, end + start)
+        self.save_alignment(anchors, anchors)
+        write_csv(self.spans, COLUMNS, [("v1", start, end, "word", "a", "vowel", "", "", 1)])
+        return self.compare()["buzz"][0]
+
+    def test_steady_pitch_does_not_treat_harmonic_changes_as_pitch_motion(self):
+        duration = 0.68
+
+        def waveform(t, candidate):
+            phase = math.tau * 172 * t
+            mix = max(0, min(1, (t / duration - 0.46) / 0.08))
+            return ((0.27 - 0.262 * mix) * math.sin(phase)
+                    + (0.06 + 0.22 * mix) * math.sin(2 * phase)
+                    + (0.025 if candidate else 0.006) * math.sin(3 * phase))
+
+        row = self.compare_vowel_pair(duration, waveform)
+        self.assertEqual(row["status"], "indeterminate", row)
+        self.assertIsNone(row["classification"], row)
+        self.assertIsNone(row["rank"], row)
+
+    def test_glide_harmonic_boost_keeps_the_fundamental(self):
+        duration = 0.68
+
+        for base, rise, harmonic in ((150, 90, 2), (180, 100, 3)):
+            with self.subTest(base=base, harmonic=harmonic):
+                def waveform(t, candidate):
+                    phase = math.tau * (base * t + 0.5 * rise * t * t / duration)
+                    return (0.04 * math.sin(phase)
+                            + (0.4 if candidate else 0.012) * math.sin(harmonic * phase))
+
+                row = self.compare_vowel_pair(duration, waveform)
+                self.assertEqual((row["status"], row["classification"], row["rank"]),
+                                 ("finding", "harmonic", 1), row)
+                self.assertEqual(row["candidate"]["harmonic"]["harmonic_number"], harmonic)
+                for bound in ("pitch_min_hz", "pitch_max_hz"):
+                    self.assertAlmostEqual(row["reference"][bound], row["candidate"][bound], delta=3)
+                change = row["difference"]["harmonic"]["relative_level_db"]
+                self.assertAlmostEqual(change, 10.8, delta=1)
+                self.alignment.unlink()
+
+    def test_louder_distractor_does_not_hide_new_fixed_tone(self):
+        duration = 0.66
+
+        def waveform(t, candidate):
+            phase = math.tau * (150 * t + 45 * t * t / duration)
+            cutoff = 0.57 if candidate else 0.46
+            fade = max(0, min(1, (cutoff - t / duration) / 0.008))
+            return (0.28 * math.sin(phase) + 0.08 * math.sin(2 * phase)
+                    + 0.04 * math.sin(3 * phase) + 0.01 * math.sin(7 * phase)
+                    + 0.07 * fade * math.sin(math.tau * 884 * t)
+                    + (0.032 if candidate else 0) * math.sin(math.tau * FIXED_HZ * t))
+
+        row = self.compare_vowel_pair(duration, waveform)
+        self.assertEqual((row["status"], row["classification"], row["rank"]),
+                         ("finding", "fixed", 1), row)
+        self.assertAlmostEqual(row["candidate"]["fixed"]["frequency_hz"], FIXED_HZ, delta=5)
+        self.assertGreater(row["difference"]["fixed"]["relative_level_db"], 25)
+
     def test_steady_pitch_abstains_when_tone_coincides_with_harmonic(self):
         self.prepare(steady=True, tone_hz=7 * 190)
         report = self.compare()
@@ -200,6 +266,106 @@ class SpeechSpansTests(unittest.TestCase):
             self.assertGreater(transition["end_sample"], edge)
         self.assertLess(changed["difference"]["high_band_contrast_db"], -6)
         self.assert_no_findings([unchanged, *report["buzz"]])
+
+    def test_release_crosses_the_phone_edge(self):
+        rows, anchors = phrase(self.reference, release_gain=0.0)
+        edge = rows[0][2]
+        reference = list(read_samples(self.reference))
+        reference[edge:edge + round(0.016 * RATE)] = [0] * round(0.016 * RATE)
+        candidate = reference.copy()
+        first = edge - round(0.001 * RATE)
+        stop = edge + round(0.012 * RATE)
+        for index in range(first, stop):
+            position = (index - first) / (stop - first)
+            time = (index - edge) / RATE
+            burst = 0.72 * math.sin(math.pi * position) ** 4 * math.cos(math.tau * 650 * time)
+            reference[index] = round(32767 * burst)
+            candidate[index] = round(32767 * burst * 10 ** (-18 / 20))
+        write_wave(self.reference, reference)
+        write_wave(self.candidate, candidate)
+        self.save_alignment(anchors, anchors)
+        write_csv(self.spans, COLUMNS, rows)
+
+        report = self.compare()
+        changed = report["consonant_loss"][0]
+        self.assertEqual((changed["id"], changed["rank"]), ("c1", 1), changed)
+        self.assertLess(changed["difference"]["level_contrast_db"], -3)
+        self.assertLess(changed["difference"]["attack_contrast_db"], -3)
+        self.assert_no_findings(report["buzz"])
+
+    def test_transition_excludes_audio_before_a_short_consonant(self):
+        rows, anchors = phrase(self.candidate)
+        candidate = list(read_samples(self.candidate))
+        reference = candidate.copy()
+        edge = rows[0][2]
+        first = edge - round(0.019 * RATE)
+        stop = edge - round(0.009 * RATE)
+        for index in range(first, stop):
+            position = (index - first) / (stop - first)
+            reference[index] = round(30000 * math.sin(math.pi * position) ** 2 *
+                                     math.cos(math.tau * 3200 * (index - first) / RATE))
+        short_phone = list(rows[0])
+        short_phone[1] = edge - round(0.006 * RATE)
+        write_wave(self.reference, reference)
+        self.save_alignment(anchors, anchors)
+        write_csv(self.spans, COLUMNS, [short_phone, *rows[1:]])
+
+        report = self.compare()
+        first = next(row for row in report["consonant_loss"] if row["id"] == "c1")
+        self.assertEqual(first["reference_transition"]["start_sample"], short_phone[1])
+        self.assertEqual(first["status"], "no-finding", first)
+
+    def test_transition_rejects_a_vowel_across_another_phone(self):
+        rows, _ = self.prepare()
+        modified = list(rows[1])
+        edge = rows[0][2]
+        modified[1] = edge + round(0.010 * RATE)
+        intervening = ("between", edge, modified[1], rows[0][3], "h",
+                       "consonant", modified[0], "end", 1)
+        write_csv(self.spans, COLUMNS, [rows[0], intervening, modified, *rows[2:]])
+
+        report = self.compare()
+        first = next(row for row in report["consonant_loss"] if row["id"] == "c1")
+        self.assertEqual((first["status"], first["reason"]), ("indeterminate", "non-neighboring-vowel"))
+        self.assertIsNone(first["rank"])
+
+    def test_automatic_alignment_checks_for_a_missed_release(self):
+        reference, _ = phrase(self.reference)
+        candidate, _ = phrase(self.candidate, retimed=True, release_gain=10 ** (-18 / 20))
+        saved = self.cli("align", self.reference, self.candidate, "--output", self.alignment)
+        self.assertEqual(saved.returncode, 0, saved.stderr)
+        write_csv(self.spans, COLUMNS, reference)
+        changed, unchanged = self.compare()["consonant_loss"]
+        self.assertEqual((changed["id"], changed["rank"]), ("c1", 1), changed)
+        self.assertEqual((unchanged["id"], unchanged["rank"]), ("c2", None), unchanged)
+        self.assertEqual(unchanged["reason"], "transition-timing-disagreement", unchanged)
+        self.assertAlmostEqual(unchanged["candidate_nearby_cue_seconds"],
+                               candidate[2][2] / RATE, delta=0.008)
+
+        strict = {row["id"]: row for row in self.compare("--min-pair-confidence", "0.8")["consonant_loss"]}
+        self.assertEqual(strict["c2"]["status"], "low-alignment-confidence")
+        self.assertLess(strict["c2"]["alignment_confidence"], 0.8)
+
+    def test_shared_nearby_burst_does_not_hide_a_real_release_loss(self):
+        rows, anchors = phrase(self.reference)
+        phrase(self.candidate, release_gain=10 ** (-18 / 20))
+        center = rows[0][2] + round(0.04 * RATE)
+        half = round(0.005 * RATE)
+        for path in (self.reference, self.candidate):
+            samples = list(read_samples(path))
+            for n in range(-half, half):
+                envelope = math.cos(math.pi * n / (2 * half)) ** 2
+                samples[center + n] = round(32767 * 0.5 * envelope * (
+                    0.6 * math.cos(math.tau * 3132 * n / RATE) +
+                    0.4 * math.cos(math.tau * 4187 * n / RATE)))
+            write_wave(path, samples)
+        self.save_alignment(anchors, anchors)
+        self.alignment.write_bytes(self.alignment.read_bytes().replace(b",manual,1,1", b",auto,0,1"))
+        write_csv(self.spans, COLUMNS, rows)
+
+        changed = self.compare()["consonant_loss"][0]
+        self.assertEqual((changed["id"], changed["rank"]), ("c1", 1), changed)
+        self.assertLess(changed["difference"]["high_band_contrast_db"], -15)
 
     def test_start_edge_uses_vowel_before_consonant(self):
         ref_rows, ref_anchors = phrase(self.reference)
@@ -262,6 +428,29 @@ class SpeechSpansTests(unittest.TestCase):
             self.assertEqual(path.parent, excerpts)
             levels.append(self.assert_excerpt_content(path, excerpt[f"{side}_span"], spans[0], audio))
         self.assertAlmostEqual(20 * math.log10(levels[1] / levels[0]), 0.0, delta=0.05)
+
+    def test_quiet_float_excerpt_retains_audible_samples(self):
+        rows, reference_anchors = phrase(self.reference)
+        _, candidate_anchors = phrase(self.candidate, release_gain=10 ** (-18 / 20))
+        for path in (self.reference, self.candidate):
+            samples = read_samples(path)
+            payload = struct.pack(f"<{len(samples)}f", *(x * (1e-5 / 32768) for x in samples))
+            header = struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(payload), b"WAVE",
+                                 b"fmt ", 16, 3, 1, RATE, RATE * 4, 4, 32, b"data", len(payload))
+            path.write_bytes(header + payload)
+        self.save_alignment(reference_anchors, candidate_anchors)
+        write_csv(self.spans, COLUMNS, rows)
+        excerpts = self.root / "quiet excerpts"
+        excerpts.mkdir()
+
+        report = self.compare("--excerpt-dir", excerpts)
+        finding = report["consonant_loss"][0]
+        self.assertEqual((finding["id"], finding["rank"]), ("c1", 1))
+        pair = finding["excerpt"]
+        levels = [rms(read_samples(Path(pair[f"{side}_path"]))) / 32768
+                  for side in ("reference", "candidate")]
+        self.assertGreater(min(levels), 0.05)
+        self.assertAlmostEqual(20 * math.log10(levels[1] / levels[0]), 0.0, delta=0.01)
 
     def test_excerpt_collision_keeps_existing_file_and_rolls_back_new_file(self):
         self.prepare(release_gain=10 ** (-18 / 20))

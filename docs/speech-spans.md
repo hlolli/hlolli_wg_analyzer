@@ -46,11 +46,11 @@ its word, phone, both timestamps, and alignment confidence. Look at
 `reference`, `candidate`, and `difference` for the evidence. Differences
 are candidate minus reference. Findings start at rank 1 in each array.
 
-Alignment confidence takes the minimum across the annotation and supporting
-anchors. Consonant confidence also covers the transition and neighboring
-vowel baseline. A row stays unranked if its confidence falls below
-`--min-pair-confidence` (default 0.35) or crosses a saved unmatched or
-uncertain interval. The report keeps mapped bounds wherever it has them.
+Alignment confidence takes the minimum across the annotation, supporting
+anchors, and overlapping saved match or uncertain intervals. Consonant
+confidence also covers the transition and neighboring vowel baseline. A row
+stays unranked if its confidence falls below `--min-pair-confidence`
+(default 0.35) or crosses a saved unmatched or uncertain interval. The report keeps mapped bounds wherever it has them.
 Unavailable values are `null`.
 
 `levels` gives the whole-file RMS in dBFS across samples and channels and the
@@ -64,8 +64,9 @@ Very quiet or low-bit-depth WAVs can change shape when requantized.
 The analyzer checks Hann-windowed spectra up to 48 ms long with 75% overlap.
 It tracks pitch from 60 to 550 Hz and needs at least four reliable estimates,
 70% coverage, and a rise of at least 6% between the 10th and 90th pitch
-percentiles. With too little pitch motion or unreliable pitch estimates it
-reports `indeterminate`.
+percentiles. It checks for interleaved harmonics before accepting a longer
+pitch period. With too little pitch motion or an unresolved octave jump
+it reports `indeterminate`.
 
 Peaks need at least 6 dB of local prominence, a level of at least −40 dB
 relative to the whole window spectrum, and persistence across at least
@@ -79,16 +80,20 @@ harmonic number where applicable. When a candidate peak warrants a comparison
 but the reference has no detected track, the report probes the same fixed
 frequency or harmonic number in both recordings. Probe measurements appear
 in `fixed_probe` or `harmonic_probe` and supply the difference. A fixed probe
-uses windows away from the harmonic grid. Among the tested peaks, the
-strongest increase of at least 3 dB sets the row rank and classification.
+uses windows away from the harmonic grid. The comparison checks all retained
+candidate peaks before choosing the strongest measured increase. A rise
+of at least 3 dB sets the row rank and classification.
 Changes in pitch-following harmonics can reflect voicing as well as buzz.
 
 ### Consonant transitions
 
 The command maps a window up to 20 ms on either side of the annotated edge.
-It compares against the middle 60% of the neighboring vowel. It measures:
+The window stays within the consonant and neighboring vowel bounds.
+It can include a short gap between the labels. A gap with another labeled
+phone makes that transition indeterminate. It compares against the middle
+60% of the linked vowel. The report gives three measures.
 
-- `level_contrast_db` from the strongest 6 ms RMS window on the consonant side.
+- `level_contrast_db` from the strongest 6 ms RMS window through the transition.
 - `attack_contrast_db` from the largest local rise in short-window power.
 - `high_band_contrast_db` from peak 2–8 kHz power through the transition,
   including windows across the boundary. The band ends at the lower Nyquist
@@ -98,18 +103,20 @@ The level and attack measures use the vowel's broadband RMS as the baseline.
 The high-band measure uses the vowel's mean power in the same band. A floor
 50 dB below vowel broadband power limits the effect of rounding noise.
 The largest loss of at least 3 dB sets the rank. A negative difference means
-the candidate has less contrast. Use the edge timestamps to listen to that
-transition in each file.
+the candidate has less contrast. A nearby burst outside the mapped transition
+can cast doubt on an unlocked edge. In that case, the row stays unranked with
+`transition-timing-disagreement`. The report gives the nearby candidate cue
+time alongside the saved mapped bounds.
 
 ### Listen to excerpts
 
 With `--excerpt-dir`, each ranked finding can include a pair of PCM16 WAVs
 with up to 150 ms of surrounding speech on each side. The command takes
 both excerpts from the mapped sample bounds and keeps the original sample
-rates and channel counts. It uses one gain per WAV to match RMS and keep
-headroom. The report gives the paths, bounds, and gains. It shortens context
-if the alignment cannot support it and leaves the excerpt unavailable if
-either side has zero RMS. The directory must exist and the WAV paths must
+rates and channel counts. It matches both excerpts at about −18 dBFS RMS
+and lowers that target when needed to keep peak headroom. The report gives
+the paths, bounds, and gains. The command shortens context when the alignment
+provides less and skips playback for a pair if either side has zero RMS. The directory must exist and the WAV paths must
 be free.
 
 The report goes to standard output by default. `--output` saves JSON to
