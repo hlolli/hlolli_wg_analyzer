@@ -1,8 +1,72 @@
 # Aligned speech spans
 
 Use `compare-speech-spans` to find words and phones worth comparing by ear.
-It reads two WAVs of the same text, an audio-to-audio alignment, and a CSV of
-word and phone labels supplied by the caller.
+Supply two WAVs and a CSV of labels. Use shared timing for renders on the
+same sample clock and a saved alignment for independent readings.
+
+## Compare on a shared sample clock
+
+```sh
+mkdir excerpts
+build/hlolli-wg-analyzer compare-speech-spans baseline.wav edited.wav \
+  --shared-timing --spans joins.csv --output temporal.json --excerpt-dir excerpts
+```
+
+`--shared-timing` declares that the two renders use the same starting sample
+and timing throughout. The command checks for equal sample rates and equal,
+nonempty lengths in sample frames. Use either `--shared-timing` or
+`--alignment` and reserve the alignment copy options for a saved alignment.
+
+Supply unique IDs, words, and zero-based sample bounds on the shared clock.
+The end sample is exclusive. A word row needs only `id`, `start_sample`,
+`end_sample`, and `word`. Add a `phone` label for a phone. Use
+`kind=boundary` with a `phone` or `boundary` label to name a window around a
+join. The command also accepts the vowel and consonant kinds from aligned
+comparisons. `confidence` gives the optional annotation confidence.
+
+```csv
+id,start_sample,end_sample,word,phone,kind
+word-1,8000,12400,fann,,word
+join-1,10600,11000,fann,a→n,boundary
+```
+
+The `temporal` object reports the actual window and hop in samples and
+milliseconds. By default the window is a 15 ms Hann window and the hop is
+5 ms. The analysis uses the channel average of each WAV. The `level` and
+`spectral` arrays rank regions separately by the largest absolute change.
+Each finding includes its label, range on both WAVs, duration, peak frame
+time, two measurements, and candidate minus reference.
+
+- `level_db` measures hop RMS in dB relative to the recording's full RMS, with
+  the typical gain difference removed. A negative difference means the
+  candidate is locally quieter. The `levels` object still reports the
+  whole-file level difference.
+- `log_spectral_change_db` measures the RMS first difference of log spectral
+  power shares across frequency bands. `log_spectral_acceleration_db` uses
+  the second difference of the same band values. Negative differences mean
+  less motion or acceleration in the candidate. A strong attack present in
+  both renders can have a high measured value and zero difference.
+
+Regions join adjacent hops with waveform differences above a gain and
+rounding tolerance and evidence of local level or spectral change. Each
+hop needs at least 0.25 dB of support and a region needs a peak difference
+of at least 0.5 dB to rank. The spectral support can use the instantaneous
+difference in spectral shape. A region's rank uses the first or second
+difference measurement. The frame center must fall inside its label.
+`temporal.spans` includes the paired measurements at each annotation's
+largest absolute difference, including unchanged controls and values that
+fall below the ranking threshold.
+
+Excerpts use the same sample range on both WAVs. A containing word label
+lets the excerpt include the whole word, with up to 150 ms of context on
+either side. The signed measures describe what changed in the two renders.
+Listen to the clips to judge the change.
+
+## Compare independent readings
+
+Use an audio-to-audio alignment with phone labels for the buzz and consonant
+contrast measures below. This mode retains the alignment confidence and
+abstention rules. Its temporal report has status `requires-shared-timing`.
 
 ```sh
 analyzer=build/hlolli-wg-analyzer
@@ -122,5 +186,7 @@ be free.
 The report goes to standard output by default. `--output` saves JSON to
 a file. `--max-frames`, `--max-transforms`, and `--max-work-bytes` bound
 the combined work, including the level scan and any requested excerpts.
+In shared timing mode, `--max-track-points` also limits the total number of
+analysis hops checked across all annotations.
 Use the measurements to choose where to listen. They give evidence about
 specific sounds in this pair of readings.

@@ -40,6 +40,7 @@ typedef struct HwaPairedSpans {
     HwaPairedSpan *rows;
     size_t count;
     int notes_on_target;
+    int shared_timing;
     const char *label_names[HWA_PAIRED_LABEL_MAX];
     size_t label_count;
     uint64_t retained_work_bytes;
@@ -68,6 +69,10 @@ int hwa_paired_spans_open(const char *reference_path, const char *target_path,
                           const HWAAnalysisOptions *limits, double held_fraction,
                           double min_confidence, HwaPairedSpans *result,
                           char *error, size_t error_size);
+int hwa_paired_spans_open_shared(const char *reference_path, const char *target_path,
+                                 const char *spans_path, const HWAAnalysisOptions *limits,
+                                 double min_confidence, HwaPairedSpans *result,
+                                 char *error, size_t error_size);
 /* Map a fresh interval using a retained mapping index. The caller sets bounds
  * on the reference clock, or the target clock when reverse is set. */
 void hwa_paired_spans_map_interval(const HwaPairedSpans *spans, HwaPairedSpan *row, int reverse);

@@ -1596,6 +1596,11 @@ if(HWA_PYTHON3_EXECUTABLE)
     --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
   set_tests_properties(cli.speech-alignment PROPERTIES TIMEOUT 60)
 
+  add_test(NAME cli.speech-temporal COMMAND ${HWA_PYTHON3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_speech_temporal_cli.py
+    --analyzer=$<TARGET_FILE:hlolli_wg_analyzer>)
+  set_tests_properties(cli.speech-temporal PROPERTIES TIMEOUT 60)
+
   find_program(HWA_LILYPOND_EXECUTABLE NAMES lilypond)
   set(HWA_EVENT_SCORE_RENDER_ARGS "")
   if(HWA_LILYPOND_EXECUTABLE)

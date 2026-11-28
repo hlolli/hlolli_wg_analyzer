@@ -446,6 +446,19 @@ static void paired_map_span(const PairedMap *map, HwaPairedSpan *row,
     }
 }
 
+static void paired_shared_span(HwaPairedSpan *row, int reverse)
+{
+    HwaPairedSampleSpan span = reverse ? row->target : row->reference;
+
+    if (!span.valid) {
+        paired_skip(row, "invalid-span");
+        return;
+    }
+    row->reference = row->target = span;
+    row->held_reference = row->held_target = span;
+    row->confidence_valid = 1;
+}
+
 enum PairedColumn {
     COLUMN_ID,
     COLUMN_START_SAMPLE,
@@ -609,8 +622,14 @@ static int paired_csv_note(const PairedMap *map, char *const *fields,
     }
     span->present = 1;
     span->valid = span->start_sample < span->end_sample && span->end_sample <= source->frames;
-    paired_map_span(map, row, (double)span->start_sample / source->sample_rate_hz,
-                   (double)span->end_sample / source->sample_rate_hz, reverse);
+    if (result->shared_timing) {
+        if (!span->valid) return -1;
+        paired_shared_span(row, reverse);
+        if (row->confidence < map->min_confidence) paired_skip(row, "low-annotation-confidence");
+    } else {
+        paired_map_span(map, row, (double)span->start_sample / source->sample_rate_hz,
+                       (double)span->end_sample / source->sample_rate_hz, reverse);
+    }
     return 0;
 }
 
@@ -679,7 +698,9 @@ static int paired_load_csv(const char *path, const HWAAlignmentFileLimits *limit
         fields[count] = "";
         if (paired_csv_note(map, fields, slots, label_slots, result, locale,
                             reverse, &result->rows[result->count]) != 0) {
-            hwa_set_error(error, error_size, "invalid note CSV values in record %zu", result->count + 2U);
+            hwa_set_error(error, error_size, result->shared_timing ?
+                          "invalid speech span bounds or CSV values in record %zu" :
+                          "invalid note CSV values in record %zu", result->count + 2U);
             return -1;
         }
         ++result->count;
@@ -956,6 +977,60 @@ cleanup:
     return status;
 }
 
+int hwa_paired_spans_open_shared(const char *reference_path, const char *target_path,
+                                 const char *spans_path, const HWAAnalysisOptions *limits,
+                                 double min_confidence, HwaPairedSpans *result,
+                                 char *error, size_t error_size)
+{
+    HWAAlignmentFileLimits file_limits;
+    PairedMap map = {.reference = &result->reference.format, .target = &result->target.format,
+                     .min_confidence = min_confidence};
+    HWANumericLocale locale;
+    int status = -1;
+
+    memset(result, 0, sizeof(*result));
+    if (strcmp(reference_path, "-") == 0 || strcmp(target_path, "-") == 0) {
+        hwa_set_error(error, error_size, "shared timing requires two WAV files");
+        return -1;
+    }
+    if (hwa_c_numeric_locale_begin(&locale) != 0) {
+        hwa_set_error(error, error_size, "cannot set the speech input numeric locale");
+        return -1;
+    }
+    result->shared_timing = 1;
+    hwa_alignment_file_limits_default(&file_limits);
+    if (limits->max_work_bytes < file_limits.max_work_bytes)
+        file_limits.max_work_bytes = limits->max_work_bytes;
+    if (hwa_wav_reader_open(&result->reference, reference_path, limits->max_input_bytes,
+                             error, error_size) != 0 ||
+        hwa_wav_reader_open(&result->target, target_path, limits->max_input_bytes,
+                             error, error_size) != 0) goto done;
+    if (map.reference->sample_rate_hz != map.target->sample_rate_hz) {
+        hwa_set_error(error, error_size, "shared timing requires equal sample rates");
+        goto done;
+    }
+    if (map.reference->frames == 0U || map.reference->frames != map.target->frames) {
+        hwa_set_error(error, error_size, "shared timing requires equal, nonempty WAV lengths in sample frames");
+        goto done;
+    }
+    result->reference.source.name = reference_path;
+    result->target.source.name = target_path;
+    if (hwa_inference_byte_source_sha256(&result->reference.source, limits->max_input_bytes,
+                                         result->reference_sha256, error, error_size) != 0 ||
+        hwa_inference_byte_source_sha256(&result->target.source, limits->max_input_bytes,
+                                         result->target_sha256, error, error_size) != 0) goto done;
+    status = paired_load_csv(spans_path, &file_limits, file_limits.max_work_bytes, &map, 0,
+                             &locale, result, error, error_size);
+
+done:
+    if (hwa_c_numeric_locale_end(&locale) != 0 && status == 0) {
+        hwa_set_error(error, error_size, "cannot restore the speech input numeric locale");
+        status = -1;
+    }
+    if (status != 0) hwa_paired_spans_close(result);
+    return status;
+}
+
 void hwa_paired_spans_map_interval(const HwaPairedSpans *spans, HwaPairedSpan *row, int reverse)
 {
     const HWAFormat *format = reverse ? &spans->target.format : &spans->reference.format;
@@ -963,8 +1038,9 @@ void hwa_paired_spans_map_interval(const HwaPairedSpans *spans, HwaPairedSpan *r
 
     span->present = 1;
     span->valid = span->start_sample < span->end_sample && span->end_sample <= format->frames;
-    paired_map_span(spans->map, row, (double)span->start_sample / format->sample_rate_hz,
-                   (double)span->end_sample / format->sample_rate_hz, reverse);
+    if (spans->shared_timing) paired_shared_span(row, reverse);
+    else paired_map_span(spans->map, row, (double)span->start_sample / format->sample_rate_hz,
+                         (double)span->end_sample / format->sample_rate_hz, reverse);
 }
 
 void hwa_paired_spans_close(HwaPairedSpans *result)

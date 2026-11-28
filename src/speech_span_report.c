@@ -4,6 +4,7 @@
 #include "numeric_locale.h"
 #include "output.h"
 #include "speech_span_audio.h"
+#include "speech_temporal.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -16,9 +17,26 @@
 #define SPEECH_CONTEXT_MS 150U
 #define SPEECH_TIMING_SEARCH_MS 55U
 #define SPEECH_EXCERPT_RMS 0.125
+#define SPEECH_TEMPORAL_LEVEL_DB 0.5
+#define SPEECH_TEMPORAL_SPECTRAL_DB 0.5
+#define SPEECH_TEMPORAL_SUPPORT_DB 0.25
 
 enum SpeechSide { SPEECH_REFERENCE, SPEECH_CANDIDATE, SPEECH_SIDE_COUNT };
-enum SpeechKind { SPEECH_VOWEL, SPEECH_CONSONANT };
+enum SpeechKind { SPEECH_VOWEL, SPEECH_CONSONANT, SPEECH_WORD, SPEECH_PHONE, SPEECH_BOUNDARY };
+enum TemporalMetric { TEMPORAL_LEVEL, TEMPORAL_SPECTRAL_CHANGE, TEMPORAL_SPECTRAL_ACCELERATION,
+                      TEMPORAL_METRIC_COUNT };
+
+typedef struct SpeechTemporalValue {
+    double reference;
+    double candidate;
+    uint64_t sample;
+    int present;
+} SpeechTemporalValue;
+
+typedef struct SpeechTemporalSummary {
+    SpeechTemporalValue peak[TEMPORAL_METRIC_COUNT];
+    size_t cells;
+} SpeechTemporalSummary;
 
 typedef struct SpeechBuzzSide {
     const char *status;
@@ -41,8 +59,10 @@ typedef struct SpeechExcerpt {
 typedef struct SpeechRow {
     const HwaPairedSpan *phone;
     const struct SpeechRow *next_phone;
+    const HwaPairedSampleSpan *word_context;
     const char *word;
     const char *phone_label;
+    const char *boundary_label;
     const char *vowel_id;
     const char *status;
     const char *reason;
@@ -61,9 +81,20 @@ typedef struct SpeechRow {
     union {
         SpeechBuzzSide buzz[SPEECH_SIDE_COUNT];
         HWASpeechContrast contrast[SPEECH_SIDE_COUNT];
+        SpeechTemporalSummary temporal;
     } measure;
     SpeechExcerpt excerpt;
 } SpeechRow;
+
+typedef struct SpeechTemporalRegion {
+    const SpeechRow *label;
+    HwaPairedSampleSpan bounds;
+    HwaPairedSampleSpan context;
+    enum TemporalMetric metric;
+    SpeechTemporalValue peak;
+    size_t rank;
+    SpeechExcerpt excerpt;
+} SpeechTemporalRegion;
 
 typedef struct SpeechReport {
     HwaPairedSpans spans;
@@ -75,6 +106,10 @@ typedef struct SpeechReport {
     size_t protected_count;
     double shared_nyquist;
     double min_confidence;
+    HWASpeechTemporal temporal;
+    SpeechTemporalRegion *regions;
+    size_t region_count;
+    size_t region_capacity;
 } SpeechReport;
 
 static const HWAWavReader *speech_reader(const SpeechReport *report, size_t side)
@@ -110,6 +145,40 @@ static int speech_time_order(const void *left, const void *right)
     return (*first)->index < (*second)->index ? -1 : ((*first)->index != (*second)->index);
 }
 
+static int speech_context_order(const void *left, const void *right)
+{
+    const SpeechRow *const *first = left;
+    const SpeechRow *const *second = right;
+    const SpeechRow *a = *first;
+    const SpeechRow *b = *second;
+    const HwaPairedSampleSpan *a_span = &a->phone->reference;
+    const HwaPairedSampleSpan *b_span = &b->phone->reference;
+    int order = strcmp(a->word, b->word);
+
+    if (order != 0) return order;
+    if (a_span->start_sample != b_span->start_sample) return a_span->start_sample < b_span->start_sample ? -1 : 1;
+    if (a_span->end_sample != b_span->end_sample) return a_span->end_sample > b_span->end_sample ? -1 : 1;
+    return (a->kind != SPEECH_WORD) - (b->kind != SPEECH_WORD);
+}
+
+static void speech_word_context(SpeechReport *report)
+{
+    const SpeechRow *word = NULL;
+    size_t index;
+
+    qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_context_order);
+    for (index = 0U; index < report->spans.count; ++index) {
+        SpeechRow *row = report->ordered[index];
+        const HwaPairedSampleSpan *span = &row->phone->reference;
+        if (word != NULL && strcmp(word->word, row->word) != 0) word = NULL;
+        if (row->kind == SPEECH_WORD &&
+            (word == NULL || span->end_sample > word->phone->reference.end_sample)) word = row;
+        if (word != NULL && span->end_sample <= word->phone->reference.end_sample) {
+            row->word_context = &word->phone->reference;
+        }
+    }
+}
+
 static int speech_id_order(const void *left, const void *right)
 {
     const SpeechRow *const *first = left;
@@ -130,6 +199,36 @@ static const SpeechRow *speech_find_row(const SpeechReport *report, const char *
     return NULL;
 }
 
+static int speech_shared_label(SpeechRow *row, const char *kind, char *error, size_t error_size)
+{
+    if (kind == NULL) {
+        row->kind = row->phone_label == NULL ? SPEECH_WORD : SPEECH_PHONE;
+    } else if (strcmp(kind, "word") == 0) {
+        row->kind = SPEECH_WORD;
+    } else if (strcmp(kind, "boundary") == 0) {
+        row->kind = SPEECH_BOUNDARY;
+        row->boundary_label = speech_label(row->phone, "boundary");
+        if (row->boundary_label == NULL) row->boundary_label = row->phone_label;
+        row->phone_label = NULL;
+        if (row->boundary_label == NULL) {
+            hwa_set_error(error, error_size, "speech boundary '%s' needs a phone or boundary label",
+                          row->phone->id);
+            return -1;
+        }
+    } else if (strcmp(kind, "phone") == 0 || strcmp(kind, "vowel") == 0 ||
+               strcmp(kind, "consonant") == 0) {
+        row->kind = SPEECH_PHONE;
+        if (row->phone_label == NULL) {
+            hwa_set_error(error, error_size, "speech span '%s' needs a phone label", row->phone->id);
+            return -1;
+        }
+    } else {
+        hwa_set_error(error, error_size, "unknown speech span kind '%s' in '%s'", kind, row->phone->id);
+        return -1;
+    }
+    return 0;
+}
+
 static int speech_load_labels(SpeechReport *report, char *error, size_t error_size)
 {
     size_t index;
@@ -148,6 +247,14 @@ static int speech_load_labels(SpeechReport *report, char *error, size_t error_si
         row->confidence = phone->confidence_valid ? phone->confidence : NAN;
         row->status = phone->skip_reason;
         report->ordered[index] = row;
+        if (report->spans.shared_timing) {
+            if (row->word == NULL) {
+                hwa_set_error(error, error_size, "speech span '%s' needs a word label", phone->id);
+                return -1;
+            }
+            if (speech_shared_label(row, kind, error, error_size) != 0) return -1;
+            continue;
+        }
         if (row->word == NULL || row->phone_label == NULL || kind == NULL ||
             (strcmp(kind, "vowel") != 0 && strcmp(kind, "consonant") != 0)) {
             hwa_set_error(error, error_size, "speech span '%s' needs word, phone and vowel/consonant kind",
@@ -165,10 +272,14 @@ static int speech_load_labels(SpeechReport *report, char *error, size_t error_si
             row->release = edge == NULL || strcmp(edge, "end") == 0;
         }
     }
-    qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_time_order);
-    for (index = 1U; index < report->spans.count &&
-         report->ordered[index]->phone->reference.valid; ++index) {
-        report->ordered[index - 1U]->next_phone = report->ordered[index];
+    if (report->spans.shared_timing) {
+        speech_word_context(report);
+    } else {
+        qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_time_order);
+        for (index = 1U; index < report->spans.count &&
+             report->ordered[index]->phone->reference.valid; ++index) {
+            report->ordered[index - 1U]->next_phone = report->ordered[index];
+        }
     }
     qsort(report->ordered, report->spans.count, sizeof(*report->ordered), speech_id_order);
     for (index = 1U; index < report->spans.count; ++index) {
@@ -711,11 +822,217 @@ static int speech_rank_order(const void *left, const void *right)
     return (*first)->index < (*second)->index ? -1 : ((*first)->index != (*second)->index);
 }
 
-static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechReport *report,
-                                SpeechRow *row, char *error, size_t error_size)
+static const char *const temporal_metric_names[TEMPORAL_METRIC_COUNT] = {
+    "level_db", "log_spectral_change_db", "log_spectral_acceleration_db"
+};
+
+static double speech_temporal_difference(SpeechTemporalValue value)
 {
-    uint64_t start = row->phone->reference.start_sample;
-    uint64_t end = row->phone->reference.end_sample;
+    return value.candidate - value.reference;
+}
+
+static double speech_temporal_strength(SpeechTemporalValue value)
+{
+    return value.present ? fabs(speech_temporal_difference(value)) : -1.0;
+}
+
+static void speech_temporal_observe(SpeechTemporalSummary *summary, const HWASpeechTemporalFrame *frame,
+                                    uint64_t center)
+{
+    const double *const values[TEMPORAL_METRIC_COUNT] = {
+        frame->level, frame->spectral_change, frame->spectral_acceleration
+    };
+    size_t metric;
+
+    ++summary->cells;
+    for (metric = 0U; metric < TEMPORAL_METRIC_COUNT; ++metric) {
+        SpeechTemporalValue value = {
+            .reference = values[metric][SPEECH_REFERENCE],
+            .candidate = values[metric][SPEECH_CANDIDATE],
+            .sample = center
+        };
+        value.present = isfinite(value.reference) && isfinite(value.candidate);
+        if (speech_temporal_strength(value) > speech_temporal_strength(summary->peak[metric])) {
+            summary->peak[metric] = value;
+        }
+    }
+}
+
+static int speech_temporal_append(SpeechReport *report, SpeechTemporalRegion region,
+                                   char *error, size_t error_size)
+{
+    if (report->region_count == report->region_capacity) {
+        size_t limit = SIZE_MAX / sizeof(*report->regions);
+        size_t grow = report->region_capacity ? report->region_capacity : 16U;
+        uint64_t affordable = report->work.available_bytes / sizeof(*report->regions);
+        SpeechTemporalRegion *regions;
+
+        if (grow > limit - report->region_capacity) grow = limit - report->region_capacity;
+        if ((uint64_t)grow > affordable) grow = (size_t)affordable;
+        if (grow == 0U) {
+            hwa_set_error(error, error_size, "temporal regions exceed the work limit");
+            return -1;
+        }
+        regions = realloc(report->regions, (report->region_capacity + grow) * sizeof(*regions));
+        if (regions == NULL) {
+            hwa_set_error(error, error_size, "cannot allocate temporal regions");
+            return -1;
+        }
+        report->regions = regions;
+        report->region_capacity += grow;
+        report->work.available_bytes -= (uint64_t)grow * sizeof(*regions);
+    }
+    report->regions[report->region_count++] = region;
+    return 0;
+}
+
+static enum TemporalMetric speech_temporal_spectral_metric(const SpeechTemporalSummary *summary)
+{
+    return speech_temporal_strength(summary->peak[TEMPORAL_SPECTRAL_CHANGE]) >=
+           speech_temporal_strength(summary->peak[TEMPORAL_SPECTRAL_ACCELERATION])
+        ? TEMPORAL_SPECTRAL_CHANGE : TEMPORAL_SPECTRAL_ACCELERATION;
+}
+
+static int speech_temporal_record(SpeechReport *report, const SpeechRow *row, HwaPairedSampleSpan bounds,
+                                  const SpeechTemporalSummary *run, size_t family,
+                                  char *error, size_t error_size)
+{
+    enum TemporalMetric metric = family == 0U ? TEMPORAL_LEVEL : speech_temporal_spectral_metric(run);
+    double threshold = family == 0U ? SPEECH_TEMPORAL_LEVEL_DB : SPEECH_TEMPORAL_SPECTRAL_DB;
+    SpeechTemporalRegion region = {
+        .label = row, .bounds = bounds,
+        .context = row->word_context != NULL ? *row->word_context : row->phone->reference,
+        .metric = metric, .peak = run->peak[metric]
+    };
+
+    if (speech_temporal_strength(region.peak) < threshold) return 0;
+    return speech_temporal_append(report, region, error, error_size);
+}
+
+static int speech_temporal_order(const void *left, const void *right)
+{
+    const SpeechTemporalRegion *a = left;
+    const SpeechTemporalRegion *b = right;
+    int a_level = a->metric == TEMPORAL_LEVEL;
+    int b_level = b->metric == TEMPORAL_LEVEL;
+    double a_strength = speech_temporal_strength(a->peak);
+    double b_strength = speech_temporal_strength(b->peak);
+
+    int word_order;
+
+    if (a_level != b_level) return a_level ? -1 : 1;
+    if (a_strength != b_strength) return a_strength > b_strength ? -1 : 1;
+    if (a->peak.sample != b->peak.sample) return a->peak.sample < b->peak.sample ? -1 : 1;
+    if (a->metric != b->metric) return a->metric < b->metric ? -1 : 1;
+    word_order = strcmp(a->label->word, b->label->word);
+    if (word_order != 0) return word_order;
+    if (a->label->kind != b->label->kind) return a->label->kind > b->label->kind ? -1 : 1;
+    if (a->bounds.start_sample != b->bounds.start_sample) {
+        return a->bounds.start_sample < b->bounds.start_sample ? -1 : 1;
+    }
+    if (a->bounds.end_sample != b->bounds.end_sample) return a->bounds.end_sample < b->bounds.end_sample ? -1 : 1;
+    return a->label->index < b->label->index ? -1 : (a->label->index != b->label->index);
+}
+
+static void speech_temporal_rank(SpeechReport *report)
+{
+    size_t index, kept = 0U;
+    size_t ranks[2] = {0};
+
+    if (report->region_count == 0U) return;
+    qsort(report->regions, report->region_count, sizeof(*report->regions), speech_temporal_order);
+    for (index = 0U; index < report->region_count; ++index) {
+        SpeechTemporalRegion *region = &report->regions[index];
+        SpeechTemporalRegion *previous = kept > 0U ? &report->regions[kept - 1U] : NULL;
+        size_t group = region->metric == TEMPORAL_LEVEL ? 0U : 1U;
+
+        if (previous != NULL && region->metric == previous->metric &&
+            region->peak.sample == previous->peak.sample &&
+            strcmp(region->label->word, previous->label->word) == 0) {
+            /* Prefer specific labels, and use all enclosing context for playback. */
+            if (region->context.start_sample < previous->context.start_sample) {
+                previous->context.start_sample = region->context.start_sample;
+            }
+            if (region->context.end_sample > previous->context.end_sample) {
+                previous->context.end_sample = region->context.end_sample;
+            }
+            continue;
+        }
+        region->rank = ++ranks[group];
+        report->regions[kept++] = *region;
+    }
+    report->region_count = kept;
+}
+
+static int speech_temporal_analyze(SpeechReport *report, size_t frame_limit, char *error, size_t error_size)
+{
+    size_t index;
+    HWASpeechTemporal *temporal = &report->temporal;
+
+    if (hwa_speech_temporal_measure(&report->spans.reference, &report->spans.target,
+            report->levels[SPEECH_REFERENCE].rms, report->levels[SPEECH_CANDIDATE].rms,
+            &report->work, temporal, error, error_size) != 0) return -1;
+    report->work.available_bytes -= temporal->retained_bytes;
+    for (index = 0U; index < report->spans.count; ++index) {
+        SpeechRow *row = &report->rows[index];
+        HwaPairedSampleSpan label = row->phone->reference;
+        HwaPairedSampleSpan bounds[2] = {{.present = 1, .valid = 1}, {.present = 1, .valid = 1}};
+        SpeechTemporalSummary runs[2] = {0};
+        size_t first = (size_t)(label.start_sample / temporal->hop_samples);
+        size_t last = (size_t)((label.end_sample - 1U) / temporal->hop_samples);
+        size_t point;
+
+        if (row->status != NULL) continue;
+        if (last - first + 1U > frame_limit) {
+            hwa_set_error(error, error_size, "speech annotations exceed the temporal track point limit");
+            return -1;
+        }
+        frame_limit -= last - first + 1U;
+        for (point = first; point <= last; ++point) {
+            const HWASpeechTemporalFrame *frame = &temporal->frames[point];
+            uint64_t center = frame->start_sample + (frame->end_sample - frame->start_sample) / 2U;
+            uint64_t start = frame->start_sample > label.start_sample ? frame->start_sample : label.start_sample;
+            uint64_t end = frame->end_sample < label.end_sample ? frame->end_sample : label.end_sample;
+            double motion = fabs(frame->spectral_change[1] - frame->spectral_change[0]);
+            double acceleration = fabs(frame->spectral_acceleration[1] - frame->spectral_acceleration[0]);
+            int inside = center >= label.start_sample && center < label.end_sample;
+            int edited = inside && frame->edited;
+            int supported[2] = {
+                edited && fabs(frame->level[1] - frame->level[0]) >= SPEECH_TEMPORAL_SUPPORT_DB,
+                edited && fmax(frame->spectral_distance, fmax(motion, acceleration)) >= SPEECH_TEMPORAL_SUPPORT_DB
+            };
+            size_t family;
+
+            if (inside) speech_temporal_observe(&row->measure.temporal, frame, center);
+            for (family = 0U; family < 2U; ++family) {
+                SpeechTemporalSummary *run = &runs[family];
+                HwaPairedSampleSpan *range = &bounds[family];
+
+                if (supported[family]) {
+                    if (run->cells == 0U) range->start_sample = start;
+                    range->end_sample = end;
+                    speech_temporal_observe(run, frame, center);
+                }
+                if (run->cells > 0U && (!supported[family] || point == last)) {
+                    if (speech_temporal_record(report, row, *range, run, family, error, error_size) != 0)
+                        return -1;
+                    memset(run, 0, sizeof(*run));
+                }
+            }
+        }
+    }
+    speech_temporal_rank(report);
+    free(temporal->frames);
+    temporal->frames = NULL;
+    report->work.available_bytes += temporal->retained_bytes;
+    temporal->retained_bytes = 0U;
+    return 0;
+}
+
+static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechReport *report,
+                                uint64_t start, uint64_t end, const char *prefix, size_t number,
+                                SpeechExcerpt *result, char *error, size_t error_size)
+{
     uint64_t pad = speech_padding(report, SPEECH_CONTEXT_MS);
     uint64_t frames = report->spans.reference.format.frames;
     HWASpeechAudioLevel level[SPEECH_SIDE_COUNT];
@@ -723,11 +1040,6 @@ static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechRepo
     double rms;
     size_t side;
 
-    if (row->kind == SPEECH_CONSONANT) {
-        HwaPairedSampleSpan transition = row->transition[SPEECH_REFERENCE];
-        if (start > transition.start_sample) start = transition.start_sample;
-        if (end < transition.end_sample) end = transition.end_sample;
-    }
     {
         uint64_t padded_start = speech_lower(start, pad);
         uint64_t padded_end = speech_upper(end, pad, frames);
@@ -759,11 +1071,11 @@ static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechRepo
             }
         }
     }
-    row->excerpt.bounds[SPEECH_REFERENCE] = excerpt.reference;
-    row->excerpt.bounds[SPEECH_CANDIDATE] = excerpt.target;
+    result->bounds[SPEECH_REFERENCE] = excerpt.reference;
+    result->bounds[SPEECH_CANDIDATE] = excerpt.target;
 
     for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
-        if (hwa_speech_audio_level(speech_reader(report, side), row->excerpt.bounds[side],
+        if (hwa_speech_audio_level(speech_reader(report, side), result->bounds[side],
                                    &report->work, &level[side], error, error_size) != 0) return -1;
     }
     rms = SPEECH_EXCERPT_RMS;
@@ -774,7 +1086,7 @@ static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechRepo
     for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
         size_t length = strlen(options->excerpt_dir) + 64U;
         char *path;
-        HWAFileOutput *output = &row->excerpt.output[side];
+        HWAFileOutput *output = &result->output[side];
         const char *name = side == SPEECH_REFERENCE ? "reference" : "candidate";
         int opened;
 
@@ -788,19 +1100,34 @@ static int speech_make_excerpt(const HWASpeechReportOptions *options, SpeechRepo
             hwa_set_error(error, error_size, "cannot allocate speech excerpt path");
             return -1;
         }
-        (void)snprintf(path, length, "%s/span-%zu-%s.wav", options->excerpt_dir, row->index + 1U, name);
+        (void)snprintf(path, length, "%s/%s-%zu-%s.wav", options->excerpt_dir, prefix, number, name);
         opened = hwa_file_output_open(output, path, report->protected_paths, report->protected_count,
                                       0, error, error_size);
         free(path);
         if (opened != 0) return -1;
         report->work.available_bytes -= length;
-        row->excerpt.gain[side] = rms / level[side].rms;
+        result->gain[side] = rms / level[side].rms;
         if (hwa_speech_audio_write(hwa_file_output_stream(output), speech_reader(report, side),
-                row->excerpt.bounds[side], row->excerpt.gain[side], &report->work,
+                result->bounds[side], result->gain[side], &report->work,
                 error, error_size) != 0 ||
             hwa_file_output_seal_new(output, "speech excerpt", error, error_size) != 0) return -1;
     }
     return 0;
+}
+
+static int speech_export_row(const HWASpeechReportOptions *options, SpeechReport *report,
+                             SpeechRow *row, char *error, size_t error_size)
+{
+    uint64_t start = row->phone->reference.start_sample;
+    uint64_t end = row->phone->reference.end_sample;
+
+    if (row->kind == SPEECH_CONSONANT) {
+        HwaPairedSampleSpan transition = row->transition[SPEECH_REFERENCE];
+        if (start > transition.start_sample) start = transition.start_sample;
+        if (end < transition.end_sample) end = transition.end_sample;
+    }
+    return speech_make_excerpt(options, report, start, end, "span", row->index + 1U,
+                                &row->excerpt, error, error_size);
 }
 
 static int speech_string(FILE *stream, const char *key, const char *value)
@@ -886,11 +1213,9 @@ static int speech_contrast_json(FILE *stream, const char *key, const HWASpeechCo
         fputc('}', stream) == EOF ? -1 : 0;
 }
 
-static int speech_excerpt_json(FILE *stream, const SpeechRow *row, unsigned reference_rate,
+static int speech_excerpt_json(FILE *stream, const SpeechExcerpt *excerpt, unsigned reference_rate,
                                 unsigned candidate_rate)
 {
-    const SpeechExcerpt *excerpt = &row->excerpt;
-
     if (excerpt->output[SPEECH_CANDIDATE].path == NULL) {
         return fputs("\"excerpt\":null", stream) == EOF ? -1 : 0;
     }
@@ -923,7 +1248,7 @@ static int speech_row_json(FILE *stream, const SpeechRow *row, unsigned referenc
         speech_bounds(stream, "reference_span", row->phone->reference, reference_rate) != 0 ||
         fputc(',', stream) == EOF ||
         speech_bounds(stream, "candidate_span", row->phone->target, candidate_rate) != 0 ||
-        fputc(',', stream) == EOF || speech_excerpt_json(stream, row, reference_rate, candidate_rate) != 0 ||
+        fputc(',', stream) == EOF || speech_excerpt_json(stream, &row->excerpt, reference_rate, candidate_rate) != 0 ||
         fputc(',', stream) == EOF) return -1;
 
     if (row->kind == SPEECH_VOWEL) {
@@ -980,6 +1305,98 @@ static int speech_row_json(FILE *stream, const SpeechRow *row, unsigned referenc
         fputs("}}", stream) == EOF ? -1 : 0;
 }
 
+static int speech_temporal_label_json(FILE *stream, const SpeechRow *row)
+{
+    return speech_string(stream, "id", row->phone->id) != 0 ||
+        fputc(',', stream) == EOF || speech_string(stream, "word", row->word) != 0 ||
+        fputc(',', stream) == EOF || speech_string(stream, "phone", row->phone_label) != 0 ||
+        fputc(',', stream) == EOF || speech_string(stream, "boundary", row->boundary_label) != 0 ||
+        fputc(',', stream) == EOF || speech_number(stream, "annotation_confidence", row->confidence) != 0
+        ? -1 : 0;
+}
+
+static int speech_temporal_value_json(FILE *stream, SpeechTemporalValue value, unsigned rate)
+{
+    if (!value.present) return fputs("null", stream) == EOF ? -1 : 0;
+    return fprintf(stream, "{\"reference\":%.17g,\"candidate\":%.17g,\"difference\":%.17g"
+                   ",\"peak_sample\":%" PRIu64 ",\"peak_seconds\":%.17g}",
+                   value.reference, value.candidate, speech_temporal_difference(value),
+                   value.sample, (double)value.sample / rate) < 0 ? -1 : 0;
+}
+
+static int speech_temporal_region_json(FILE *stream, const SpeechTemporalRegion *region, unsigned rate)
+{
+    SpeechTemporalValue peak = region->peak;
+    double duration_ms = 1000.0 * (double)(region->bounds.end_sample - region->bounds.start_sample) / rate;
+
+    return fputc('{', stream) == EOF || speech_temporal_label_json(stream, region->label) != 0 ||
+        fprintf(stream, ",\"rank\":%zu,\"duration_ms\":%.17g,", region->rank, duration_ms) < 0 ||
+        speech_string(stream, "metric", temporal_metric_names[region->metric]) != 0 ||
+        fputc(',', stream) == EOF || speech_bounds(stream, "reference_span", region->bounds, rate) != 0 ||
+        fputc(',', stream) == EOF || speech_bounds(stream, "candidate_span", region->bounds, rate) != 0 ||
+        fprintf(stream, ",\"reference\":%.17g,\"candidate\":%.17g,\"difference\":%.17g"
+                ",\"peak_sample\":%" PRIu64 ",\"peak_seconds\":%.17g,",
+                peak.reference, peak.candidate, speech_temporal_difference(peak),
+                peak.sample, (double)peak.sample / rate) < 0 ||
+        speech_excerpt_json(stream, &region->excerpt, rate, rate) != 0 ||
+        fputc('}', stream) == EOF ? -1 : 0;
+}
+
+static int speech_temporal_span_json(FILE *stream, const SpeechRow *row, unsigned rate)
+{
+    const SpeechTemporalSummary *summary = &row->measure.temporal;
+    size_t metric;
+
+    if (fputc('{', stream) == EOF || speech_temporal_label_json(stream, row) != 0 ||
+        fputc(',', stream) == EOF ||
+        speech_string(stream, "status", row->status != NULL ? row->status :
+                      (summary->cells > 0U ? "ok" : "insufficient-temporal-support")) != 0 ||
+        fputc(',', stream) == EOF || speech_bounds(stream, "reference_span", row->phone->reference, rate) != 0 ||
+        fputc(',', stream) == EOF || speech_bounds(stream, "candidate_span", row->phone->target, rate) != 0 ||
+        fprintf(stream, ",\"cells\":%zu,\"measurements\":{", summary->cells) < 0) return -1;
+    for (metric = 0U; metric < TEMPORAL_METRIC_COUNT; ++metric) {
+        if ((metric != 0U && fputc(',', stream) == EOF) ||
+            fprintf(stream, "\"%s\":", temporal_metric_names[metric]) < 0 ||
+            speech_temporal_value_json(stream, summary->peak[metric], rate) != 0) return -1;
+    }
+    return fputs("}}", stream) == EOF ? -1 : 0;
+}
+
+static int speech_temporal_json(FILE *stream, const SpeechReport *report, unsigned rate)
+{
+    const HWASpeechTemporal *series = &report->temporal;
+    size_t index = 0U, group;
+    const char *const groups[] = {"level", "spectral"};
+
+    if (!report->spans.shared_timing) {
+        return fputs(",\"temporal\":{\"status\":\"requires-shared-timing\"}", stream) == EOF ? -1 : 0;
+    }
+    if (fprintf(stream, ",\"temporal\":{\"status\":\"ok\",\"window_samples\":%zu,\"hop_samples\":%zu"
+                ",\"window_ms\":%.17g,\"hop_ms\":%.17g"
+                ",\"min_level_change_db\":%.17g,\"min_spectral_change_db\":%.17g"
+                ",\"min_region_support_db\":%.17g",
+                series->window_samples, series->hop_samples, 1000.0 * (double)series->window_samples / rate,
+                1000.0 * (double)series->hop_samples / rate,
+                SPEECH_TEMPORAL_LEVEL_DB, SPEECH_TEMPORAL_SPECTRAL_DB, SPEECH_TEMPORAL_SUPPORT_DB) < 0) return -1;
+    for (group = 0U; group < sizeof(groups) / sizeof(*groups); ++group) {
+        size_t first = index;
+        if (fprintf(stream, ",\"%s\":[", groups[group]) < 0) return -1;
+        while (index < report->region_count &&
+               (report->regions[index].metric == TEMPORAL_LEVEL ? 0U : 1U) == group) {
+            if ((index != first && fputc(',', stream) == EOF) ||
+                speech_temporal_region_json(stream, &report->regions[index], rate) != 0) return -1;
+            ++index;
+        }
+        if (fputc(']', stream) == EOF) return -1;
+    }
+    if (fputs(",\"spans\":[", stream) == EOF) return -1;
+    for (index = 0U; index < report->spans.count; ++index) {
+        if ((index != 0U && fputc(',', stream) == EOF) ||
+            speech_temporal_span_json(stream, &report->rows[index], rate) != 0) return -1;
+    }
+    return fputs("]}", stream) == EOF ? -1 : 0;
+}
+
 static int speech_write(FILE *stream, const HWASpeechReportOptions *options, const SpeechReport *report)
 {
     double ref_rms = report->levels[SPEECH_REFERENCE].rms;
@@ -992,16 +1409,19 @@ static int speech_write(FILE *stream, const HWASpeechReportOptions *options, con
     size_t kind, index = 0U;
 
     if (fputs("{\"format\":\"hwa-speech-span-comparison\",\"schema_version\":1,", stream) == EOF ||
-        speech_string(stream, "reference_path", options->reference_path) != 0 ||
+        speech_string(stream, "timing_mode", options->shared_timing ? "shared" : "alignment") != 0 ||
+        fputc(',', stream) == EOF || speech_string(stream, "reference_path", options->reference_path) != 0 ||
         fputc(',', stream) == EOF || speech_string(stream, "candidate_path", options->candidate_path) != 0 ||
         fputc(',', stream) == EOF || speech_string(stream, "reference_sha256", report->spans.reference_sha256) != 0 ||
         fputc(',', stream) == EOF || speech_string(stream, "candidate_sha256", report->spans.target_sha256) != 0 ||
         fputc(',', stream) == EOF || speech_string(stream, "spans_sha256", report->spans.notes_sha256) != 0 ||
-        fputc(',', stream) == EOF || speech_string(stream, "alignment_sha256", report->spans.alignment_sha256) != 0 ||
+        fputc(',', stream) == EOF || speech_string(stream, "alignment_sha256", options->shared_timing ? NULL : report->spans.alignment_sha256) != 0 ||
         fputc(',', stream) == EOF ||
-        speech_string(stream, "alignment_reference_sha256", report->spans.alignment_reference_sha256) != 0 ||
+        speech_string(stream, "alignment_reference_sha256",
+                      options->shared_timing ? NULL : report->spans.alignment_reference_sha256) != 0 ||
         fputc(',', stream) == EOF ||
-        speech_string(stream, "alignment_candidate_sha256", report->spans.alignment_target_sha256) != 0 ||
+        speech_string(stream, "alignment_candidate_sha256",
+                      options->shared_timing ? NULL : report->spans.alignment_target_sha256) != 0 ||
         fprintf(stream, ",\"reference_sample_rate_hz\":%u,\"candidate_sample_rate_hz\":%u"
                 ",\"min_pair_confidence\":%.17g,\"min_change_db\":%.17g,\"buzz_level_floor_db\":%.17g"
                 ",\"work\":{\"decoded_frames\":%" PRIu64 ",\"transforms\":%" PRIu64 "},\"levels\":{",
@@ -1015,14 +1435,25 @@ static int speech_write(FILE *stream, const HWASpeechReportOptions *options, con
     for (kind = 0U; kind < sizeof(arrays) / sizeof(*arrays); ++kind) {
         size_t start = index;
         if (fprintf(stream, ",\"%s\":[", arrays[kind]) < 0) return -1;
-        while (index < report->spans.count && (size_t)report->ordered[index]->kind == kind) {
+        while (!options->shared_timing && index < report->spans.count &&
+               (size_t)report->ordered[index]->kind == kind) {
             if ((index != start && fputc(',', stream) == EOF) ||
                 speech_row_json(stream, report->ordered[index], ref_rate, cand_rate) != 0) return -1;
             ++index;
         }
         if (fputc(']', stream) == EOF) return -1;
     }
+    if (speech_temporal_json(stream, report, ref_rate) != 0) return -1;
     return fputs("}\n", stream) == EOF ? -1 : 0;
+}
+
+static void speech_finish_excerpt(SpeechExcerpt *excerpt, int success)
+{
+    size_t side;
+    for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
+        if (success) hwa_file_output_keep_sealed(&excerpt->output[side]);
+        else (void)hwa_file_output_abort(&excerpt->output[side]);
+    }
 }
 
 int hwa_speech_span_report(const HWASpeechReportOptions *options,
@@ -1049,7 +1480,12 @@ int hwa_speech_span_report(const HWASpeechReportOptions *options,
             return -1;
         }
     }
-    if (hwa_paired_spans_open(options->reference_path, options->candidate_path, options->alignment_path,
+    if (options->shared_timing) {
+        if (hwa_paired_spans_open_shared(options->reference_path, options->candidate_path,
+                options->spans_path, limits, options->min_confidence, &report.spans, error, error_size) != 0) {
+            return -1;
+        }
+    } else if (hwa_paired_spans_open(options->reference_path, options->candidate_path, options->alignment_path,
             options->alignment_reference_path, options->alignment_candidate_path, options->spans_path,
             NULL, 0, 1, limits, 1.0, options->min_confidence, &report.spans, error, error_size) != 0) {
         return -1;
@@ -1076,7 +1512,9 @@ int hwa_speech_span_report(const HWASpeechReportOptions *options,
     if (speech_load_labels(&report, error, error_size) != 0) goto done;
     report.protected_paths[report.protected_count++] = options->reference_path;
     report.protected_paths[report.protected_count++] = options->candidate_path;
-    report.protected_paths[report.protected_count++] = options->alignment_path;
+    if (options->alignment_path != NULL) {
+        report.protected_paths[report.protected_count++] = options->alignment_path;
+    }
     report.protected_paths[report.protected_count++] = options->spans_path;
     if (options->alignment_reference_path != NULL) {
         report.protected_paths[report.protected_count++] = options->alignment_reference_path;
@@ -1090,21 +1528,36 @@ int hwa_speech_span_report(const HWASpeechReportOptions *options,
         if (span.end_sample != 0U && hwa_speech_audio_level(reader, span, &report.work,
                 &report.levels[side], error, error_size) != 0) goto done;
     }
-    for (index = 0U; index < report.spans.count; ++index) {
-        SpeechRow *row = &report.rows[index];
-        if (row->kind == SPEECH_CONSONANT) {
-            if (speech_measure_consonant(&report, row, error, error_size) != 0) goto done;
-        } else if (row->status == NULL && speech_measure_buzz(&report, row, error, error_size) != 0) goto done;
+    if (options->shared_timing) {
+        if (speech_temporal_analyze(&report, limits->max_track_points, error, error_size) != 0) goto done;
+    } else {
+        for (index = 0U; index < report.spans.count; ++index) {
+            SpeechRow *row = &report.rows[index];
+            if (row->kind == SPEECH_CONSONANT) {
+                if (speech_measure_consonant(&report, row, error, error_size) != 0) goto done;
+            } else if (row->status == NULL &&
+                       speech_measure_buzz(&report, row, error, error_size) != 0) goto done;
+        }
+        qsort(report.ordered, report.spans.count, sizeof(*report.ordered), speech_rank_order);
     }
-    qsort(report.ordered, report.spans.count, sizeof(*report.ordered), speech_rank_order);
     if (hwa_file_output_open(&output, options->output_path, report.protected_paths, report.protected_count,
                              options->replace, error, error_size) != 0) goto done;
-    for (index = 0U; index < report.spans.count; ++index) {
-        SpeechRow *row = report.ordered[index];
-        if (strcmp(row->status, "finding") != 0) continue;
-        row->rank = ++ranks[row->kind];
-        if (options->excerpt_dir != NULL &&
-            speech_make_excerpt(options, &report, row, error, error_size) != 0) goto done;
+    if (options->shared_timing) {
+        for (index = 0U; options->excerpt_dir != NULL && index < report.region_count; ++index) {
+            SpeechTemporalRegion *region = &report.regions[index];
+            const char *prefix = region->metric == TEMPORAL_LEVEL ? "level" : "spectral";
+            if (speech_make_excerpt(options, &report, region->context.start_sample,
+                    region->context.end_sample, prefix, region->rank, &region->excerpt,
+                    error, error_size) != 0) goto done;
+        }
+    } else {
+        for (index = 0U; index < report.spans.count; ++index) {
+            SpeechRow *row = report.ordered[index];
+            if (strcmp(row->status, "finding") != 0) continue;
+            row->rank = ++ranks[row->kind];
+            if (options->excerpt_dir != NULL &&
+                speech_export_row(options, &report, row, error, error_size) != 0) goto done;
+        }
     }
     if (hwa_c_numeric_locale_begin(&locale) != 0) {
         hwa_set_error(error, error_size, "cannot set speech report numeric locale");
@@ -1120,15 +1573,16 @@ int hwa_speech_span_report(const HWASpeechReportOptions *options,
     status = hwa_file_output_finish(&output, "speech report", error, error_size);
 done:
     if (status != 0) (void)hwa_file_output_abort(&output);
+    for (index = 0U; index < report.region_count; ++index) {
+        speech_finish_excerpt(&report.regions[index].excerpt, status == 0);
+    }
     if (report.rows != NULL) {
         for (index = 0U; index < report.spans.count; ++index) {
-            for (side = 0U; side < SPEECH_SIDE_COUNT; ++side) {
-                HWAFileOutput *excerpt = &report.rows[index].excerpt.output[side];
-                if (status == 0) hwa_file_output_keep_sealed(excerpt);
-                else (void)hwa_file_output_abort(excerpt);
-            }
+            speech_finish_excerpt(&report.rows[index].excerpt, status == 0);
         }
     }
+    free(report.regions);
+    hwa_speech_temporal_free(&report.temporal);
     free(report.ordered);
     free(report.rows);
     hwa_paired_spans_close(&report.spans);

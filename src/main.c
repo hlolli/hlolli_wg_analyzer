@@ -106,6 +106,7 @@ typedef struct HWACli {
     int paired_mapping_option_set;
     const char *speech_spans_path;
     const char *speech_excerpt_dir;
+    int speech_shared_timing;
     int musicxml_option_set;
     uint64_t event_score_source_id;
     unsigned event_score_option_set;
@@ -190,7 +191,7 @@ static void hwa_print_usage(FILE *stream)
         "  hlolli-wg-analyzer compare-note-spectra REFERENCE.wav TARGET.wav "
         "--alignment MAP.hwa-align (--notes NOTES.csv|--score-alignment SCORE.hwa-align)\n"
         "  hlolli-wg-analyzer compare-speech-spans REFERENCE.wav CANDIDATE.wav "
-        "--alignment MAP.hwa-align --spans PHONES.csv [--excerpt-dir DIRECTORY]\n"
+        "(--alignment MAP.hwa-align|--shared-timing) --spans SPANS.csv [--excerpt-dir DIRECTORY]\n"
         "  hlolli-wg-analyzer [OPTIONS] segment --alignment ALIGN.hwa-align "
         "AUDIO.wav --output FILE.hwa-items\n"
         "  hlolli-wg-analyzer [OPTIONS] measure --items ITEMS.hwa-items "
@@ -263,6 +264,7 @@ static void hwa_print_usage(FILE *stream)
         "  --source-id N               Source recording ID; may be omitted for one source.\n"
         "  --tempo-bpm N               Explicit quarter-note tempo (10..1000); no tempo inference.\n"
         "  --alignment PATH            Use a saved alignment for the command.\n"
+        "  --shared-timing              Compare speech renders on the same sample clock.\n"
         "  --labels PATH               Add typed event labels while segmenting.\n"
         "  --amend PATH                Apply locked anchors or item edits.\n"
         "  --items PATH                Measure one canonical item file.\n"
@@ -1790,6 +1792,9 @@ static int hwa_parse_cli(int argc, char **argv, HWACli *cli)
                 (void)fputs("hlolli-wg-analyzer: --deconv expects true or false\n", stderr);
                 return -1;
             }
+        } else if (!end_options && strcmp(current, "--shared-timing") == 0) {
+            if (cli->speech_shared_timing) return -1;
+            cli->speech_shared_timing = 1;
         } else if (!end_options && strcmp(current, "--replace") == 0) {
             cli->replace = 1;
         } else if (!end_options && strcmp(current, "--allow-run") == 0) {
@@ -4618,13 +4623,17 @@ static int hwa_run_speech_spans(const HWACli *cli)
 {
     char error[HWA_ERROR_SIZE] = {0};
 
-    if (cli->positional_count != 3U || cli->alignment_path == NULL ||
+    if (cli->positional_count != 3U ||
+        (cli->alignment_path != NULL) == cli->speech_shared_timing ||
+        (cli->speech_shared_timing &&
+         (cli->paired_alignment_reference_path != NULL || cli->paired_alignment_target_path != NULL)) ||
         cli->speech_spans_path == NULL || cli->export_kind != 0 ||
         cli->score_path != NULL || cli->labels_path != NULL || cli->amend_path != NULL ||
         cli->items_path != NULL || cli->room_ir_path != NULL ||
         cli->physical_binding_count != 0U || cli->options.channel_mode != HWA_CHANNEL_KEEP ||
         cli->silence_option_set || cli->decode_block_option_set ||
-        cli->analysis_only_option_set || cli->max_track_points_option_set ||
+        cli->analysis_only_option_set ||
+        (!cli->speech_shared_timing && cli->max_track_points_option_set) ||
         cli->frame_size_option_set || cli->hop_size_option_set ||
         cli->alignment_option_set || cli->segmentation_option_set ||
         cli->measurement_option_set || cli->comparison_option_set ||
@@ -4640,6 +4649,7 @@ static int hwa_run_speech_spans(const HWACli *cli)
         .spans_path = cli->speech_spans_path,
         .output_path = cli->output_path != NULL ? cli->output_path : "-",
         .excerpt_dir = cli->speech_excerpt_dir,
+        .shared_timing = cli->speech_shared_timing,
         .min_confidence = cli->paired_spectrum_options.min_pair_confidence,
         .replace = cli->replace
     };
@@ -4687,7 +4697,8 @@ int main(int argc, char **argv)
                cli.paired_spectrum_option_set) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "compare-speech-spans") != 0 &&
-               (cli.speech_spans_path != NULL || cli.speech_excerpt_dir != NULL)) {
+               (cli.speech_spans_path != NULL || cli.speech_excerpt_dir != NULL ||
+                cli.speech_shared_timing)) {
         result = -1;
     } else if (strcmp(cli.positionals[0], "compare-speech-spans") != 0 &&
                strcmp(cli.positionals[0], "compare-note-spectra") != 0 &&

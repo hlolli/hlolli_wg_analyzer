@@ -178,6 +178,7 @@ add_executable(hlolli_wg_analyzer
   src/speech_contrast.c
   src/speech_span_audio.c
   src/speech_span_report.c
+  src/speech_temporal.c
 )
 target_link_libraries(hlolli_wg_analyzer PRIVATE hlolli_wg_analyzer_core)
 

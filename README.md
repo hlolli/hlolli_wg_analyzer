@@ -333,8 +333,8 @@ score columns and event kinds.
 
 Use `compare-speech-spans` with a saved alignment and word/phone labels to
 locate fixed tones, stronger harmonics, and consonants that lose contrast.
-The JSON gives timestamps in both WAVs. Add `--excerpt-dir` to save
-level-matched A/B audio. See [Aligned speech spans](docs/speech-spans.md).
+Use `--shared-timing` for renders on the same sample clock to locate local
+level and spectral changes. Add `--excerpt-dir` to save level-matched A/B audio. See [Aligned speech spans](docs/speech-spans.md).
 
 ### MusicXML score input
 

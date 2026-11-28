@@ -13,6 +13,7 @@ typedef struct HWASpeechReportOptions {
     const char *output_path;
     const char *excerpt_dir;
     double min_confidence;
+    int shared_timing;
     int replace;
 } HWASpeechReportOptions;
 
